@@ -33,6 +33,7 @@ import { PrivyAuthError, assertPrivyWalletOwnership, getPrivyWalletSummary, send
 import { isR2StorageConfigured, storagePut, storageRead } from "./storage";
 import {
   DEFAULT_SERA_API_BASE_URL,
+  DEFAULT_SERA_API_TESTNET_BASE_URL,
   callSeraApi,
   getSeraTokens,
   normalizeSeraBaseUrl,
@@ -44,6 +45,14 @@ export const paymentRouter = Router();
 
 const PUBLIC_STORAGE_PREFIXES = ["merchant-logos/", "menu-items/", "generated/"];
 const PENDING_TRANSACTION_CANCEL_AFTER_MS = 5 * 60 * 1000;
+const SERA_TESTNET_CHAIN_ID = sepolia.id;
+
+function getSeraApiBaseUrlForChain(chainId?: number | null): string {
+  const baseUrl = chainId === SERA_TESTNET_CHAIN_ID
+    ? ENV.seraApiTestnetBaseUrl || DEFAULT_SERA_API_TESTNET_BASE_URL
+    : ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL;
+  return normalizeSeraBaseUrl(baseUrl);
+}
 
 paymentRouter.get("/storage/objects/*", async (req, res) => {
   try {
@@ -960,6 +969,8 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     const receiveCoin = String(req.body.receiveCoin ?? "").trim().toUpperCase();
     const payAmount = normalizeDecimalAmount(req.body.payAmount);
     const requestedReceiveAmount = req.body.receiveAmount ? normalizeDecimalAmount(req.body.receiveAmount) : null;
+    const requestedChainId = Number(req.body.chainId ?? 1);
+    const chainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : 1;
     const paymentIntentId = typeof req.body.paymentIntentId === "string" ? req.body.paymentIntentId : null;
     const orderId = typeof req.body.orderId === "string" ? req.body.orderId : null;
 
@@ -981,7 +992,7 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       return;
     }
 
-    const baseUrl = normalizeSeraBaseUrl(ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL);
+    const baseUrl = getSeraApiBaseUrlForChain(chainId);
     const [fromToken, toToken, config] = await Promise.all([
       resolveSeraTokenBySymbol(baseUrl, payCoin),
       resolveSeraTokenBySymbol(baseUrl, receiveCoin),
@@ -1020,7 +1031,7 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       toAddress,
       coin: receiveCoin,
       amount: expectedReceiveAmount,
-      chainId: config.chain_id ?? 1,
+      chainId: config.chain_id ?? chainId,
       status: "pending",
       verified: 0,
       payCoin,
@@ -1032,6 +1043,7 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
         orderId,
         payToken: fromToken.address,
         receiveToken: toToken.address,
+        chainId,
         expiresAt: quote.expires_at ?? null,
       }),
     });
@@ -1041,7 +1053,7 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
 
     res.json({
       txId,
-      chainId: config.chain_id ?? 1,
+      chainId: config.chain_id ?? chainId,
       toAddress,
       payCoin,
       receiveCoin,
@@ -1108,7 +1120,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     await updateTransaction(txId, { status: "confirming", notifiedAt: new Date() });
     notifySseClients(txId, { status: "confirming" });
 
-    const baseUrl = normalizeSeraBaseUrl(ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL);
+    const baseUrl = getSeraApiBaseUrlForChain(tx.chainId);
     const result = await callSeraApi<Record<string, unknown>>({
       baseUrl,
       path: "/swap",
@@ -1607,7 +1619,6 @@ paymentRouter.get("/healthz", (_req, res) => res.json({ status: "ok", ts: Date.n
 
 // ─── Exchange Rates endpoint (Sera Goldsky GraphQL) ─────────────────────────
 
-const SERA_API_BASE_URL = (ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL).replace(/\/+$/, "");
 const GOLDSKY_URL = ENV.goldskyGraphqlUrl;
 
 // Simple in-memory rate cache: { [pair]: { rate, ts } }
@@ -1716,7 +1727,7 @@ async function fetchSeraRate(from: string, to: string): Promise<number> {
   return rate;
 }
 
-async function fetchSeraRestFxRate(from: string, to: string, debug = false): Promise<{ rate: number; upstream: unknown }> {
+async function fetchSeraRestFxRate(from: string, to: string, debug = false, chainId?: number): Promise<{ rate: number; upstream: unknown }> {
   if (from === to) return { rate: 1, upstream: { source: "identity" } };
 
   const resolvedFrom = USD_BRIDGE[from] ?? from;
@@ -1725,7 +1736,8 @@ async function fetchSeraRestFxRate(from: string, to: string, debug = false): Pro
     return { rate: 1, upstream: { source: "identity", reason: "same resolved currency" } };
   }
 
-  const cacheKey = `sera-rest:${from}:${to}`;
+  const cacheScope = chainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
+  const cacheKey = `sera-rest:${cacheScope}:${from}:${to}`;
   const cached = rateCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return { rate: cached.rate, upstream: { source: "cache", cacheKey } };
@@ -1733,7 +1745,8 @@ async function fetchSeraRestFxRate(from: string, to: string, debug = false): Pro
 
   const base = TOKEN_CURRENCY[resolvedFrom] ?? resolvedFrom;
   const quote = TOKEN_CURRENCY[resolvedTo] ?? resolvedTo;
-  const url = `${SERA_API_BASE_URL}/fx/rate?base=${encodeURIComponent(base)}&quote=${encodeURIComponent(quote)}`;
+  const seraApiBaseUrl = getSeraApiBaseUrlForChain(chainId);
+  const url = `${seraApiBaseUrl}/fx/rate?base=${encodeURIComponent(base)}&quote=${encodeURIComponent(quote)}`;
   const requestLog = {
     method: "GET",
     url,
@@ -1758,7 +1771,7 @@ async function fetchSeraRestFxRate(from: string, to: string, debug = false): Pro
   }
 
   rateCache.set(cacheKey, { rate, ts: Date.now() });
-  rateCache.set(`sera-rest:${to}:${from}`, { rate: 1 / rate, ts: Date.now() });
+  rateCache.set(`sera-rest:${cacheScope}:${to}:${from}`, { rate: 1 / rate, ts: Date.now() });
 
   const upstream = { source: "sera-rest", request: requestLog, response: json };
   if (debug || ENV.seraApiDebug) {
@@ -1786,7 +1799,9 @@ paymentRouter.get("/rates", async (req, res) => {
     if (bridgedFrom === bridgedTo) { res.json({ from, to, rate: 1, source: "identity" }); return; }
 
     const debug = req.query.debug === "1" || req.query.debug === "true";
-    const { rate, upstream } = await fetchSeraRestFxRate(from, to, debug);
+    const requestedChainId = Number(req.query.chainId ?? req.query.chain_id ?? 1);
+    const chainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : 1;
+    const { rate, upstream } = await fetchSeraRestFxRate(from, to, debug, chainId);
     /*
     // Apply SeraPay's 0.5% silent spread — customer pays slightly more than the raw Sera rate.
     // The merchant receives exactly what they requested; SeraPay keeps the difference.

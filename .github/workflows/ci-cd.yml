@@ -61,6 +61,7 @@ jobs:
           PORT: 3000
           PAYMENT_BASE_URL: http://localhost:3000
           SERA_API_BASE_URL: https://api.sera.cx/api/v1
+          SERA_API_TESTNET_BASE_URL: https://api.testnet.sera.cx/api/v1
           SESSION_SECRET: ci-session-secret
           SERA_CONFIG_ENCRYPTION_KEY: ci-sera-config-encryption-key-32
 

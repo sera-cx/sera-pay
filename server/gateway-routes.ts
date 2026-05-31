@@ -31,6 +31,7 @@ import { screenWalletAddress } from "./compliance";
 import { decryptSecret, encryptSecret, isSecretEncryptionReady, maskSecret } from "./secret-vault";
 import {
   DEFAULT_SERA_API_BASE_URL,
+  DEFAULT_SERA_API_TESTNET_BASE_URL,
   callSeraApi,
   getSeraFxRate,
   getSeraMarkets,
@@ -38,10 +39,12 @@ import {
   getSeraTokens,
   normalizeSeraBaseUrl,
   verifySeraApiCredential,
+  type SeraMode,
   type SeraToken,
 } from "./sera-api";
 
 export const gatewayRouter = Router();
+const SERA_TESTNET_CHAIN_ID = 11155111;
 
 function validationError(res: any, error: unknown) {
   if (error instanceof ZodError) {
@@ -61,6 +64,32 @@ function encodeCheckoutPayload(payload: Record<string, unknown>): string {
   return Buffer.from(JSON.stringify(payload), "utf8")
     .toString("base64url")
     .replace(/=+$/, "");
+}
+
+function normalizeSeraMode(value: unknown): SeraMode {
+  return value === "test" || value === "live" || value === "mock" ? value : "mock";
+}
+
+function querySeraMode(query: any): SeraMode {
+  if (query.mode === "test" || query.mode === "live" || query.mode === "mock") return query.mode;
+  const requestedChainId = Number(query.chainId ?? query.chain_id);
+  if (Number.isInteger(requestedChainId) && requestedChainId > 0) {
+    return requestedChainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
+  }
+  return "live";
+}
+
+function defaultSeraBaseUrlForMode(mode: SeraMode): string {
+  if (mode === "test") return ENV.seraApiTestnetBaseUrl || DEFAULT_SERA_API_TESTNET_BASE_URL;
+  return ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL;
+}
+
+function resolveSeraBaseUrl(mode: SeraMode, configuredBaseUrl?: string | null): string {
+  return normalizeSeraBaseUrl(configuredBaseUrl || defaultSeraBaseUrlForMode(mode));
+}
+
+function modeFromBaseUrl(baseUrl: string): SeraMode {
+  return baseUrl.toLowerCase().includes("testnet") ? "test" : "live";
 }
 
 function paymentIntentToJson(intent: any) {
@@ -85,14 +114,15 @@ function paymentIntentToJson(intent: any) {
 }
 
 function apiConfigToJson(config: any) {
+  const mode = normalizeSeraMode(config?.mode);
   return {
     merchantId: config?.merchantId ?? null,
-    seraApiBaseUrl: config?.seraApiBaseUrl ?? DEFAULT_SERA_API_BASE_URL,
+    seraApiBaseUrl: resolveSeraBaseUrl(mode, config?.seraApiBaseUrl),
     hasSeraApiKey: Boolean(config?.seraApiKeyEncrypted),
     seraApiKeyLast4: config?.seraApiKeyLast4 ?? null,
     hasWebhookSecret: Boolean(config?.seraWebhookSecretEncrypted),
     webhookSecretLast4: config?.seraWebhookSecretLast4 ?? null,
-    mode: config?.mode ?? "mock",
+    mode,
     encryptionReady: isSecretEncryptionReady(),
     updatedAt: config?.updatedAt,
   };
@@ -100,27 +130,30 @@ function apiConfigToJson(config: any) {
 
 gatewayRouter.get("/sera/system", async (req, res) => {
   try {
-    const requestedBaseUrl = String(req.query.baseUrl ?? req.query.base_url ?? ENV.seraApiBaseUrl ?? DEFAULT_SERA_API_BASE_URL);
+    const requestedMode = querySeraMode(req.query);
+    const requestedBaseUrl = String(req.query.baseUrl ?? req.query.base_url ?? defaultSeraBaseUrlForMode(requestedMode));
     const baseUrl = normalizeSeraBaseUrl(requestedBaseUrl);
     new URL(baseUrl);
-    const snapshot = await getSeraSystemSnapshot(baseUrl, "live");
+    const snapshot = await getSeraSystemSnapshot(baseUrl, requestedMode === "mock" ? modeFromBaseUrl(baseUrl) : requestedMode);
     res.json(snapshot);
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "Unable to reach Sera API" });
   }
 });
 
-gatewayRouter.get("/sera/tokens", async (_req, res) => {
+gatewayRouter.get("/sera/tokens", async (req, res) => {
   try {
-    res.json(await getSeraTokens(ENV.seraApiBaseUrl));
+    const mode = querySeraMode(req.query);
+    res.json(await getSeraTokens(resolveSeraBaseUrl(mode)));
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera tokens" });
   }
 });
 
-gatewayRouter.get("/sera/markets", async (_req, res) => {
+gatewayRouter.get("/sera/markets", async (req, res) => {
   try {
-    res.json(await getSeraMarkets(ENV.seraApiBaseUrl));
+    const mode = querySeraMode(req.query);
+    res.json(await getSeraMarkets(resolveSeraBaseUrl(mode)));
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera markets" });
   }
@@ -134,7 +167,8 @@ gatewayRouter.get("/sera/fx-rate", async (req, res) => {
       res.status(400).json({ error: "base and quote must be ISO currency codes, e.g. SGD and MYR." });
       return;
     }
-    res.json(await getSeraFxRate(ENV.seraApiBaseUrl, base, quote));
+    const mode = querySeraMode(req.query);
+    res.json(await getSeraFxRate(resolveSeraBaseUrl(mode), base, quote));
   } catch (error) {
     res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera FX rate" });
   }
@@ -292,7 +326,8 @@ function toRawTokenAmount(amount: string, decimals: number): string {
 
 async function getMerchantSeraCredential(merchantId: string) {
   const config = await getApiKeyConfigRecord(merchantId);
-  const baseUrl = config?.seraApiBaseUrl ?? ENV.seraApiBaseUrl ?? DEFAULT_SERA_API_BASE_URL;
+  const mode = normalizeSeraMode(config?.mode);
+  const baseUrl = resolveSeraBaseUrl(mode, config?.seraApiBaseUrl);
   const credential = decryptSecret(config?.seraApiKeyEncrypted) || ENV.seraApiKey || "";
   return { config, baseUrl, credential };
 }
@@ -558,9 +593,10 @@ gatewayRouter.put("/merchant/sera-config", requireApiKey as any, async (req: any
 gatewayRouter.post("/merchant/sera-config/test", requireApiKey as any, async (req: any, res) => {
   try {
     const config = await getApiKeyConfigRecord(req.merchant.id);
-    const baseUrl = config?.seraApiBaseUrl ?? DEFAULT_SERA_API_BASE_URL;
+    const mode = normalizeSeraMode(config?.mode);
+    const baseUrl = resolveSeraBaseUrl(mode, config?.seraApiBaseUrl);
     const credential = decryptSecret(config?.seraApiKeyEncrypted);
-    const snapshot = await getSeraSystemSnapshot(baseUrl, config?.mode ?? "mock", req.merchant.id);
+    const snapshot = await getSeraSystemSnapshot(baseUrl, mode, req.merchant.id);
     const verification = credential
       ? await verifySeraApiCredential(baseUrl, credential, req.merchant.id)
       : { ok: false, message: "No Sera API key saved." };
@@ -581,6 +617,7 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
     }
 
     const baseUrl = normalizeSeraBaseUrl(input.seraApiBaseUrl);
+    const mode = modeFromBaseUrl(baseUrl);
     const result = await callSeraApi<{
       api_key?: string;
       api_secret?: string;
@@ -620,7 +657,7 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
       seraApiKeyLast4: maskSecret(apiKey || credential),
       seraWebhookSecretEncrypted: existing?.seraWebhookSecretEncrypted ?? null,
       seraWebhookSecretLast4: existing?.seraWebhookSecretLast4 ?? null,
-      mode: "live",
+      mode,
     });
 
     const updated = await getApiKeyConfigRecord(req.merchant.id);

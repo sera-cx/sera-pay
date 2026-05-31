@@ -46,7 +46,7 @@ export function WebhookDeliveryLog() {
               <Clock className="w-4 h-4 text-[#00D1A0]" />
               Webhook Delivery Log
             </CardTitle>
-            <CardDescription className="mt-1">Recent webhook delivery attempts for your confirmed transactions.</CardDescription>
+            <CardDescription className="mt-1">Recent webhook delivery attempts for your successful transactions.</CardDescription>
           </div>
           <Button variant="outline" size="icon" onClick={load} disabled={loading} title="Refresh">
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
@@ -56,7 +56,7 @@ export function WebhookDeliveryLog() {
       <CardContent>
         {entries.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground text-sm">
-            {loading ? "Loading..." : "No webhook deliveries yet. Deliveries appear here once a payment is confirmed."}
+            {loading ? "Loading..." : "No webhook deliveries yet. Deliveries appear here once a payment is successful."}
           </div>
         ) : (
           <div className="space-y-2">

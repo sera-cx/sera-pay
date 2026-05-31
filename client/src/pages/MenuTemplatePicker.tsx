@@ -1,11 +1,14 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
+import { useChainId } from "wagmi";
 import { MENU_TEMPLATES, SCRATCH_TEMPLATE } from "@/lib/menuTemplates";
 import { AppLayout } from "@/components/AppLayout";
 import { fetchApi } from "@/lib/api";
 import { toast } from "sonner";
 import { X, ArrowLeft, Check } from "lucide-react";
 import { convertAmount, getCurrencyRate, groupCurrenciesByRegion, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
+import { resolvePaymentChainId } from "@/lib/payment";
+import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { AdvancedSelect } from "@/components/AdvancedSelect";
 import { BUSINESS_CATEGORY_GROUPS, businessCategoryLabel } from "@/lib/businessCategories";
 
@@ -23,6 +26,9 @@ const TEMPLATE_BUSINESS_CATEGORY: Record<string, string> = {
 
 export default function MenuTemplatePicker() {
   const [, navigate] = useLocation();
+  const walletChainId = useChainId();
+  const { data: seraConfig } = useSeraApiConfig();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hasMenus, setHasMenus] = useState(false);
   const [currencies, setCurrencies] = useState<SeraCurrency[]>([]);
@@ -50,8 +56,8 @@ export default function MenuTemplatePicker() {
     fetchApi<{ id: string }[]>("/menus")
       .then(menus => setHasMenus(menus.length > 0))
       .catch(() => {});
-    loadSeraCurrencies().then(setCurrencies).catch(() => setCurrencies([]));
-  }, []);
+    loadSeraCurrencies(paymentChainId).then(setCurrencies).catch(() => setCurrencies([]));
+  }, [paymentChainId]);
   const currencyGroups = groupCurrenciesByRegion(currencies);
 
   const handleSelectTemplate = (templateId: string) => {
@@ -87,7 +93,7 @@ export default function MenuTemplatePicker() {
 
       if (template.items.length > 0) {
         const sourceCoin = template.items[0]?.coin || "USDC";
-        const rate = sourceCoin === coin ? 1 : (await getCurrencyRate(sourceCoin, coin)).rate;
+        const rate = sourceCoin === coin ? 1 : (await getCurrencyRate(sourceCoin, coin, paymentChainId)).rate;
         const convertedItems = template.items.map((item) => ({ ...item, price: convertAmount(item.price, rate), coin }));
         await Promise.all(
           convertedItems.map((item, idx) =>

@@ -4,7 +4,7 @@ import { Card, Table, TableHeader, TableBody, TableRow, TableHead, TableCell, Ba
 import { useCancelTransaction, useTransactions } from "@/hooks/use-transactions";
 import type { Transaction } from "@/hooks/use-transactions";
 import { useMerchantProfile } from "@/hooks/use-merchant";
-import { formatAmount, shortenAddress } from "@/lib/dashboard-utils";
+import { formatAmount, getTransactionStatusLabel, shortenAddress } from "@/lib/dashboard-utils";
 import { format, parseISO, startOfDay, endOfDay, startOfMonth, subDays } from "date-fns";
 import { Ban, ExternalLink, Search, X, QrCode, Download, Calendar, ChevronDown, FileText, ChevronRight } from "lucide-react";
 import { buildPaymentUrl } from "@/lib/payment";
@@ -179,7 +179,7 @@ function exportToCSV(transactions: Transaction[], merchantName?: string | null, 
   const headers = ["Date", "Status", "Amount", "Coin", "Pay Amount", "Pay Coin", "From", "Tx Hash", "Memo", "Notes"];
   const rows = transactions.map(tx => [
     format(parseISO(tx.createdAt), "yyyy-MM-dd HH:mm:ss"),
-    tx.status,
+    getTransactionStatusLabel(tx.status),
     tx.status === "confirmed" ? tx.amount : "",
     tx.coin,
     tx.payAmount ?? "",
@@ -254,7 +254,7 @@ function StatusBadge({ status }: { status: string }) {
     status === "pending" || status === "confirming" ? "warning" :
     status === "canceled" ? "default" :
     "destructive";
-  return <Badge variant={variant} className="capitalize">{status === "canceled" ? "Canceled" : status}</Badge>;
+  return <Badge variant={variant}>{getTransactionStatusLabel(status)}</Badge>;
 }
 
 function canCancelTransaction(tx: Transaction) {

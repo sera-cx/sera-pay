@@ -10,6 +10,7 @@ import { Save, Eye, EyeOff, Copy, Webhook, ChevronDown, ChevronRight, BookOpen, 
 import { fetchApi } from "@/lib/api";
 import { useGenerateSeraApiKey, useSeraApiConfig, useTestSeraApiConfig, useUpdateSeraApiConfig } from "@/hooks/use-gateway";
 import { AdvancedSelect } from "@/components/AdvancedSelect";
+import { DEFAULT_SERA_API_BASE_URL, DEFAULT_SERA_API_TESTNET_BASE_URL, type SeraApiMode } from "@shared/gateway";
 
 export function Developer() {
   const { data: profile, isLoading } = useMerchantProfile();
@@ -113,7 +114,7 @@ export function Developer() {
               <Webhook className="w-4 h-4 text-[#00D1A0]" />
               <CardTitle>Webhook</CardTitle>
             </div>
-            <CardDescription>Receive HTTPS POST notifications for confirmed payments.</CardDescription>
+            <CardDescription>Receive HTTPS POST notifications for successful payments.</CardDescription>
           </CardHeader>
           <CardContent>
             {isLoading ? <Skeleton className="h-20 w-full" /> : (
@@ -311,15 +312,26 @@ function SeraApiConfigCard() {
   const { wallets } = usePrivyWallets();
   const { toast } = useToast();
   const [seraApiKey, setSeraApiKey] = useState("");
-  const [seraApiBaseUrl, setSeraApiBaseUrl] = useState("https://api.sera.cx/api/v1");
+  const [seraApiBaseUrl, setSeraApiBaseUrl] = useState(DEFAULT_SERA_API_BASE_URL);
   const [seraWebhookSecret, setSeraWebhookSecret] = useState("");
-  const [mode, setMode] = useState<"mock" | "live">("mock");
+  const [mode, setMode] = useState<SeraApiMode>("mock");
 
   useEffect(() => {
     if (!config) return;
-    setSeraApiBaseUrl(config.seraApiBaseUrl || "https://api.sera.cx/api/v1");
-    setMode(config.mode || "mock");
+    const nextMode = config.mode || "mock";
+    setMode(nextMode);
+    setSeraApiBaseUrl(config.seraApiBaseUrl || (nextMode === "test" ? DEFAULT_SERA_API_TESTNET_BASE_URL : DEFAULT_SERA_API_BASE_URL));
   }, [config]);
+
+  const handleModeChange = (value: string) => {
+    const nextMode = value as SeraApiMode;
+    setMode(nextMode);
+    if (nextMode === "test") {
+      setSeraApiBaseUrl(DEFAULT_SERA_API_TESTNET_BASE_URL);
+    } else if (nextMode === "live") {
+      setSeraApiBaseUrl(DEFAULT_SERA_API_BASE_URL);
+    }
+  };
 
   const handleSave = (event: React.FormEvent) => {
     event.preventDefault();
@@ -357,7 +369,7 @@ function SeraApiConfigCard() {
     }
 
     try {
-      const systemResponse = await fetch(`/api/sera/system?baseUrl=${encodeURIComponent(seraApiBaseUrl)}`);
+      const systemResponse = await fetch(`/api/sera/system?mode=${encodeURIComponent(mode)}&baseUrl=${encodeURIComponent(seraApiBaseUrl)}`);
       if (!systemResponse.ok) throw new Error(await systemResponse.text());
       const system = await systemResponse.json() as {
         chainId?: number | null;
@@ -415,7 +427,7 @@ function SeraApiConfigCard() {
       });
 
       setSeraApiKey("");
-      setMode("live");
+      setMode(seraApiBaseUrl.toLowerCase().includes("testnet") ? "test" : "live");
       toast({
         title: "Sera API key generated",
         description: result.apiKeyLast4 ? `Saved encrypted key ending ${result.apiKeyLast4}` : result.message,
@@ -449,9 +461,10 @@ function SeraApiConfigCard() {
                 <Label>Mode</Label>
                 <AdvancedSelect
                   value={mode}
-                  onValueChange={(value) => setMode(value as "mock" | "live")}
+                  onValueChange={handleModeChange}
                   options={[
                     { value: "mock", label: "Mock", description: "Use local mocked API responses" },
+                    { value: "test", label: "Testnet", description: "Use Sera testnet API and Sepolia flow" },
                     { value: "live", label: "Live", description: "Connect to the Sera public API" },
                   ]}
                   triggerClassName="h-10 rounded-xl"
@@ -606,7 +619,7 @@ const ENDPOINTS: EndpointDef[] = [
     response: `{ "paymentIntents": [{ "id": "...", "amount": "10.00", "coin": "USDC", "status": "open", "checkoutUrl": "..." }] }`,
   },
   {
-    method: "GET", path: "/api/merchant/events", desc: "Real-time payment event stream (Server-Sent Events). Replays recent confirmed payments on connect.", auth: true,
+    method: "GET", path: "/api/merchant/events", desc: "Real-time payment event stream (Server-Sent Events). Replays recent successful payments on connect.", auth: true,
     params: [
       { name: "apiKey", in: "query", type: "string", required: true, desc: "Your API key (passed as query param for SSE)" },
       { name: "since", in: "query", type: "string", required: false, desc: "ISO timestamp — replay events after this time" },
@@ -797,7 +810,7 @@ function ApiDocs({ apiKey }: { apiKey: string }) {
           <div>
             <p className="text-xs font-semibold text-foreground mb-1">Webhook POST Payload</p>
             <p className="text-xs text-muted-foreground mb-1.5">
-              When a payment is confirmed on-chain, SeraPay sends a POST to your webhook URL with this JSON body:
+              When a payment is successful on-chain, SeraPay sends a POST to your webhook URL with this JSON body:
             </p>
             <CodeBlock>{WEBHOOK_PAYLOAD}</CodeBlock>
           </div>

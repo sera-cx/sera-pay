@@ -12,7 +12,7 @@ import {
 
 export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const transactionStatusEnum = pgEnum("transaction_status", ["pending", "confirming", "confirmed", "failed", "canceled"]);
-export const apiConfigModeEnum = pgEnum("api_config_mode", ["mock", "live"]);
+export const apiConfigModeEnum = pgEnum("api_config_mode", ["mock", "test", "live"]);
 export const subWalletStatusEnum = pgEnum("sub_wallet_status", ["active", "archived"]);
 export const paymentIntentStatusEnum = pgEnum("payment_intent_status", ["created", "open", "paid", "expired", "canceled", "failed"]);
 export const seraAuthModeEnum = pgEnum("sera_auth_mode", ["none", "api_key", "eip712"]);

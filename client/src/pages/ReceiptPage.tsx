@@ -112,7 +112,7 @@ export default function ReceiptPage() {
               {/* Status */}
               <div className="flex flex-col items-center gap-3 py-4">
                 <CheckCircle2 className="w-16 h-16 text-green-400" />
-                <div className="text-xl font-bold text-green-400">Payment Confirmed</div>
+                <div className="text-xl font-bold text-green-400">Payment Successful</div>
                 <div className="text-white/40 text-sm">{date}</div>
               </div>
 

@@ -11,11 +11,13 @@ export function buildQrOptions(
   style: QrStyle,
   logo?: string,
 ): Options {
+  const quietZone = Math.max(8, Math.round(size * 0.04));
   const base: Options = {
     width: size,
     height: size,
     data: value,
     type: "svg",
+    margin: quietZone,
     backgroundOptions: { color: bgColor } as any,
     dotsOptions: { color: fgColor },
     cornersSquareOptions: { color: fgColor },
@@ -91,6 +93,12 @@ export function QRStyled({
     containerRef.current.innerHTML = "";
     const qr = new QRCodeStyling(buildQrOptions(value, size, fgColor, bgColor, style, logo));
     qr.append(containerRef.current);
+    const rendered = containerRef.current.firstElementChild as HTMLElement | SVGElement | null;
+    if (rendered instanceof HTMLElement || rendered instanceof SVGElement) {
+      rendered.style.display = "block";
+      rendered.style.width = "100%";
+      rendered.style.height = "100%";
+    }
     // Add accessible <title> to any SVG <image> elements injected by the library.
     // SVG <image> does not support the HTML alt attribute; <title> is the SVG equivalent.
     setTimeout(() => {
@@ -104,7 +112,15 @@ export function QRStyled({
     }, 50);
   }, [value, size, fgColor, bgColor, style, logo]);
 
-  return <div ref={containerRef} className={className} style={{ width: size, height: size }} role="img" aria-label="Payment QR code" />;
+  return (
+    <div
+      ref={containerRef}
+      className={className}
+      style={{ width: size, maxWidth: "100%", aspectRatio: "1 / 1", overflow: "hidden", display: "block" }}
+      role="img"
+      aria-label="Payment QR code"
+    />
+  );
 }
 
 export const QR_STYLES: { id: QrStyle; label: string; desc: string }[] = [

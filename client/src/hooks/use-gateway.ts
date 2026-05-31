@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchApi } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
+import type { SeraApiMode } from "@shared/gateway";
 
 export interface GatewayMasterWallet {
   id: string;
@@ -51,7 +52,7 @@ export interface SeraApiConfigView {
   seraApiKeyLast4: string | null;
   hasWebhookSecret: boolean;
   webhookSecretLast4: string | null;
-  mode: "mock" | "live";
+  mode: SeraApiMode;
   encryptionReady: boolean;
   updatedAt?: string;
 }
@@ -140,7 +141,7 @@ export function useUpdateSeraApiConfig() {
       seraApiKey?: string;
       seraApiBaseUrl: string;
       seraWebhookSecret?: string;
-      mode: "mock" | "live";
+      mode: SeraApiMode;
     }) =>
       fetchApi<SeraApiConfigView>("/merchant/sera-config", {
         method: "PUT",
@@ -184,7 +185,7 @@ export function useTestSeraApiConfig() {
       fetchApi<{
         snapshot: {
           healthy: boolean;
-          mode: "mock" | "live";
+          mode: SeraApiMode;
           baseUrl: string;
           chainId: number | null;
           seraAddress: string | null;

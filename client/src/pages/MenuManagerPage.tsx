@@ -10,12 +10,14 @@ import {
   ChevronDown, UtensilsCrossed, Search,
 } from "lucide-react";
 import { toast } from "sonner";
-import { buildPaymentUrl, OrderItem } from "@/lib/payment";
+import { buildPaymentUrl, resolvePaymentChainId, OrderItem } from "@/lib/payment";
 import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
+import { useSeraApiConfig } from "@/hooks/use-gateway";
 import QRCodeStyling from "qr-code-styling";
 import { useLocation, useSearch } from "wouter";
+import { useChainId } from "wagmi";
 import { MENU_TEMPLATES } from "@/lib/menuTemplates";
 import { STABLECOINS } from "@/lib/stablecoins";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
@@ -107,8 +109,9 @@ const COIN_OPTIONS = STABLECOINS.map(s => s.symbol);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function menuPublicUrl(slug: string) {
-  return buildClientAppUrl(`/menu/${slug}`);
+function menuPublicUrl(slug: string, chainId?: number) {
+  const query = chainId ? `?chainId=${chainId}` : "";
+  return buildClientAppUrl(`/menu/${slug}${query}`);
 }
 
 // ── Item Edit Dialog ──────────────────────────────────────────────────────────
@@ -341,8 +344,8 @@ function QRSaveModal({ url, menuName, merchantProfile, onClose }: { url: string;
           </div>
           <h3 className="font-semibold text-gray-900 mb-1 truncate">{menuName}</h3>
           <p className="text-xs text-gray-500 mb-4">Scan, enter pax, and order</p>
-          <div className="flex justify-center mb-4 rounded-xl p-2" style={{ background: bgColor }}>
-            <QRStyled value={url} size={280} fgColor={fgColor} bgColor={bgColor} style={qrStyle} logo={logo} />
+          <div className="mx-auto mb-4 flex aspect-square w-full max-w-[240px] items-center justify-center overflow-hidden rounded-xl p-2" style={{ background: bgColor }}>
+            <QRStyled value={url} size={224} fgColor={fgColor} bgColor={bgColor} style={qrStyle} logo={logo} />
           </div>
           <p className="mb-4 rounded-lg bg-gray-50 px-3 py-2 text-[11px] font-mono text-gray-500 break-all">{code}</p>
           <div className="flex gap-2">
@@ -378,6 +381,9 @@ function CartSidebar({
   onClose?: () => void;
 }) {
   const [, navigate] = useLocation();
+  const walletChainId = useChainId();
+  const { data: seraConfig } = useSeraApiConfig();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [confirmClear, setConfirmClear] = useState(false);
   const totalQty = cart.reduce((s, e) => s + e.qty, 0);
 
@@ -406,6 +412,7 @@ function CartSidebar({
       receiverAddress: merchantProfile.walletAddress,
       receiveCoin: dominantCoin,
       amount: dominantTotal.toFixed(2),
+      chainId: paymentChainId,
       merchantName: merchantProfile.name,
       merchantIcon: merchantProfile.logoData || undefined,
       orderItems,
@@ -673,7 +680,10 @@ function POSView({
   const [bulkCoin, setBulkCoin] = useState<string>("USDC");
   const [bulkCoinSaving, setBulkCoinSaving] = useState(false);
   const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
-  const publicUrl = menuPublicUrl(menu.slug);
+  const walletChainId = useChainId();
+  const { data: seraConfig } = useSeraApiConfig();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
+  const publicUrl = menuPublicUrl(menu.slug, paymentChainId);
   const currencyList = useMemo(() => currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const })), [currencyOptions]);
 
   const handleBulkCoinUpdate = async () => {
@@ -681,7 +691,7 @@ function POSView({
     const toCoin = bulkCoin.toUpperCase();
     setBulkCoinSaving(true);
     try {
-      const { rate } = await getCurrencyRate(fromCoin, toCoin);
+      const { rate } = await getCurrencyRate(fromCoin, toCoin, paymentChainId);
       await fetchApi(`/menus/${menu.id}/items/coin`, {
         method: "PATCH",
         body: JSON.stringify({ coin: toCoin, rate }),
@@ -697,8 +707,8 @@ function POSView({
   };
 
   useEffect(() => {
-    loadSeraCurrencies().then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
-  }, []);
+    loadSeraCurrencies(paymentChainId).then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
+  }, [paymentChainId]);
 
   useEffect(() => {
     setLoadingItems(true);

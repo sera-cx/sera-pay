@@ -72,7 +72,7 @@ function formatTokenAmount(value: number) {
   return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00");
 }
 
-async function totalItemsInCoin(items: Array<{ price: string; coin?: string; qty: number }>, targetCoin: string, fallbackCoin: string) {
+async function totalItemsInCoin(items: Array<{ price: string; coin?: string; qty: number }>, targetCoin: string, fallbackCoin: string, chainId?: number) {
   let total = 0;
   const rateCache = new Map<string, number>();
   for (const item of items) {
@@ -86,7 +86,7 @@ async function totalItemsInCoin(items: Array<{ price: string; coin?: string; qty
     const pair = `${sourceCoin}:${targetCoin}`;
     let rate = rateCache.get(pair);
     if (!rate) {
-      rate = (await getCurrencyRate(sourceCoin, targetCoin)).rate;
+      rate = (await getCurrencyRate(sourceCoin, targetCoin, chainId)).rate;
       rateCache.set(pair, rate);
     }
     total += lineTotal * rate;
@@ -310,6 +310,11 @@ export default function MenuPublicPage() {
   const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
   const [convertedPrices, setConvertedPrices] = useState<Record<string, string>>({});
   const [convertingPrices, setConvertingPrices] = useState(false);
+  const paymentChainId = useMemo(() => {
+    if (typeof window === "undefined") return 1;
+    const value = Number(new URLSearchParams(window.location.search).get("chainId") || 1);
+    return Number.isInteger(value) && value > 0 ? value : 1;
+  }, []);
   const currencyList = useMemo(() => {
     const supported = new Set(STABLECOINS.map((coin) => coin.symbol));
     const options = currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const }));
@@ -329,8 +334,8 @@ export default function MenuPublicPage() {
   }, [params.slug]);
 
   useEffect(() => {
-    loadSeraCurrencies().then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
-  }, []);
+    loadSeraCurrencies(paymentChainId).then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
+  }, [paymentChainId]);
 
   useEffect(() => {
     if (data && !displayCoin) setDisplayCoin(data.merchant.receiveCoin || data.items[0]?.coin || "USDC");
@@ -353,7 +358,7 @@ export default function MenuPublicPage() {
           const pair = `${sourceCoin}:${displayCoin}`;
           let rate = rateCache.get(pair);
           if (!rate) {
-            rate = (await getCurrencyRate(sourceCoin, displayCoin)).rate;
+            rate = (await getCurrencyRate(sourceCoin, displayCoin, paymentChainId)).rate;
             rateCache.set(pair, rate);
           }
           next[item.id] = formatTokenAmount(Number(item.price) * rate);
@@ -366,7 +371,7 @@ export default function MenuPublicPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [data, displayCoin]);
+  }, [data, displayCoin, paymentChainId]);
 
   const handleAdd = (item: MenuItem) => {
     setCart(prev => {
@@ -414,11 +419,13 @@ export default function MenuPublicPage() {
         orderItems.map((item) => ({ price: item.p, coin: item.c, qty: item.q })),
         receiveCoin,
         receiveCoin,
+        paymentChainId,
       );
       const url = buildPaymentUrl({
         receiverAddress: merchant.walletAddress,
         receiveCoin,
         amount: receiveAmount,
+        chainId: paymentChainId,
         payCoin: displayCoin || receiveCoin,
         merchantName: merchant.name,
         merchantIcon: merchant.logoData || undefined,

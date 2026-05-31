@@ -1,12 +1,14 @@
 import { usePrivy } from "@privy-io/react-auth";
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useLocation } from "wouter";
+import { useChainId } from "wagmi";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { buildPaymentUrl } from "@/lib/payment";
+import { buildPaymentUrl, resolvePaymentChainId } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { QRStyled, QR_STYLES, type QrStyle } from "@/components/QRStyled";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
+import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { useQueryClient } from "@tanstack/react-query";
 import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
@@ -76,8 +78,8 @@ function escapeHtml(value: string) {
 // ── Status Badge ───────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, { bg: string; text: string; label: string }> = {
-    confirmed: { bg: "#E8F8F0", text: "#00A855", label: "Confirmed" },
-    confirming: { bg: "#FFF8E6", text: "#D4820A", label: "Confirming" },
+    confirmed: { bg: "#E8F8F0", text: "#00A855", label: "Successful" },
+    confirming: { bg: "#FFF8E6", text: "#D4820A", label: "Processing" },
     pending:    { bg: "#F2F2F7", text: "#8E8E93", label: "Pending" },
     failed:     { bg: "#FFF0F0", text: "#FF3B30", label: "Failed" },
   };
@@ -980,6 +982,9 @@ export default function Home() {
   const { apiKey: dashboardApiKey, walletAddress: authWalletAddress, logout: authLogout, retry: retryAccountSetup, error: accountSetupError, isLoading: accountSetupLoading } = useAuth();
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
+  const walletChainId = useChainId();
+  const { data: seraConfig } = useSeraApiConfig();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [privyTimedOut, setPrivyTimedOut] = useState(false);
   useEffect(() => {
     if (ready) return;
@@ -1077,7 +1082,7 @@ export default function Home() {
     const ctrl = new AbortController();
     rateAbortRef.current = ctrl;
     setRateLoading(true);
-    fetch(`/api/rates?from=${selectedCoin.symbol}&to=${customerCoin.symbol}`, { signal: ctrl.signal })
+    fetch(`/api/rates?from=${selectedCoin.symbol}&to=${customerCoin.symbol}&chainId=${paymentChainId}`, { signal: ctrl.signal })
       .then(r => r.json())
       .then(data => {
         if (data.rate) {
@@ -1096,7 +1101,7 @@ export default function Home() {
       .finally(() => setRateLoading(false));
     return () => ctrl.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCoin?.symbol, customerCoin?.symbol]);
+  }, [selectedCoin?.symbol, customerCoin?.symbol, paymentChainId]);
 
   // Persist selected coin (wallet-scoped key)
   useEffect(() => {
@@ -1158,7 +1163,7 @@ export default function Home() {
     return buildPaymentUrl({
       receiverAddress: walletAddress,
       receiveCoin: receiveCoin.symbol,
-      chainId: 1,
+      chainId: paymentChainId,
       amount: receiveAmount || undefined,
       payCoin: payCoin?.symbol || undefined,
       payAmount: payAmount || undefined,
@@ -1167,7 +1172,7 @@ export default function Home() {
       expiresAt: includeExpiry ? getExpiresAt() : undefined,
       singleUse: includeExpiry ? singleUse || undefined : undefined,
     });
-  }, [selectedCoin, walletAddress, amount, customerCoin, customerAmount, merchantName, description, getExpiresAt, singleUse]);
+  }, [selectedCoin, walletAddress, amount, customerCoin, customerAmount, merchantName, description, getExpiresAt, singleUse, paymentChainId]);
 
   const handleSwapCoins = useCallback(() => {
     if (!selectedCoin || !customerCoin) return;
@@ -1498,7 +1503,7 @@ export default function Home() {
         return;
       }
       setQrRateLoading(true);
-      fetch(`/api/rates?from=${selectedCoin.symbol}&to=${coin.symbol}`)
+      fetch(`/api/rates?from=${selectedCoin.symbol}&to=${coin.symbol}&chainId=${paymentChainId}`)
         .then(r => r.json())
         .then(data => {
           if (data.rate) {
@@ -1803,7 +1808,7 @@ export default function Home() {
               setShowQrReceiveCoinSheet(false);
               // Recalculate customer amount with new receive coin
               if (customerCoin && customerCoin.symbol !== coin.symbol) {
-                fetch(`/api/rates?from=${coin.symbol}&to=${customerCoin.symbol}`)
+                fetch(`/api/rates?from=${coin.symbol}&to=${customerCoin.symbol}&chainId=${paymentChainId}`)
                   .then(r => r.json())
                   .then(data => {
                     if (data.rate) {

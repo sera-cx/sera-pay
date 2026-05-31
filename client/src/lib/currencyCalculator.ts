@@ -109,9 +109,11 @@ function buildCurrency(token: SeraTokenPayload): SeraCurrency {
   };
 }
 
-export async function loadSeraCurrencies(): Promise<SeraCurrency[]> {
+export async function loadSeraCurrencies(chainId?: number): Promise<SeraCurrency[]> {
   try {
-    const response = await fetch("/api/sera/tokens");
+    const params = new URLSearchParams();
+    if (chainId) params.set("chainId", String(chainId));
+    const response = await fetch(`/api/sera/tokens${params.size ? `?${params.toString()}` : ""}`);
     if (!response.ok) throw new Error("Unable to load Sera currencies");
     const data = await response.json() as { tokens?: SeraTokenPayload[] };
     const tokens = Array.isArray(data.tokens) ? data.tokens : [];
@@ -128,11 +130,13 @@ export async function loadSeraCurrencies(): Promise<SeraCurrency[]> {
   }
 }
 
-export async function getCurrencyRate(from: string, to: string): Promise<RateResult> {
+export async function getCurrencyRate(from: string, to: string, chainId?: number): Promise<RateResult> {
   const source = from.toUpperCase();
   const target = to.toUpperCase();
   if (source === target) return { from: source, to: target, rate: 1, source: "identity" };
-  const response = await fetch(`/api/rates?from=${encodeURIComponent(source)}&to=${encodeURIComponent(target)}`);
+  const params = new URLSearchParams({ from: source, to: target });
+  if (chainId) params.set("chainId", String(chainId));
+  const response = await fetch(`/api/rates?${params.toString()}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !Number.isFinite(Number(data.rate)) || Number(data.rate) <= 0) {
     throw new Error(data.detail || data.error || `Unable to convert ${source} to ${target}`);
@@ -148,8 +152,8 @@ export function convertAmount(amount: string | number, rate: number): string {
   return converted.toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00");
 }
 
-export async function convertPrice(amount: string | number, from: string, to: string): Promise<{ amount: string; rate: number }> {
-  const { rate } = await getCurrencyRate(from, to);
+export async function convertPrice(amount: string | number, from: string, to: string, chainId?: number): Promise<{ amount: string; rate: number }> {
+  const { rate } = await getCurrencyRate(from, to, chainId);
   return { amount: convertAmount(amount, rate), rate };
 }
 

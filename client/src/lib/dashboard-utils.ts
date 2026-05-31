@@ -16,6 +16,18 @@ export function formatAmount(amount: string | number): string {
   return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
 }
 
+export function getTransactionStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "confirming": return "Processing";
+    case "confirmed": return "Successful";
+    case "failed": return "Failed";
+    case "canceled": return "Canceled";
+    case "unverified": return "Unverified";
+    case "pending": return "Pending";
+    default: return "Pending";
+  }
+}
+
 const COIN_CURRENCY: Record<string, string> = {
   USDT: "USD", USDC: "USD", DAI: "USD", BUSD: "USD", FRAX: "USD",
   LUSD: "USD", USDP: "USD", FDUSD: "USD", USDD: "USD", TUSD: "USD",

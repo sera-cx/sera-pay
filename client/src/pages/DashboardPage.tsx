@@ -3,7 +3,7 @@ import { AppLayout, NetworkSwitcherModal } from "@/components/AppLayout";
 import { Card, Skeleton, Badge } from "@/components/dashboard-ui";
 import { useTransactions } from "@/hooks/use-transactions";
 import { useMerchantStats } from "@/hooks/use-stats";
-import { formatAmount, shortenAddress } from "@/lib/dashboard-utils";
+import { formatAmount, getTransactionStatusLabel, shortenAddress } from "@/lib/dashboard-utils";
 import { ArrowDownRight, Activity, Clock, CheckCircle2, TrendingUp, QrCode, AlertTriangle, Rocket } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { format, parseISO, subDays, startOfDay } from "date-fns";
@@ -111,7 +111,7 @@ export function Dashboard() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <StatCard title="Volume" value={`$${formatAmount(stats?.totalVolume || "0")}`} icon={TrendingUp} loading={isLoading} />
           <StatCard title="Transactions" value={(stats?.totalCount || 0).toString()} icon={Activity} loading={isLoading} />
-          <StatCard title="Confirmed" value={(stats?.confirmedCount || 0).toString()} icon={CheckCircle2} loading={isLoading} valueColor="text-[#00D1A0]" />
+          <StatCard title="Successful" value={(stats?.confirmedCount || 0).toString()} icon={CheckCircle2} loading={isLoading} valueColor="text-[#00D1A0]" />
           <StatCard title="Pending" value={(stats?.pendingCount || 0).toString()} icon={Clock} loading={isLoading} valueColor="text-amber-600" />
         </div>
 
@@ -193,11 +193,11 @@ export function Dashboard() {
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2">
                           <Clock className="w-4 h-4 text-amber-600" />
-                          <p className="text-sm font-semibold text-amber-900">Pending transactions</p>
+                          <p className="text-sm font-semibold text-amber-900">Processing transactions</p>
                         </div>
                         <Badge variant="warning" className="text-[10px]">{pendingQueueCount} in queue</Badge>
                       </div>
-                      <p className="mt-1 text-[11px] text-amber-700">Requests cancel automatically after 5 minutes without confirmation.</p>
+                      <p className="mt-1 text-[11px] text-amber-700">Requests cancel automatically after 5 minutes without completion.</p>
                     </div>
                   )}
                   {recentTransactions.slice(0, 10).map((tx) => {
@@ -215,13 +215,13 @@ export function Dashboard() {
                               {isConfirmed ? `+${formatAmount(tx.amount)} ${tx.coin}` : `${formatAmount(tx.amount)} ${tx.coin}`}
                             </p>
                             <p className="text-[11px] text-muted-foreground truncate">
-                              {isPending ? "Pending request" : fromAddress ? shortenAddress(fromAddress) : tx.status === "canceled" ? "Canceled request" : "Unconfirmed request"}
+                              {tx.status === "confirming" ? "Processing payment" : tx.status === "pending" ? "Pending request" : fromAddress ? shortenAddress(fromAddress) : tx.status === "canceled" ? "Canceled request" : "Failed request"}
                             </p>
                           </div>
                         </div>
                         <div className="text-right shrink-0">
                           <Badge variant={isConfirmed ? "success" : isPending ? "warning" : tx.status === "canceled" ? "default" : "destructive"} className="text-[10px] capitalize">
-                            {tx.status === "canceled" ? "Canceled" : tx.status}
+                            {getTransactionStatusLabel(tx.status)}
                           </Badge>
                           <p className="text-[10px] text-muted-foreground mt-0.5">
                             {format(parseISO(tx.createdAt), 'HH:mm')}

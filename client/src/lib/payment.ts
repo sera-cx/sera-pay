@@ -1,4 +1,14 @@
 import { buildClientAppUrl } from "@/lib/app-url";
+import type { SeraApiMode } from "@shared/gateway";
+
+export const LIVE_PAYMENT_CHAIN_ID = 1;
+export const TEST_PAYMENT_CHAIN_ID = 11155111;
+
+export function resolvePaymentChainId(chainId: number | null | undefined, mode?: SeraApiMode | null): number {
+  if (mode === "test") return TEST_PAYMENT_CHAIN_ID;
+  if (mode === "live") return LIVE_PAYMENT_CHAIN_ID;
+  return chainId === LIVE_PAYMENT_CHAIN_ID ? LIVE_PAYMENT_CHAIN_ID : TEST_PAYMENT_CHAIN_ID;
+}
 
 export interface OrderItem {
   id: string;    // menu item id

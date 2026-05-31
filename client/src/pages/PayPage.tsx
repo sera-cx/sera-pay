@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "wouter";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
+import { ChevronRight, Chrome, MoreHorizontal, Network, Wallet } from "lucide-react";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
 import { decodePaymentRequest } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
@@ -211,6 +212,7 @@ async function totalOrderItemsInCoin(
   items: Array<{ p: string; q: number; c?: string }>,
   fallbackCoin: string,
   targetCoin: string,
+  chainId?: number,
 ) {
   let total = 0;
   const convertedCoins = new Set<string>();
@@ -226,7 +228,7 @@ async function totalOrderItemsInCoin(
     const pair = `${sourceCoin}:${targetCoin}`;
     let rate = rateCache.get(pair);
     if (!rate) {
-      rate = (await getCurrencyRate(sourceCoin, targetCoin)).rate;
+      rate = (await getCurrencyRate(sourceCoin, targetCoin, chainId)).rate;
       rateCache.set(pair, rate);
     }
     total += lineTotal * rate;
@@ -418,6 +420,7 @@ function RateChangedModal({ oldAmount, newAmount, coin, onAccept, onCancel }: {
 }
 
 type Phase = "loading" | "connect" | "select-coin" | "paying" | "success" | "failed" | "invalid";
+type PaymentLoginMethod = "wallet" | "google" | "email" | "telegram";
 
 export default function PayPage() {
   const { encoded } = useParams<{ encoded: string }>();
@@ -468,6 +471,7 @@ export default function PayPage() {
   const [unifiedNote, setUnifiedNote] = useState<string | null>(null);     // e.g. "Includes EURT items converted at live rate"
   const [unifiedLoading, setUnifiedLoading] = useState(false);
   const [rateRefreshKey, setRateRefreshKey] = useState(0);
+  const chainId = req?.chainId ?? 1;
 
   // Compute itemised order total in the currently selected payment coin.
   useEffect(() => {
@@ -482,8 +486,8 @@ export default function PayPage() {
       try {
         const targetCoin = selectedCoin.symbol;
         const [payTotal, receiveTotal] = await Promise.all([
-          totalOrderItemsInCoin(orderItems, req.receiveCoin, targetCoin),
-          totalOrderItemsInCoin(orderItems, req.receiveCoin, req.receiveCoin),
+          totalOrderItemsInCoin(orderItems, req.receiveCoin, targetCoin, chainId),
+          totalOrderItemsInCoin(orderItems, req.receiveCoin, req.receiveCoin, chainId),
         ]);
         if (cancelled) return;
         setPayAmount(payTotal.amount);
@@ -502,9 +506,8 @@ export default function PayPage() {
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [req, selectedCoin?.symbol, rateRefreshKey]);
+  }, [req, selectedCoin?.symbol, rateRefreshKey, chainId]);
 
-  const chainId = req?.chainId ?? 1;
   const supportedCoins = getSupportedCoins(chainId);
   const requiresSeraSwap = Boolean(req && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
   const selectedCoinSupported = Boolean(selectedCoin && (requiresSeraSwap || COIN_ADDRESSES[selectedCoin.symbol]?.[chainId]));
@@ -578,7 +581,7 @@ export default function PayPage() {
   }, [ready, isConnected, phase]);
 
   // Fetch FX rate
-  const fetchRate = useCallback(async (receiveCoin: string, payCoin: string, amount: string) => {
+  const fetchRate = useCallback(async (receiveCoin: string, payCoin: string, amount: string, rateChainId: number) => {
     if (payCoin === receiveCoin) {
       setPayAmount(amount);
       setDisplayRate(null);
@@ -589,7 +592,7 @@ export default function PayPage() {
     }
     setRateLoading(true);
     try {
-      const res = await fetch(`/api/rates?from=${receiveCoin}&to=${payCoin}`);
+      const res = await fetch(`/api/rates?from=${receiveCoin}&to=${payCoin}&chainId=${rateChainId}`);
       const data = await res.json();
       if (data.rate) {
         const converted = parseFloat(amount) * data.rate;
@@ -623,8 +626,8 @@ export default function PayPage() {
       return;
     }
     if (!req.amount) { setPayAmount(null); setDisplayRate(null); return; }
-    fetchRate(req.receiveCoin, selectedCoin.symbol, req.amount);
-  }, [selectedCoin, req, fetchRate]);
+    fetchRate(req.receiveCoin, selectedCoin.symbol, req.amount, chainId);
+  }, [selectedCoin, req, fetchRate, chainId]);
 
   // Countdown timer
   useEffect(() => {
@@ -636,11 +639,11 @@ export default function PayPage() {
         setRateRefreshKey(value => value + 1);
       } else if (remaining === 0 && req?.receiveCoin && selectedCoin && req.amount) {
         // Auto-refresh
-        fetchRate(req.receiveCoin, selectedCoin.symbol, req.amount);
+        fetchRate(req.receiveCoin, selectedCoin.symbol, req.amount, chainId);
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [rateExpiry, req, selectedCoin, fetchRate]);
+  }, [rateExpiry, req, selectedCoin, fetchRate, chainId]);
 
   // SSE listener + polling fallback for payment confirmation
   useEffect(() => {
@@ -698,7 +701,7 @@ export default function PayPage() {
       const wallet = wallets?.[0];
       if (!wallet) throw new Error("No wallet connected");
       const provider = await wallet.getEthereumProvider();
-      const cid = requiresSeraSwap ? 1 : (req.chainId ?? 1);
+      const cid = req.chainId ?? 1;
 
       try {
         await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: `0x${cid.toString(16)}` }] });
@@ -720,6 +723,7 @@ export default function PayPage() {
             receiveCoin: req.receiveCoin,
             payAmount: sendAmount,
             receiveAmount: receiveAmountForQuote,
+            chainId: cid,
             paymentIntentId: (req as any).paymentIntentId,
             orderId: (req as any).orderId,
           }),
@@ -795,11 +799,19 @@ export default function PayPage() {
     }
   }, [req, selectedCoin, wallets, requiresSeraSwap, receiveAmount]);
 
-  const handleConnectWallet = useCallback(async () => {
+  const openPrivyLogin = useCallback((loginMethods?: PaymentLoginMethod[]) => {
     try {
-      await login();
+      if (loginMethods?.length) {
+        login({ loginMethods });
+        return;
+      }
+      login();
     } catch {}
   }, [login]);
+
+  const handleConnectWallet = useCallback(() => openPrivyLogin(["wallet"]), [openPrivyLogin]);
+  const handleGoogleLogin = useCallback(() => openPrivyLogin(["google"]), [openPrivyLogin]);
+  const handleOtherLogin = useCallback(() => openPrivyLogin(["wallet", "email", "google", "telegram"]), [openPrivyLogin]);
 
   const handlePay = useCallback(async () => {
     if (!req || !selectedCoin || !payAmount) return;
@@ -807,8 +819,8 @@ export default function PayPage() {
       setRateLoading(true);
       try {
         const [payTotal, receiveTotal] = await Promise.all([
-          totalOrderItemsInCoin(req.orderItems, req.receiveCoin, selectedCoin.symbol),
-          totalOrderItemsInCoin(req.orderItems, req.receiveCoin, req.receiveCoin),
+          totalOrderItemsInCoin(req.orderItems, req.receiveCoin, selectedCoin.symbol, chainId),
+          totalOrderItemsInCoin(req.orderItems, req.receiveCoin, req.receiveCoin, chainId),
         ]);
         setPayAmount(payTotal.amount);
         setReceiveAmount(receiveTotal.amount);
@@ -832,7 +844,7 @@ export default function PayPage() {
     // Re-fetch rate to check for changes
     setRateLoading(true);
     try {
-      const res = await fetch(`/api/rates?from=${req.receiveCoin}&to=${selectedCoin.symbol}`);
+      const res = await fetch(`/api/rates?from=${req.receiveCoin}&to=${selectedCoin.symbol}&chainId=${chainId}`);
       const data = await res.json();
       if (data.rate) {
         const newConverted = parseFloat(req.amount) * data.rate;
@@ -1171,6 +1183,22 @@ export default function PayPage() {
   const isSameCoin = selectedCoin?.symbol === req?.receiveCoin;
   const hasOrderItems = !!req?.orderItems?.length;
   const showCountdown = !!rateExpiry && !!selectedCoin && (hasOrderItems || (!isSameCoin && !!req?.amount));
+  const paymentNetworkName = CHAIN_NAMES[chainId] || "Ethereum";
+  const isPaymentTestnet = chainId === 11155111;
+  const payOptionStyle: React.CSSProperties = {
+    width: "100%",
+    minHeight: 58,
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,0.07)",
+    background: "#fff",
+    color: "#1C1C1E",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "10px 12px",
+    textAlign: "left",
+  };
   return (
     <div dir={isRTL ? "rtl" : "ltr"} lang={locale} style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
       {/* Header */}
@@ -1376,14 +1404,46 @@ export default function PayPage() {
         {/* Connect wallet */}
         {phase === "connect" && (
           <div style={{ background: "#fff", borderRadius: 20, padding: "24px", boxShadow: "0 1px 8px rgba(0,0,0,0.07)" }}>
-            <h3 style={{ fontSize: 16, fontWeight: 700, color: "#1C1C1E", margin: "0 0 8px" }}>Connect Your Wallet</h3>
-            <p style={{ fontSize: 13, color: "rgba(60,60,67,0.6)", margin: "0 0 20px", lineHeight: 1.5 }}>Connect your wallet to pay with any stablecoin. Works with MetaMask, OKX, Trust Wallet, and more.</p>
-            <button onClick={handleConnectWallet} className="serapay-action-primary" style={{ width: "100%", height: 54, borderRadius: 14, background: "linear-gradient(135deg, #00A855, #007A30)", border: "none", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-              <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" /></svg>
-              {t.connectWallet}
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: "#1C1C1E", margin: "0 0 8px" }}>Pay with</h3>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 14, background: isPaymentTestnet ? "#FFF8E6" : "#F4FBF8", border: `1px solid ${isPaymentTestnet ? "#F3D88B" : "rgba(78,206,154,0.22)"}`, padding: "10px 12px", marginBottom: 14 }}>
+              <Network size={18} color={isPaymentTestnet ? "#B7791F" : "#00A87A"} />
+              <div style={{ flex: 1 }}>
+                <p style={{ fontSize: 12, color: "rgba(60,60,67,0.5)", margin: "0 0 2px", fontWeight: 600 }}>Network</p>
+                <p style={{ fontSize: 14, color: "#1C1C1E", margin: 0, fontWeight: 750 }}>{paymentNetworkName}</p>
+              </div>
+              <span style={{ borderRadius: 999, background: "#fff", color: isPaymentTestnet ? "#B7791F" : "#00A87A", padding: "4px 8px", fontSize: 11, fontWeight: 750 }}>{isPaymentTestnet ? "Test" : "Live"}</span>
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              <button onClick={handleConnectWallet} style={{ ...payOptionStyle, borderColor: "rgba(0,168,122,0.28)", background: "#F4FBF8" }}>
+                <span style={{ width: 36, height: 36, borderRadius: 12, background: "#E6FAF5", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><Wallet size={18} /></span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Continue with wallet address</span>
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Use an EVM wallet to sign and pay</span>
+                </span>
+                <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
+              </button>
+              <button onClick={handleGoogleLogin} style={payOptionStyle}>
+                <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F8FAFC", color: "#4285F4", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><Chrome size={18} /></span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Login using Google</span>
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Privy creates a payment wallet when needed</span>
+                </span>
+                <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
+              </button>
+              <button onClick={handleOtherLogin} style={payOptionStyle}>
+                <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F9F9FB", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><MoreHorizontal size={18} /></span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Choose other wallet</span>
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>MetaMask, OKX, Trust Wallet, email, Telegram</span>
+                </span>
+                <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
+              </button>
+            </div>
+            <button onClick={handleOtherLogin} style={{ width: "100%", marginTop: 12, height: 44, borderRadius: 14, border: "none", background: "transparent", color: "rgba(60,60,67,0.48)", fontSize: 12, fontWeight: 650, cursor: "pointer" }}>
+              More login options
             </button>
             {req?.menuSlug ? (
-              <a href={`/menu/${req.menuSlug}`} style={{ display: "block", marginTop: 12, textAlign: "center", color: "#FF3B30", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
+              <a href={`/menu/${req.menuSlug}?chainId=${chainId}`} style={{ display: "block", marginTop: 12, textAlign: "center", color: "#FF3B30", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
                 Back to menu
               </a>
             ) : null}

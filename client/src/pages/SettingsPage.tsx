@@ -8,6 +8,9 @@ import { QRStyled, QR_STYLES, type QrStyle } from "@/components/QRStyled";
 import { prepareImageForUpload } from "@/lib/imageUpload";
 import { groupCurrenciesByRegion, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { buildClientAppUrl } from "@/lib/app-url";
+import { resolvePaymentChainId, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { useSeraApiConfig } from "@/hooks/use-gateway";
+import { useChainId } from "wagmi";
 
 const LS_LOGO = "serapay_store_logo";
 type CurrencyGroup = { region: string; coins: SeraCurrency[] };
@@ -36,12 +39,14 @@ function ReceiptPreview({
   logoUrl,
   receiveCoin,
   walletAddress,
+  networkName,
 }: {
   storeName: string;
   storeAddress: string;
   logoUrl: string;
   receiveCoin: string;
   walletAddress?: string;
+  networkName: string;
 }) {
   const now = new Date();
   const invoiceId = `SP-${now.toISOString().slice(0,10).replace(/-/g,"")}-AB56C7`;
@@ -114,7 +119,7 @@ function ReceiptPreview({
 
       {/* ── Network info ── */}
       <div style={{ ...sans, textAlign: "center", padding: "6px 14px 4px", fontSize: 7, color: "#9CA3AF" }}>
-        Network: Ethereum Sepolia · SeraPay Fee: $0.00
+        Network: {networkName} · SeraPay Fee: $0.00
       </div>
 
       {/* ── TX hash ── */}
@@ -226,6 +231,10 @@ function IpAllowlistEditor() {
 
 export function Settings() {
   const { data: profile, isLoading } = useMerchantProfile();
+  const walletChainId = useChainId();
+  const { data: seraConfig } = useSeraApiConfig();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
+  const paymentNetworkName = paymentChainId === TEST_PAYMENT_CHAIN_ID ? "Ethereum Sepolia" : "Ethereum";
   const updateProfile = useUpdateProfile();
   const { toast } = useToast();
 
@@ -247,7 +256,7 @@ export function Settings() {
   useEffect(() => {
     let active = true;
     setCurrencyLoading(true);
-    loadSeraCurrencies()
+    loadSeraCurrencies(paymentChainId)
       .then((loaded) => {
         if (!active) return;
         setCurrencies(loaded);
@@ -263,7 +272,7 @@ export function Settings() {
         if (active) setCurrencyLoading(false);
       });
     return () => { active = false; };
-  }, []);
+  }, [paymentChainId]);
 
   useEffect(() => {
     if (profile) {
@@ -639,7 +648,7 @@ export function Settings() {
                   <div className="flex justify-center mb-4">
                     <QRStyled
                       value={profile?.walletAddress
-                        ? buildClientAppUrl(`/?addr=${profile.walletAddress}`)
+                        ? buildClientAppUrl(`/?addr=${profile.walletAddress}&chainId=${paymentChainId}`)
                         : "https://serapay.io"
                       }
                       size={240}
@@ -673,6 +682,7 @@ export function Settings() {
                   logoUrl={logoUrl}
                   receiveCoin={receiveCoin}
                   walletAddress={profile?.walletAddress}
+                  networkName={paymentNetworkName}
                 />
               </div>
             )}

@@ -2,8 +2,9 @@ import { v4 as uuidv4 } from "uuid";
 import { createSeraApiRequestLog } from "./db";
 
 export const DEFAULT_SERA_API_BASE_URL = "https://api.sera.cx/api/v1";
+export const DEFAULT_SERA_API_TESTNET_BASE_URL = "https://api.testnet.sera.cx/api/v1";
 
-export type SeraMode = "mock" | "live";
+export type SeraMode = "mock" | "test" | "live";
 export type SeraAuthMode = "none" | "api_key" | "eip712";
 
 export interface SeraToken {

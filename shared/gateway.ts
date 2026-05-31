@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+export const DEFAULT_SERA_API_BASE_URL = "https://api.sera.cx/api/v1";
+export const DEFAULT_SERA_API_TESTNET_BASE_URL = "https://api.testnet.sera.cx/api/v1";
+export const seraApiModeSchema = z.enum(["mock", "test", "live"]);
+export type SeraApiMode = z.infer<typeof seraApiModeSchema>;
+
 export const evmAddressSchema = z
   .string()
   .regex(/^0x[0-9a-fA-F]{40}$/, "Expected an EVM address")
@@ -21,9 +26,9 @@ export const amountStringSchema = z
 
 export const seraApiConfigInputSchema = z.object({
   seraApiKey: z.string().trim().min(1).max(512).optional().or(z.literal("")),
-  seraApiBaseUrl: z.string().trim().url().max(255).default("https://api.sera.cx/api/v1"),
+  seraApiBaseUrl: z.string().trim().url().max(255).default(DEFAULT_SERA_API_BASE_URL),
   seraWebhookSecret: z.string().trim().max(256).optional().or(z.literal("")),
-  mode: z.enum(["mock", "live"]).default("mock"),
+  mode: seraApiModeSchema.default("mock"),
 });
 
 export const seraApiKeyGenerationInputSchema = z.object({
@@ -32,7 +37,7 @@ export const seraApiKeyGenerationInputSchema = z.object({
   timestamp: z.coerce.number().int().positive(),
   signature: z.string().trim().regex(/^0x[0-9a-fA-F]+$/, "Expected a hex EIP-712 signature"),
   label: z.string().trim().min(1).max(80).default("pay.sera dashboard"),
-  seraApiBaseUrl: z.string().trim().url().max(255).default("https://api.sera.cx/api/v1"),
+  seraApiBaseUrl: z.string().trim().url().max(255).default(DEFAULT_SERA_API_BASE_URL),
 });
 
 export const createSubWalletInputSchema = z.object({
@@ -89,7 +94,7 @@ export interface ApiKeyConfig {
   seraApiKeyLast4: string | null;
   hasWebhookSecret: boolean;
   webhookSecretLast4: string | null;
-  mode: "mock" | "live";
+  mode: SeraApiMode;
   encryptionReady: boolean;
   updatedAt?: string | Date;
 }

@@ -91,7 +91,7 @@ export function Wallets() {
               ) : data?.masterWallet ? (
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <Metric label="Confirmed volume" value={`$${formatAmount(stats?.totalVolume || "0")}`} />
+                    <Metric label="Successful volume" value={`$${formatAmount(stats?.totalVolume || "0")}`} />
                     <Metric label="Transactions" value={(stats?.totalCount || 0).toString()} />
                     <Metric label="Preferred coin" value={data.masterWallet.receiveCoin || "USDC"} />
                   </div>

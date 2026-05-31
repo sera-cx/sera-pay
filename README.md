@@ -41,7 +41,7 @@ Important groups:
 - Database: `DATABASE_URL`
 - Session/encryption: `SESSION_SECRET`, `SERA_CONFIG_ENCRYPTION_KEY`
 - Wallet authentication: public app/client identifiers plus server-side verification values
-- Sera API: `SERA_API_BASE_URL`, optional platform API credentials
+- Sera API: `SERA_API_BASE_URL`, `SERA_API_TESTNET_BASE_URL`, optional platform API credentials
 - Optional exchange graph: `GOLDSKY_GRAPHQL_URL`
 - Cloudflare R2: `CLOUDFLARE_R2_*` server-side values
 
@@ -49,10 +49,6 @@ Do not commit real API keys, access tokens, private URLs, JWT keys, database URL
 Keep local notes and audit logs under `logs/`; the folder is ignored by git and should stay local-only.
 
 For production, `SESSION_SECRET` and `SERA_CONFIG_ENCRYPTION_KEY` must each be stable random values of at least 32 bytes. Generate each value separately:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-```
 
 ## Scripts
 

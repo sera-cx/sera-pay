@@ -4,6 +4,7 @@
  */
 import { useState, useEffect } from "react";
 import { useParams, Link } from "wouter";
+import { getTransactionStatusLabel } from "@/lib/dashboard-utils";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 
@@ -26,13 +27,6 @@ const STATUS_COLORS: Record<string, string> = {
   confirming: "#FF9500",
   pending: "#FF9500",
   failed: "#FF3B30",
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  confirmed: "Confirmed",
-  confirming: "Confirming",
-  pending: "Pending",
-  failed: "Failed",
 };
 
 function truncate(s: string, head = 6, tail = 4) {
@@ -113,7 +107,7 @@ export default function PayerHistoryPage() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
             {[
               { label: "Total Payments", value: txs.length.toString() },
-              { label: "Confirmed", value: txs.filter(t => t.status === "confirmed").length.toString() },
+              { label: "Successful", value: txs.filter(t => t.status === "confirmed").length.toString() },
               { label: "Total Sent", value: `${totalConfirmed.toFixed(2)}` },
             ].map(stat => (
               <div key={stat.label} style={{ background: "#fff", borderRadius: 14, padding: "14px 12px", textAlign: "center", boxShadow: "0 1px 6px rgba(0,0,0,0.05)" }}>
@@ -191,7 +185,7 @@ export default function PayerHistoryPage() {
                     color: STATUS_COLORS[tx.status],
                     textTransform: "uppercase", letterSpacing: "0.06em",
                   }}>
-                    {STATUS_LABELS[tx.status] || tx.status}
+                    {getTransactionStatusLabel(tx.status)}
                   </span>
                 </div>
 
