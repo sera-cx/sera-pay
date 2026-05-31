@@ -9,6 +9,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSwitchChain, useChainId } from "wagmi";
 import { mainnet, sepolia } from "wagmi/chains";
 import { SeraLogo } from "@/components/SeraPayHeader";
+import { useSeraApiConfig, useUpdateSeraApiConfig } from "@/hooks/use-gateway";
+import { DEFAULT_SERA_API_BASE_URL, DEFAULT_SERA_API_TESTNET_BASE_URL } from "@shared/gateway";
 
 const navItems = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -26,16 +28,23 @@ const NETWORKS: Record<number, { label: string; color: string; bg: string; isTes
   [sepolia.id]: { label: "Sepolia", color: "#00A87A", bg: "#E6FAF5", isTest: true },
   [mainnet.id]: { label: "Ethereum", color: "#627EEA", bg: "#EEF1FD", isTest: false },
 };
-const DEFAULT_NETWORK = NETWORKS[sepolia.id];
 
 // ── Network Switcher Modal ────────────────────────────────────────────────────
 export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
   const chainId = useChainId();
   const { switchChain, isPending } = useSwitchChain();
-  const current = NETWORKS[chainId] ?? DEFAULT_NETWORK;
+  const { data: seraConfig } = useSeraApiConfig();
+  const updateConfig = useUpdateSeraApiConfig();
+  const activeMode = seraConfig?.mode === "live" ? "live" : seraConfig?.mode === "test" ? "test" : chainId === mainnet.id ? "live" : "test";
+  const current = activeMode === "live" ? NETWORKS[mainnet.id] : NETWORKS[sepolia.id];
 
   const handleSwitch = async (targetChainId: number) => {
+    const targetMode = targetChainId === mainnet.id ? "live" : "test";
     try {
+      await updateConfig.mutateAsync({
+        mode: targetMode,
+        seraApiBaseUrl: targetMode === "test" ? DEFAULT_SERA_API_TESTNET_BASE_URL : DEFAULT_SERA_API_BASE_URL,
+      });
       await switchChain({ chainId: targetChainId });
       onClose();
     } catch {
@@ -96,10 +105,10 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
             {/* Sepolia */}
             <button
               onClick={() => handleSwitch(sepolia.id)}
-              disabled={isPending || chainId === sepolia.id}
+              disabled={isPending || updateConfig.isPending || activeMode === "test"}
               className={cn(
                 "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
-                chainId === sepolia.id
+                activeMode === "test"
                   ? "border-[#00D1A0] bg-[#E6FAF5]"
                   : "border-border hover:border-[#00D1A0]/50 hover:bg-muted/40"
               )}
@@ -111,7 +120,7 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
                 <p className="text-sm font-semibold text-foreground">Sepolia Testnet</p>
                 <p className="text-xs text-muted-foreground">For testing only — no real value</p>
               </div>
-              {chainId === sepolia.id && (
+              {activeMode === "test" && (
                 <span className="text-xs font-medium text-[#00A87A] bg-[#E6FAF5] px-2 py-0.5 rounded-full shrink-0">Active</span>
               )}
             </button>
@@ -119,10 +128,10 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
             {/* Ethereum Mainnet */}
             <button
               onClick={() => handleSwitch(mainnet.id)}
-              disabled={isPending || chainId === mainnet.id}
+              disabled={isPending || updateConfig.isPending || activeMode === "live"}
               className={cn(
                 "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
-                chainId === mainnet.id
+                activeMode === "live"
                   ? "border-[#627EEA] bg-[#EEF1FD]"
                   : "border-border hover:border-[#627EEA]/50 hover:bg-muted/40"
               )}
@@ -134,13 +143,13 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
                 <p className="text-sm font-semibold text-foreground">Ethereum Mainnet</p>
                 <p className="text-xs text-muted-foreground">Live network — real payments</p>
               </div>
-              {chainId === mainnet.id && (
+              {activeMode === "live" && (
                 <span className="text-xs font-medium text-[#627EEA] bg-[#EEF1FD] px-2 py-0.5 rounded-full shrink-0">Active</span>
               )}
             </button>
           </div>
 
-          {isPending && (
+          {(isPending || updateConfig.isPending) && (
             <p className="text-xs text-center text-muted-foreground mt-3">Switching network in your wallet…</p>
           )}
         </div>
@@ -251,7 +260,9 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
   const [showNetworkTip, setShowNetworkTip] = useState(false);
 
   const chainId = useChainId();
-  const networkInfo = NETWORKS[chainId] ?? DEFAULT_NETWORK;
+  const { data: seraConfig } = useSeraApiConfig();
+  const activeMode = seraConfig?.mode === "live" ? "live" : seraConfig?.mode === "test" ? "test" : chainId === mainnet.id ? "live" : "test";
+  const networkInfo = activeMode === "live" ? NETWORKS[mainnet.id] : NETWORKS[sepolia.id];
 
   useEvents();
 

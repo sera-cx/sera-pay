@@ -36,6 +36,7 @@ type SeraPayHeaderProps = {
   backAction?: HeaderAction;
   centerContent?: React.ReactNode;
   rightContent?: React.ReactNode;
+  beforeWalletContent?: React.ReactNode;
   compact?: boolean;
   homeHeader?: boolean;
 };
@@ -49,6 +50,7 @@ export function SeraPayHeader({
   backAction,
   centerContent,
   rightContent,
+  beforeWalletContent,
   compact = false,
   homeHeader = false,
 }: SeraPayHeaderProps) {
@@ -138,7 +140,8 @@ export function SeraPayHeader({
 
         {centerContent ? <div style={{ minWidth: 0, justifySelf: "center" }}>{centerContent}</div> : null}
 
-        <div style={{ justifySelf: centerContent ? "end" : undefined, display: "flex", alignItems: "center", justifyContent: "flex-end", minWidth: 0 }}>
+        <div style={{ justifySelf: centerContent ? "end" : undefined, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: beforeWalletContent ? 8 : 0, minWidth: 0 }}>
+        {beforeWalletContent ? beforeWalletContent : null}
         {rightContent ? (
           rightContent
         ) : walletAddress ? (

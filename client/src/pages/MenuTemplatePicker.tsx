@@ -127,19 +127,19 @@ export default function MenuTemplatePicker() {
     <AppLayout>
       <div className="min-h-screen bg-[#F5F7FA]">
         {/* Header */}
-        <div className="bg-white border-b border-gray-100 sticky top-0 z-10">
-          <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
+        <div className="bg-white border-b border-gray-100">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-4 flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-3">
             {step !== "template" && (
               <button
                 onClick={() => setStep("template")}
                 disabled={creating}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
+                className="self-start flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
               >
                 <ArrowLeft className="w-4 h-4" />
                 Back
               </button>
             )}
-            <div className="flex-1">
+            <div className="flex-1 text-center sm:text-left">
               {step === "template" ? (
                 <>
                   <h1 className="text-xl font-bold text-gray-900">Choose a Template</h1>
@@ -159,22 +159,13 @@ export default function MenuTemplatePicker() {
                 </>
               )}
             </div>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2 sm:gap-3">
             {step === "template" && (
               <>
-                {hasMenus && (
-                  <button
-                    onClick={() => navigate("/menu-manager/pos")}
-                    disabled={creating}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
-                  >
-                    <X className="w-4 h-4" />
-                    Cancel
-                  </button>
-                )}
                 <button
                   onClick={() => handleSelectTemplate("scratch")}
                   disabled={creating}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-gray-300 text-sm font-medium text-gray-600 hover:border-[#00C853] hover:text-[#00A87A] hover:bg-[#F0FFF6] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full sm:w-auto justify-center flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-gray-300 text-sm font-medium text-gray-600 hover:border-[#00C853] hover:text-[#00A87A] hover:bg-[#F0FFF6] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {creating && selectedTemplateId === "scratch" ? (
                     <span className="w-4 h-4 border-2 border-[#00C853] border-t-transparent rounded-full animate-spin" />
@@ -183,13 +174,23 @@ export default function MenuTemplatePicker() {
                   )}
                   Start from Scratch
                 </button>
+                {hasMenus && (
+                  <button
+                    onClick={() => navigate("/menu-manager/pos")}
+                    disabled={creating}
+                    className="w-full sm:w-auto justify-center flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
+                  >
+                    <X className="w-4 h-4" />
+                    Cancel
+                  </button>
+                )}
               </>
             )}
             {step === "currency" && (
               <button
                 onClick={handleConfirmCurrency}
                 disabled={creating}
-                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[#00C853] text-white text-sm font-semibold hover:bg-[#00A844] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full sm:w-auto justify-center flex items-center gap-2 px-5 py-2 rounded-xl bg-[#00C853] text-white text-sm font-semibold hover:bg-[#00A844] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {creating ? (
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -203,19 +204,20 @@ export default function MenuTemplatePicker() {
               <button
                 onClick={() => createMenu("scratch", selectedCoin)}
                 disabled={creating || (businessCategory === "Others" && !businessCategoryOther.trim())}
-                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[#00C853] text-white text-sm font-semibold hover:bg-[#00A844] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full sm:w-auto justify-center flex items-center gap-2 px-5 py-2 rounded-xl bg-[#00C853] text-white text-sm font-semibold hover:bg-[#00A844] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {creating ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Check className="w-4 h-4" />}
                 Create
               </button>
             )}
+            </div>
           </div>
         </div>
 
         {/* Step 1: Template Grid */}
         {step === "template" && (
-          <div className="max-w-5xl mx-auto px-6 py-8">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 pb-28 sm:pb-8">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
               {MENU_TEMPLATES.filter(t => t.id !== "scratch").map(template => {
                 const isHovered = hoveredId === template.id;
                 return (
@@ -256,7 +258,7 @@ export default function MenuTemplatePicker() {
 
         {/* Step 2: Scratch Details */}
         {step === "details" && (
-          <div className="max-w-2xl mx-auto px-6 py-8">
+          <div className="max-w-2xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 pb-28 sm:pb-8">
             <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-6 space-y-5">
               <div>
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Menu Name</label>
@@ -295,7 +297,7 @@ export default function MenuTemplatePicker() {
 
         {/* Step 3: Currency Picker */}
         {step === "currency" && (
-          <div className="max-w-3xl mx-auto px-6 py-8">
+          <div className="max-w-3xl mx-auto px-4 sm:px-6 pt-6 sm:pt-8 pb-28 sm:pb-8">
             {Object.entries(currencyGroups).map(([region, coins]) => (
                 <div key={region} className="mb-6">
                   <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">{region}</h3>

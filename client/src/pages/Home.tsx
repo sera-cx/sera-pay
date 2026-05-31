@@ -1,14 +1,16 @@
 import { usePrivy } from "@privy-io/react-auth";
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useLocation } from "wouter";
-import { useChainId } from "wagmi";
+import { useChainId, useSwitchChain } from "wagmi";
+import { mainnet, sepolia } from "wagmi/chains";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { buildPaymentUrl, resolvePaymentChainId } from "@/lib/payment";
+import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { QRStyled, QR_STYLES, type QrStyle } from "@/components/QRStyled";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
-import { useSeraApiConfig } from "@/hooks/use-gateway";
+import { useSeraApiConfig, useUpdateSeraApiConfig } from "@/hooks/use-gateway";
+import { DEFAULT_SERA_API_BASE_URL, DEFAULT_SERA_API_TESTNET_BASE_URL } from "@shared/gateway";
 import { useQueryClient } from "@tanstack/react-query";
 import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
@@ -17,6 +19,73 @@ import { prepareImageForUpload } from "@/lib/imageUpload";
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 const SERAPAY_LOGO_URL = "/icon-512.png";
 const QR_PREVIEW_URL = buildClientAppUrl("/pay/preview");
+type PaymentMode = "test" | "live";
+
+function PaymentModeSwitch({ activeMode }: { activeMode: PaymentMode }) {
+  const { switchChain, isPending } = useSwitchChain();
+  const updateConfig = useUpdateSeraApiConfig();
+  const [switchingMode, setSwitchingMode] = useState<PaymentMode | null>(null);
+  const busy = isPending || updateConfig.isPending || switchingMode !== null;
+
+  const switchWalletNetwork = async (targetMode: PaymentMode) => {
+    const targetChainId = targetMode === "test" ? sepolia.id : mainnet.id;
+    try {
+      await switchChain({ chainId: targetChainId });
+      return;
+    } catch {
+      const provider = (window as any).ethereum;
+      if (!provider) return;
+      if (targetMode === "test") {
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: "0xaa36a7",
+            chainName: "Sepolia",
+            nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
+            rpcUrls: [import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com"],
+            blockExplorerUrls: ["https://sepolia.etherscan.io"],
+          }],
+        });
+        return;
+      }
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] });
+    }
+  };
+
+  const handleSelect = async (targetMode: PaymentMode) => {
+    if (targetMode === activeMode || busy) return;
+    setSwitchingMode(targetMode);
+    try {
+      await updateConfig.mutateAsync({
+        mode: targetMode,
+        seraApiBaseUrl: targetMode === "test" ? DEFAULT_SERA_API_TESTNET_BASE_URL : DEFAULT_SERA_API_BASE_URL,
+      });
+      await switchWalletNetwork(targetMode).catch((error) => console.warn("[PaymentModeSwitch] Wallet network switch failed", error));
+    } finally {
+      setSwitchingMode(null);
+    }
+  };
+
+  const optionStyle = (mode: PaymentMode): React.CSSProperties => ({
+    flex: 1,
+    height: 28,
+    border: "none",
+    borderRadius: 999,
+    background: activeMode === mode ? (mode === "test" ? "#FFF2B8" : "#EEF1FD") : "transparent",
+    color: activeMode === mode ? (mode === "test" ? "#B45309" : "#374151") : "rgba(60,60,67,0.55)",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: busy ? "wait" : "pointer",
+    transition: "background 160ms, color 160ms",
+  });
+
+  return (
+    <div style={{ width: 118, height: 36, borderRadius: 999, border: "1px solid rgba(10,31,26,0.10)", background: "#F4F5F8", padding: 3, display: "flex", gap: 3, boxShadow: "0 1px 0 rgba(255,255,255,0.8) inset", flexShrink: 0 }}>
+      <button type="button" onClick={() => handleSelect("test")} disabled={busy} style={optionStyle("test")}>Test</button>
+      <button type="button" onClick={() => handleSelect("live")} disabled={busy} style={optionStyle("live")}>Live</button>
+    </div>
+  );
+}
 
 function isSupportedLogoValue(value: unknown): value is string {
   return typeof value === "string" && (/^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,/i.test(value) || /^https:\/\//i.test(value));
@@ -985,6 +1054,7 @@ export default function Home() {
   const walletChainId = useChainId();
   const { data: seraConfig } = useSeraApiConfig();
   const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
+  const paymentMode: PaymentMode = paymentChainId === LIVE_PAYMENT_CHAIN_ID ? "live" : "test";
   const [privyTimedOut, setPrivyTimedOut] = useState(false);
   useEffect(() => {
     if (ready) return;
@@ -1850,6 +1920,7 @@ export default function Home() {
       <SeraPayHeader
         maxWidth={520}
         walletAddress={walletAddress}
+        beforeWalletContent={<PaymentModeSwitch activeMode={paymentMode} />}
         dashboardAction={{ label: "Dashboard", onClick: () => setLocation("/dashboard") }}
         disconnectAction={{ label: "Disconnect", onClick: authLogout }}
       />
