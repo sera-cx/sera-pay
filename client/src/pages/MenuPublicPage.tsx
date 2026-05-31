@@ -28,6 +28,7 @@ interface MenuItem {
   coin: string;
   imageUrl: string | null;
   category: string | null;
+  soldOutUntil: string | null;
 }
 
 interface Merchant {
@@ -72,6 +73,12 @@ function formatTokenAmount(value: number) {
   return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00");
 }
 
+function isItemSoldOutToday(item: { soldOutUntil?: string | null }) {
+  if (!item.soldOutUntil) return false;
+  const until = new Date(item.soldOutUntil).getTime();
+  return Number.isFinite(until) && until > Date.now();
+}
+
 async function totalItemsInCoin(items: Array<{ price: string; coin?: string; qty: number }>, targetCoin: string, fallbackCoin: string, chainId?: number) {
   let total = 0;
   const rateCache = new Map<string, number>();
@@ -114,9 +121,10 @@ function ItemCard({
   const shownCoin = displayCoin || item.coin;
   const cs = coinStyle(shownCoin);
   const price = Number(displayPrice ?? item.price);
+  const soldOut = isItemSoldOutToday(item);
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
+    <div className="relative bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
       {item.imageUrl ? (
         <div className="aspect-[4/3] overflow-hidden bg-gray-50">
           <img src={item.imageUrl} alt={item.name} className="w-full h-full object-cover" />
@@ -151,7 +159,8 @@ function ItemCard({
               <span className="text-sm font-bold text-gray-900 w-4 text-center">{cartEntry.qty}</span>
               <button
                 onClick={() => onAdd(item)}
-                className="w-6 h-6 rounded-full bg-[#00C853] text-white flex items-center justify-center hover:bg-[#00B847] transition-colors"
+                disabled={soldOut}
+                className="w-6 h-6 rounded-full bg-[#00C853] text-white flex items-center justify-center hover:bg-[#00B847] transition-colors disabled:bg-gray-200 disabled:text-gray-400"
               >
                 <Plus className="w-3 h-3" />
               </button>
@@ -159,13 +168,19 @@ function ItemCard({
           ) : (
             <button
               onClick={() => onAdd(item)}
-              className="w-7 h-7 rounded-full bg-[#E6FAF5] text-[#00A87A] flex items-center justify-center hover:bg-[#00C853] hover:text-white transition-colors shrink-0"
+              disabled={soldOut}
+              className="w-7 h-7 rounded-full bg-[#E6FAF5] text-[#00A87A] flex items-center justify-center hover:bg-[#00C853] hover:text-white transition-colors shrink-0 disabled:bg-gray-100 disabled:text-gray-300"
             >
               <Plus className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
       </div>
+      {soldOut && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/75 backdrop-blur-[1px]">
+          <span className="rounded-full bg-gray-900 px-3 py-1 text-xs font-bold uppercase tracking-wide text-white shadow-sm">Out of stock</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -342,6 +357,13 @@ export default function MenuPublicPage() {
   }, [data, displayCoin]);
 
   useEffect(() => {
+    if (!data) return;
+    const soldOutIds = new Set(data.items.filter(isItemSoldOutToday).map(item => item.id));
+    if (soldOutIds.size === 0) return;
+    setCart(prev => prev.filter(entry => !soldOutIds.has(entry.item.id)));
+  }, [data]);
+
+  useEffect(() => {
     if (!data || !displayCoin) return;
     let cancelled = false;
     setConvertingPrices(true);
@@ -374,6 +396,7 @@ export default function MenuPublicPage() {
   }, [data, displayCoin, paymentChainId]);
 
   const handleAdd = (item: MenuItem) => {
+    if (isItemSoldOutToday(item)) return;
     setCart(prev => {
       const existing = prev.find(e => e.item.id === item.id);
       if (existing) return prev.map(e => e.item.id === item.id ? { ...e, qty: e.qty + 1 } : e);

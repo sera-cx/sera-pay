@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Receipt, Settings, LogOut, Menu, X, Code2, ChevronLeft, ChevronRight, QrCode, HelpCircle, UtensilsCrossed, ChevronDown, Copy, Check, WalletCards } from "lucide-react";
+import { LayoutDashboard, Receipt, Settings, LogOut, Menu, X, Code2, ChevronLeft, ChevronRight, QrCode, UtensilsCrossed, ChevronDown, Copy, Check, WalletCards } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { cn, shortenAddress } from "@/lib/dashboard-utils";
 import { useMerchantProfile } from "@/hooks/use-merchant";
@@ -119,7 +119,6 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
     try { return localStorage.getItem(LS_SIDEBAR) === "1"; } catch { return false; }
   });
   const [showNetworkModal, setShowNetworkModal] = useState(false);
-  const [showNetworkTip, setShowNetworkTip] = useState(false);
 
   const { activeMode, networkInfo } = useActiveNetworkMode();
 
@@ -202,7 +201,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
       {/* Desktop sidebar */}
       <aside className={cn("hidden md:flex flex-col border-r border-border bg-card fixed inset-y-0 z-10 transition-all duration-200", sidebarW)}>
         {/* Logo / header — clicking navigates to QR generator */}
-        <div className="h-14 flex items-center px-3 border-b border-border shrink-0 overflow-hidden">
+        <div className={cn("h-14 flex items-center border-b border-border shrink-0 overflow-hidden", collapsed ? "justify-center px-0" : "justify-between gap-2 px-3")}>
           <Link href="/" className="flex items-center hover:opacity-80 transition-opacity cursor-pointer">
             {collapsed ? (
               <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#00D1A0] to-[#00B88A] flex items-center justify-center shrink-0 shadow-sm">
@@ -212,6 +211,14 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
               <SeraLogo size={36} />
             )}
           </Link>
+          {!collapsed && (
+            <NetworkModeButton
+              activeMode={activeMode}
+              onClick={() => setShowNetworkModal(true)}
+              className="h-8 shrink-0"
+              title={networkInfo.isTest ? "Test mode - click to switch to Live" : "Live mode - click to switch to Test"}
+            />
+          )}
         </div>
 
         {/* Nav */}
@@ -382,50 +389,12 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
             >
               <Menu className="w-5 h-5" />
             </button>
-
-            {/* Test / Live pill toggle */}
-            <div className="relative">
-              <NetworkModeButton
-                activeMode={activeMode}
-                onClick={() => setShowNetworkModal(true)}
-                title={networkInfo.isTest ? "Test mode — click to switch to Live" : "Live mode — click to switch to Test"}
-              />
-
-              {/* ? tooltip */}
-              <div className="absolute -right-5 top-0 h-7 flex items-center">
-                <button
-                  onMouseEnter={() => setShowNetworkTip(true)}
-                  onMouseLeave={() => setShowNetworkTip(false)}
-                  onFocus={() => setShowNetworkTip(true)}
-                  onBlur={() => setShowNetworkTip(false)}
-                  onClick={() => setShowNetworkTip(v => !v)}
-                  className="w-4 h-4 flex items-center justify-center text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-                  aria-label="Network info"
-                >
-                  <HelpCircle className="w-3 h-3" />
-                </button>
-              </div>
-
-              <AnimatePresence>
-                {showNetworkTip && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 4, scale: 0.97 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: 4, scale: 0.97 }}
-                    transition={{ duration: 0.12 }}
-                    className="absolute left-0 top-9 z-50 w-64 bg-popover border border-border rounded-xl shadow-lg p-3"
-                  >
-                    <p className="text-xs font-semibold text-foreground mb-1">Test vs. Live Network</p>
-                    <p className="text-xs text-muted-foreground leading-relaxed">
-                      <strong className="text-foreground">Test mode</strong> (Sepolia) uses test ETH — no real value. Great for verifying your setup.
-                    </p>
-                    <p className="text-xs text-muted-foreground leading-relaxed mt-1.5">
-                      Switch to <strong className="text-foreground">Live</strong> (Ethereum Mainnet) to accept real payments from customers.
-                    </p>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+            <NetworkModeButton
+              activeMode={activeMode}
+              onClick={() => setShowNetworkModal(true)}
+              className={collapsed ? "md:flex" : "md:hidden"}
+              title={networkInfo.isTest ? "Test mode - click to switch to Live" : "Live mode - click to switch to Test"}
+            />
           </div>
 
           {/* Wallet address dropdown */}

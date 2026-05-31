@@ -116,6 +116,7 @@ export const menuItems = pgTable(
     category: varchar("category", { length: 60 }),
     sortOrder: integer("sortOrder").default(0).notNull(),
     isActive: integer("isActive").default(1).notNull(),
+    soldOutUntil: timestamp("soldOutUntil", { withTimezone: true }),
     createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
   },

@@ -4,8 +4,8 @@
  */
 import { Router } from "express";
 import { createMenuOrder, getDb } from "./db";
-import { menus, menuItems, merchants } from "../drizzle/schema";
-import { eq, and, asc } from "drizzle-orm";
+import { menus, menuItems, merchants, type MenuItem } from "../drizzle/schema";
+import { eq, and, asc, lte, or, isNull } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 import { requireApiKey } from "./payment-routes";
 import { storagePut } from "./storage";
@@ -45,6 +45,28 @@ function normalizeBusinessCategory(value: unknown) {
 function normalizeCategoryOther(value: unknown) {
   const text = typeof value === "string" ? value.trim() : "";
   return text ? text.slice(0, 120) : null;
+}
+
+function normalizeSoldOutUntil(value: unknown) {
+  if (value === null || value === false || value === "") return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (!Number.isFinite(date.getTime())) return null;
+  return date.getTime() > Date.now() ? date : null;
+}
+
+async function clearExpiredSoldOutItems(db: any, menuId?: string) {
+  const expired = lte(menuItems.soldOutUntil, new Date());
+  await db.update(menuItems)
+    .set({ soldOutUntil: null })
+    .where(menuId ? and(eq(menuItems.menuId, menuId), expired) : expired);
+}
+
+function availableMenuItemWhere(menuId: string) {
+  return and(
+    eq(menuItems.menuId, menuId),
+    eq(menuItems.isActive, 1),
+    or(isNull(menuItems.soldOutUntil), lte(menuItems.soldOutUntil, new Date()))
+  );
 }
 
 // ── Protected routes (require API key) ───────────────────────────────────────
@@ -137,6 +159,7 @@ menuRouter.get("/menus/:menuId/items", requireApiKey as any, async (req: any, re
     const { menuId } = req.params;
     const [menu] = await db.select().from(menus).where(and(eq(menus.id, menuId), eq(menus.merchantId, merchant.id)));
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
+    await clearExpiredSoldOutItems(db, menuId);
     const items = await db.select().from(menuItems).where(eq(menuItems.menuId, menuId)).orderBy(asc(menuItems.sortOrder), asc(menuItems.createdAt));
     res.json(items);
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
@@ -167,6 +190,7 @@ menuRouter.post("/menus/:menuId/items", requireApiKey as any, async (req: any, r
       category: category?.trim()?.slice(0, 60) || null,
       sortOrder: typeof sortOrder === "number" ? sortOrder : 0,
       isActive: 1,
+      soldOutUntil: null,
     });
     const [created] = await db.select().from(menuItems).where(eq(menuItems.id, id));
     res.status(201).json(created);
@@ -184,7 +208,7 @@ menuRouter.put("/menus/:menuId/items/:itemId", requireApiKey as any, async (req:
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
     const [item] = await db.select().from(menuItems).where(and(eq(menuItems.id, itemId), eq(menuItems.menuId, menuId)));
     if (!item) { res.status(404).json({ error: "Item not found" }); return; }
-    const { name, description, price, coin, imageUrl, sortOrder, isActive, category } = req.body;
+    const { name, description, price, coin, imageUrl, sortOrder, isActive, category, soldOutUntil } = req.body;
     const updates: Record<string, any> = {};
     if (name !== undefined) updates.name = name.trim().slice(0, 120);
     if (description !== undefined) updates.description = description?.trim()?.slice(0, 500) || null;
@@ -198,6 +222,7 @@ menuRouter.put("/menus/:menuId/items/:itemId", requireApiKey as any, async (req:
     if (category !== undefined) updates.category = category?.trim()?.slice(0, 60) || null;
     if (sortOrder !== undefined) updates.sortOrder = typeof sortOrder === "number" ? sortOrder : 0;
     if (isActive !== undefined) updates.isActive = isActive ? 1 : 0;
+    if (soldOutUntil !== undefined) updates.soldOutUntil = normalizeSoldOutUntil(soldOutUntil);
     await db.update(menuItems).set(updates).where(eq(menuItems.id, itemId));
     const [updated] = await db.select().from(menuItems).where(eq(menuItems.id, itemId));
     res.json(updated);
@@ -267,6 +292,7 @@ menuRouter.post("/menus/:menuId/items/batch", requireApiKey as any, async (req: 
       category: item.category ? String(item.category).trim().slice(0, 60) : null,
       sortOrder: idx,
       isActive: 1 as const,
+      soldOutUntil: null,
     }));
     if (rows.length > 0) await db.insert(menuItems).values(rows);
     const created = await db.select().from(menuItems).where(eq(menuItems.menuId, menuId)).orderBy(asc(menuItems.sortOrder), asc(menuItems.createdAt));
@@ -314,6 +340,7 @@ menuRouter.get("/public/menu/:slug", async (req, res) => {
     const { slug } = req.params;
     const [menu] = await db.select().from(menus).where(and(eq(menus.slug, slug), eq(menus.isActive, 1)));
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
+    await clearExpiredSoldOutItems(db, menu.id);
     const [merchant] = await db.select({
       name: merchants.name,
       logoData: merchants.logoData,
@@ -336,6 +363,7 @@ menuRouter.post("/public/menu/:slug/orders", async (req, res) => {
     const { slug } = req.params;
     const [menu] = await db.select().from(menus).where(and(eq(menus.slug, slug), eq(menus.isActive, 1)));
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
+    await clearExpiredSoldOutItems(db, menu.id);
     const [merchant] = await db.select({ receiveCoin: merchants.receiveCoin }).from(merchants).where(eq(merchants.id, menu.merchantId));
 
     const pax = Math.max(1, Math.min(99, Number.parseInt(String(req.body?.pax ?? "1"), 10) || 1));
@@ -343,15 +371,21 @@ menuRouter.post("/public/menu/:slug/orders", async (req, res) => {
     if (requestedItems.length === 0) { res.status(400).json({ error: "items array required" }); return; }
 
     const availableItems = await db.select().from(menuItems)
-      .where(and(eq(menuItems.menuId, menu.id), eq(menuItems.isActive, 1)))
-      .orderBy(asc(menuItems.sortOrder), asc(menuItems.createdAt));
+      .where(availableMenuItemWhere(menu.id))
+      .orderBy(asc(menuItems.sortOrder), asc(menuItems.createdAt)) as MenuItem[];
     const itemById = new Map(availableItems.map((item: any) => [item.id, item]));
 
-    const rows = requestedItems.slice(0, 80).map((entry: any) => {
-      const item = itemById.get(String(entry?.id ?? ""));
+    const requestedRows = requestedItems.slice(0, 80).map((entry: any) => {
+      const id = String(entry?.id ?? "");
       const qty = Math.max(0, Math.min(99, Number.parseInt(String(entry?.qty ?? "0"), 10) || 0));
-      return item && qty > 0 ? { item, qty } : null;
-    }).filter(Boolean) as { item: typeof availableItems[number]; qty: number }[];
+      return qty > 0 ? { id, qty } : null;
+    }).filter(Boolean) as { id: string; qty: number }[];
+
+    if (requestedRows.some((entry) => !itemById.has(entry.id))) {
+      res.status(409).json({ error: "Some selected items are sold out or unavailable. Please refresh your order." }); return;
+    }
+
+    const rows = requestedRows.map((entry) => ({ item: itemById.get(entry.id)!, qty: entry.qty })) as { item: MenuItem; qty: number }[];
 
     if (rows.length === 0) { res.status(400).json({ error: "No valid menu items selected" }); return; }
     const firstCoin = rows[0].item.coin || "USDC";

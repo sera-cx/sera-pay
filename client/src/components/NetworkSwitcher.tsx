@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { motion } from "framer-motion";
 import { useChainId, useSwitchChain } from "wagmi";
@@ -102,20 +103,23 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
     }
   };
 
-  return (
+  const modal = (
     <>
-      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 z-[1000] bg-black/45 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-[1001] flex items-center justify-center overflow-y-auto p-4 sm:p-6">
         <motion.div
           initial={{ opacity: 0, y: 12, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 12, scale: 0.97 }}
           transition={{ duration: 0.14 }}
-          className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-sm p-5"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="network-switcher-title"
+          className="my-auto w-full max-w-sm rounded-2xl border border-border bg-card p-5 shadow-2xl"
         >
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-sm font-semibold text-foreground">Switch Network</h3>
+              <h3 id="network-switcher-title" className="text-sm font-semibold text-foreground">Switch Network</h3>
               <p className="text-xs text-muted-foreground mt-0.5">
                 Currently on <span className="font-medium" style={{ color: networkInfo.color }}>{networkInfo.label}</span>
               </p>
@@ -188,4 +192,7 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
       </div>
     </>
   );
+
+  if (typeof document === "undefined") return modal;
+  return createPortal(modal, document.body);
 }

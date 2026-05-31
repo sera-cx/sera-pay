@@ -60,6 +60,7 @@ interface MenuItem {
   imageUrl: string | null;
   sortOrder: number;
   isActive: number;
+  soldOutUntil: string | null;
   category: string | null;
 }
 
@@ -114,6 +115,18 @@ function menuPublicUrl(slug: string, chainId?: number) {
   return buildClientAppUrl(`/menu/${slug}${query}`);
 }
 
+function nextLocalMidnightIso() {
+  const next = new Date();
+  next.setHours(24, 0, 0, 0);
+  return next.toISOString();
+}
+
+function isItemSoldOutToday(item: { soldOutUntil?: string | null }) {
+  if (!item.soldOutUntil) return false;
+  const until = new Date(item.soldOutUntil).getTime();
+  return Number.isFinite(until) && until > Date.now();
+}
+
 // ── Item Edit Dialog ──────────────────────────────────────────────────────────
 
 function ItemEditDialog({
@@ -125,7 +138,7 @@ function ItemEditDialog({
 }: {
   item: MenuItem;
   menuId: string;
-  onSave: (data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string }) => void;
+  onSave: (data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => void;
   onCancel: () => void;
   loading: boolean;
 }) {
@@ -135,6 +148,7 @@ function ItemEditDialog({
   const [coin, setCoin] = useState(item.coin);
   const [category, setCategory] = useState(item.category || "");
   const [imageUrl, setImageUrl] = useState(item.imageUrl || "");
+  const [soldOutToday, setSoldOutToday] = useState(isItemSoldOutToday(item));
   const [uploadingImage, setUploadingImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -162,7 +176,7 @@ function ItemEditDialog({
     <>
       <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold text-gray-900">Edit Item</h3>
             <button onClick={onCancel} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
@@ -219,10 +233,22 @@ function ItemEditDialog({
               </Select>
             </div>
           </div>
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 transition-colors hover:border-[#00C853]/50">
+            <input
+              type="checkbox"
+              checked={soldOutToday}
+              onChange={e => setSoldOutToday(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300 accent-[#00C853]"
+            />
+            <span className="min-w-0 text-sm leading-snug text-gray-700">
+              <span className="block font-semibold text-gray-900">Item sold out for today</span>
+              <span className="block text-xs text-gray-500">Resets automatically at 00:00.</span>
+            </span>
+          </label>
           <div className="flex gap-2 pt-1">
             <Button
               className="flex-1 bg-[#00C853] hover:bg-[#00B847] text-white"
-              onClick={() => onSave({ name, description, price, coin, imageUrl: imageUrl || undefined, category })}
+              onClick={() => onSave({ name, description, price, coin, imageUrl: imageUrl || undefined, category, soldOutUntil: soldOutToday ? nextLocalMidnightIso() : null })}
               disabled={loading || !name.trim() || !price}
             >
               {loading ? "Saving…" : "Save Item"}
@@ -560,11 +586,14 @@ function ItemTile({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const soldOut = isItemSoldOutToday(item);
   return (
     <div
-      className={`relative rounded-2xl overflow-hidden border-2 transition-all cursor-pointer group
-        ${cartQty > 0 ? "border-[#00C853] shadow-md" : "border-gray-100 hover:border-gray-200 shadow-sm"}`}
-      onClick={onAdd}
+      className={`relative rounded-2xl overflow-hidden border-2 transition-all group
+        ${cartQty > 0 ? "border-[#00C853] shadow-md" : "border-gray-100 hover:border-gray-200 shadow-sm"}
+        ${soldOut ? "cursor-not-allowed" : "cursor-pointer"}`}
+      onClick={soldOut ? undefined : onAdd}
+      aria-disabled={soldOut}
     >
       {/* Photo or placeholder */}
       <div className="aspect-[4/3] bg-gray-50 relative">
@@ -583,7 +612,7 @@ function ItemTile({
         )}
         {/* Edit / delete overlay */}
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
-        <div className="absolute top-2 left-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="absolute top-2 left-2 z-20 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={e => { e.stopPropagation(); onEdit(); }}
             className="w-7 h-7 bg-white/90 rounded-lg flex items-center justify-center text-gray-600 hover:text-[#00A87A] shadow-sm"
@@ -620,18 +649,24 @@ function ItemTile({
               <span className="text-xs font-bold w-4 text-center">{cartQty}</span>
               <button
                 onClick={onAdd}
-                className="w-6 h-6 rounded-full bg-[#00C853] text-white flex items-center justify-center hover:bg-[#00B847]"
+                disabled={soldOut}
+                className="w-6 h-6 rounded-full bg-[#00C853] text-white flex items-center justify-center hover:bg-[#00B847] disabled:bg-gray-200 disabled:text-gray-400"
               >
                 <Plus className="w-3 h-3" />
               </button>
             </div>
           ) : (
-            <div className="w-7 h-7 rounded-full bg-[#E6FAF5] text-[#00A87A] flex items-center justify-center group-hover:bg-[#00C853] group-hover:text-white transition-colors">
+            <div className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${soldOut ? "bg-gray-100 text-gray-300" : "bg-[#E6FAF5] text-[#00A87A] group-hover:bg-[#00C853] group-hover:text-white"}`}>
               <Plus className="w-3.5 h-3.5" />
             </div>
           )}
         </div>
       </div>
+      {soldOut && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/75 backdrop-blur-[1px]">
+          <span className="rounded-full bg-gray-900 px-3 py-1 text-xs font-bold uppercase tracking-wide text-white shadow-sm">Out of stock</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -648,6 +683,7 @@ function POSView({
   onRemoveFromCart,
   onUpdateCartQty,
   onClearCart,
+  onDropFromCart,
   onNewMenu,
   onRenameMenu,
   onDeleteMenu,
@@ -661,6 +697,7 @@ function POSView({
   onRemoveFromCart: (itemId: string) => void;
   onUpdateCartQty: (itemId: string, delta: number) => void;
   onClearCart: () => void;
+  onDropFromCart: (itemId: string) => void;
   onNewMenu: () => void;
   onRenameMenu: (menuId: string, menuName: string) => void;
   onDeleteMenu: (menuId: string, menuName: string) => void;
@@ -718,6 +755,7 @@ function POSView({
         const enriched = data.map(item => ({
           ...item,
           category: inferCategory(item),
+          soldOutUntil: isItemSoldOutToday(item) ? item.soldOutUntil : null,
         }));
         setItems(enriched);
         setActiveCategory("All");
@@ -725,6 +763,15 @@ function POSView({
       .catch(e => toast.error(e.message || "Failed to load items"))
       .finally(() => setLoadingItems(false));
   }, [menu.id]);
+
+  useEffect(() => {
+    if (items.length === 0 || cart.length === 0) return;
+    const soldOutIds = new Set(items.filter(isItemSoldOutToday).map(item => item.id));
+    if (soldOutIds.size === 0) return;
+    cart.forEach(entry => {
+      if (soldOutIds.has(entry.item.id)) onDropFromCart(entry.item.id);
+    });
+  }, [items, cart, onDropFromCart]);
 
   // Derive unique categories from items
   const categories = useMemo(() => {
@@ -749,7 +796,7 @@ function POSView({
     }
   };
 
-  const handleUpdateItem = async (item: MenuItem, data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string }) => {
+  const handleUpdateItem = async (item: MenuItem, data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => {
     setSavingItem(true);
     try {
       const updated = await fetchApi<MenuItem>(`/menus/${menu.id}/items/${item.id}`, {
@@ -757,6 +804,7 @@ function POSView({
         body: JSON.stringify(data),
       });
       setItems(prev => prev.map(i => i.id === item.id ? updated : i));
+      if (isItemSoldOutToday(updated)) onDropFromCart(item.id);
       setEditingItem(null);
       toast.success("Item updated");
     } catch (e: any) {
@@ -910,7 +958,7 @@ function POSView({
             onSelect={setBulkCoin}
             onClose={() => setBulkCoinOpen(false)}
             onConfirm={handleBulkCoinUpdate}
-            confirmLabel={`Update all to ${bulkCoin}`}
+            confirmLabel="Update"
             confirming={bulkCoinSaving}
           />
         )}
@@ -1095,6 +1143,10 @@ export function MenuManager() {
   }, [dashboardApiKey, isAuthenticated, search]);
 
   const handleAddToCart = (item: MenuItem) => {
+    if (isItemSoldOutToday(item)) {
+      toast.error("This item is sold out for today");
+      return;
+    }
     persistCart((prev: CartEntry[]) => {
       const existing = prev.find((e: CartEntry) => e.item.id === item.id);
       if (existing) return prev.map((e: CartEntry) => e.item.id === item.id ? { ...e, qty: e.qty + 1 } : e);
@@ -1113,11 +1165,20 @@ export function MenuManager() {
 
   const handleUpdateCartQty = (itemId: string, delta: number) => {
     if (delta > 0) {
+      const entry = cart.find(e => e.item.id === itemId);
+      if (entry && isItemSoldOutToday(entry.item)) {
+        toast.error("This item is sold out for today");
+        return;
+      }
       persistCart((prev: CartEntry[]) => prev.map((e: CartEntry) => e.item.id === itemId ? { ...e, qty: e.qty + 1 } : e));
     } else {
       handleRemoveFromCart(itemId);
     }
   };
+
+  const handleDropFromCart = useCallback((itemId: string) => {
+    persistCart((prev: CartEntry[]) => prev.filter((e: CartEntry) => e.item.id !== itemId));
+  }, [persistCart]);
 
   const handleDeleteMenu = async (menuId: string, menuName: string) => {
     if (!confirm(`Delete "${menuName}"? This will remove all items and cannot be undone.`)) return;
@@ -1174,6 +1235,7 @@ export function MenuManager() {
           onRemoveFromCart={handleRemoveFromCart}
           onUpdateCartQty={handleUpdateCartQty}
           onClearCart={() => persistCart([])}
+          onDropFromCart={handleDropFromCart}
           onNewMenu={() => navigate("/menu-manager/new")}
           onRenameMenu={handleRenameMenu}
           onDeleteMenu={handleDeleteMenu}

@@ -170,9 +170,11 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "category" varchar(60),
       "sortOrder" integer NOT NULL DEFAULT 0,
       "isActive" integer NOT NULL DEFAULT 1,
+      "soldOutUntil" timestamptz,
       "createdAt" timestamptz NOT NULL DEFAULT now(),
       "updatedAt" timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE "menu_items" ADD COLUMN IF NOT EXISTS "soldOutUntil" timestamptz;
     CREATE INDEX IF NOT EXISTS "idx_menu_items_menu" ON "menu_items" ("menuId");
 
     CREATE TABLE IF NOT EXISTS "menu_orders" (
