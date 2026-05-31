@@ -1,0 +1,99 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  verify:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run check
+
+      - name: Test
+        run: pnpm run test
+        env:
+          NODE_ENV: test
+
+      - name: Dev server smoke test
+        shell: bash
+        run: |
+          pnpm run dev > /tmp/serapay-dev.log 2>&1 &
+          APP_PID=$!
+          APP_ORIGIN="http://localhost:${PORT:-3000}"
+          for i in {1..30}; do
+            if curl -fsS "$APP_ORIGIN/api/healthz" >/dev/null; then
+              kill $APP_PID
+              wait $APP_PID || true
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/serapay-dev.log
+          kill $APP_PID || true
+          exit 1
+        env:
+          NODE_ENV: development
+          PORT: 3000
+          PAYMENT_BASE_URL: http://localhost:3000
+          SERA_API_BASE_URL: https://api.sera.cx/api/v1
+          SESSION_SECRET: ci-session-secret
+          SERA_CONFIG_ENCRYPTION_KEY: ci-sera-config-encryption-key-32
+
+      - name: Build
+        run: pnpm run build
+
+  docker:
+    name: Build and publish Docker image
+    needs: verify
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            VITE_PRIVY_APP_ID=${{ secrets.VITE_PRIVY_APP_ID }}
+            VITE_PRIVY_CLIENT_ID=${{ secrets.VITE_PRIVY_CLIENT_ID }}
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}

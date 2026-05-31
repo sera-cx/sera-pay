@@ -1,0 +1,378 @@
+export interface TemplateItem {
+  name: string;
+  description?: string;
+  price: string;
+  coin: string;
+  category?: string;
+}
+
+export interface MenuTemplate {
+  id: string;
+  label: string;
+  emoji: string;
+  description: string;
+  defaultMenuName: string;
+  items: TemplateItem[];
+}
+
+export const MENU_TEMPLATES: MenuTemplate[] = [
+  {
+    id: "restaurant",
+    label: "Restaurant",
+    emoji: "🍽️",
+    description: "Full-service dining",
+    defaultMenuName: "Dinner Menu",
+    items: [
+      // Starters
+      { name: "Soup of the Day", description: "Chef's daily soup with crusty bread", price: "8.00", coin: "USDC", category: "Starters" },
+      { name: "Caesar Salad", description: "Romaine lettuce, croutons, parmesan, caesar dressing", price: "10.00", coin: "USDC", category: "Starters" },
+      { name: "Bruschetta", description: "Toasted sourdough with tomato, basil, garlic", price: "9.00", coin: "USDC", category: "Starters" },
+      { name: "Chicken Wings (6pc)", description: "Crispy wings with choice of sauce", price: "12.00", coin: "USDC", category: "Starters" },
+      { name: "Spring Rolls (4pc)", description: "Vegetable spring rolls with sweet chilli dip", price: "8.00", coin: "USDC", category: "Starters" },
+      { name: "Garlic Bread", description: "Toasted baguette with herb garlic butter", price: "6.00", coin: "USDC", category: "Starters" },
+      // Mains
+      { name: "Grilled Chicken", description: "Herb-marinated chicken breast with seasonal vegetables", price: "18.00", coin: "USDC", category: "Mains" },
+      { name: "Beef Sirloin Steak", description: "200g sirloin with fries, salad, and sauce", price: "32.00", coin: "USDC", category: "Mains" },
+      { name: "Pasta Carbonara", description: "Creamy pasta with bacon, egg, parmesan", price: "15.00", coin: "USDC", category: "Mains" },
+      { name: "Margherita Pizza", description: "Tomato base, mozzarella, fresh basil", price: "16.00", coin: "USDC", category: "Mains" },
+      { name: "Grilled Salmon", description: "Atlantic salmon with lemon butter and greens", price: "26.00", coin: "USDC", category: "Mains" },
+      { name: "Lamb Rack", description: "3-bone rack with rosemary jus and mash", price: "38.00", coin: "USDC", category: "Mains" },
+      { name: "Vegetarian Risotto", description: "Mushroom and truffle oil arborio rice", price: "17.00", coin: "USDC", category: "Mains" },
+      { name: "Fish & Chips", description: "Beer-battered fish with thick-cut fries and tartare", price: "19.00", coin: "USDC", category: "Mains" },
+      { name: "Beef Burger", description: "Angus beef patty, lettuce, tomato, pickles, fries", price: "18.00", coin: "USDC", category: "Mains" },
+      // Sides
+      { name: "Fries", description: "Crispy golden fries with ketchup", price: "5.00", coin: "USDC", category: "Sides" },
+      { name: "Garden Salad", description: "Mixed greens with house dressing", price: "6.00", coin: "USDC", category: "Sides" },
+      { name: "Steamed Rice", description: "Jasmine rice", price: "3.00", coin: "USDC", category: "Sides" },
+      // Desserts
+      { name: "Chocolate Lava Cake", description: "Warm chocolate cake with vanilla ice cream", price: "9.00", coin: "USDC", category: "Desserts" },
+      { name: "Crème Brûlée", description: "Classic vanilla custard with caramelised sugar", price: "8.00", coin: "USDC", category: "Desserts" },
+      { name: "Tiramisu", description: "Espresso-soaked ladyfingers with mascarpone", price: "9.00", coin: "USDC", category: "Desserts" },
+      { name: "Ice Cream (2 scoops)", description: "Vanilla, chocolate, or strawberry", price: "6.00", coin: "USDC", category: "Desserts" },
+      // Beverages
+      { name: "Soft Drink", description: "Coke, Sprite, Fanta, or Soda Water", price: "3.00", coin: "USDC", category: "Beverages" },
+      { name: "Fresh Juice", description: "Orange, apple, or watermelon", price: "5.00", coin: "USDC", category: "Beverages" },
+      { name: "Sparkling Water 750ml", description: "San Pellegrino or Perrier", price: "6.00", coin: "USDC", category: "Beverages" },
+      { name: "House Wine (glass)", description: "Red or white, ask your server for today's selection", price: "10.00", coin: "USDC", category: "Beverages" },
+      { name: "Craft Beer", description: "Local draught or bottled selection", price: "8.00", coin: "USDC", category: "Beverages" },
+      { name: "Coffee", description: "Espresso, Americano, Latte, or Cappuccino", price: "4.50", coin: "USDC", category: "Beverages" },
+    ],
+  },
+  {
+    id: "cafe",
+    label: "Café",
+    emoji: "☕",
+    description: "Coffee & light bites",
+    defaultMenuName: "Café Menu",
+    items: [
+      // Coffee
+      { name: "Espresso", description: "Single or double shot", price: "3.50", coin: "USDC", category: "Coffee" },
+      { name: "Americano", description: "Espresso with hot water", price: "4.00", coin: "USDC", category: "Coffee" },
+      { name: "Flat White", description: "Double ristretto with velvety steamed milk", price: "5.00", coin: "USDC", category: "Coffee" },
+      { name: "Cappuccino", description: "Equal parts espresso, steamed milk, and foam", price: "5.00", coin: "USDC", category: "Coffee" },
+      { name: "Latte", description: "Espresso with steamed milk, light foam", price: "5.50", coin: "USDC", category: "Coffee" },
+      { name: "Cortado", description: "Espresso cut with a small amount of warm milk", price: "4.50", coin: "USDC", category: "Coffee" },
+      { name: "Cold Brew", description: "12-hour cold-steeped coffee over ice", price: "6.00", coin: "USDC", category: "Coffee" },
+      { name: "Iced Latte", description: "Espresso over ice with cold milk", price: "6.00", coin: "USDC", category: "Coffee" },
+      // Non-coffee
+      { name: "Matcha Latte", description: "Ceremonial grade matcha with oat milk", price: "5.50", coin: "USDC", category: "Non-Coffee" },
+      { name: "Chai Latte", description: "Spiced masala chai with steamed milk", price: "5.00", coin: "USDC", category: "Non-Coffee" },
+      { name: "Hot Chocolate", description: "Rich Belgian chocolate with steamed milk", price: "5.50", coin: "USDC", category: "Non-Coffee" },
+      { name: "Herbal Tea", description: "Chamomile, peppermint, or lemongrass", price: "4.00", coin: "USDC", category: "Non-Coffee" },
+      // Food
+      { name: "Butter Croissant", description: "Freshly baked, flaky and golden", price: "4.00", coin: "USDC", category: "Food" },
+      { name: "Almond Croissant", description: "Filled with frangipane, topped with flaked almonds", price: "5.50", coin: "USDC", category: "Food" },
+      { name: "Avocado Toast", description: "Sourdough with smashed avo, poached egg, chilli flakes", price: "13.00", coin: "USDC", category: "Food" },
+      { name: "Banana Bread", description: "Thick slice, toasted with butter", price: "5.00", coin: "USDC", category: "Food" },
+      { name: "Granola Bowl", description: "House granola with yoghurt and seasonal fruit", price: "10.00", coin: "USDC", category: "Food" },
+      { name: "Egg & Cheese Sandwich", description: "Scrambled egg and cheddar on toasted brioche", price: "9.00", coin: "USDC", category: "Food" },
+      { name: "Cheesecake Slice", description: "New York style with berry compote", price: "7.00", coin: "USDC", category: "Food" },
+      { name: "Brownie", description: "Fudgy dark chocolate brownie", price: "5.00", coin: "USDC", category: "Food" },
+    ],
+  },
+  {
+    id: "hawker",
+    label: "Hawker / Street Food",
+    emoji: "🍜",
+    description: "Asian street food & hawker fare",
+    defaultMenuName: "Hawker Menu",
+    items: [
+      { name: "Kaya Toast Set", description: "Kaya butter toast with soft-boiled eggs and kopi", price: "4.50", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Nasi Lemak", description: "Coconut rice with sambal, egg, ikan bilis, peanuts", price: "5.00", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Char Kway Teow", description: "Stir-fried flat rice noodles with egg, prawns, bean sprouts", price: "6.00", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Chicken Rice", description: "Poached or roasted chicken with fragrant rice and chilli", price: "5.50", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Laksa", description: "Spicy coconut milk noodle soup with prawns and tofu puffs", price: "7.00", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Hokkien Mee", description: "Braised yellow and rice noodles with seafood", price: "6.50", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Bak Kut Teh", description: "Pork rib soup with herbs and garlic", price: "8.00", coin: "USDC", category: "Soups & Sides" },
+      { name: "Satay (5 sticks)", description: "Grilled marinated chicken or beef with peanut sauce", price: "5.00", coin: "USDC", category: "Soups & Sides" },
+      { name: "Roti Prata", description: "Crispy flatbread with curry dipping sauce", price: "3.50", coin: "USDC", category: "Soups & Sides" },
+      { name: "Mee Goreng", description: "Spicy stir-fried yellow noodles with egg and vegetables", price: "5.50", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Wonton Noodle Soup", description: "Egg noodles in clear broth with pork wontons", price: "6.00", coin: "USDC", category: "Rice & Noodles" },
+      { name: "Oyster Omelette", description: "Crispy egg omelette with fresh oysters and sweet potato starch", price: "7.00", coin: "USDC", category: "Soups & Sides" },
+      { name: "Carrot Cake (White/Black)", description: "Radish cake stir-fried with egg, choose white or black", price: "4.50", coin: "USDC", category: "Soups & Sides" },
+      { name: "Popiah (2pc)", description: "Fresh spring rolls with turnip, egg, and sweet sauce", price: "4.00", coin: "USDC", category: "Soups & Sides" },
+      { name: "Kopi O", description: "Traditional black coffee, sweetened or unsweetened", price: "1.50", coin: "USDC", category: "Drinks" },
+      { name: "Teh Tarik", description: "Pulled milk tea, frothy and sweet", price: "2.00", coin: "USDC", category: "Drinks" },
+      { name: "Sugarcane Juice", description: "Fresh-pressed, served with ice", price: "2.50", coin: "USDC", category: "Drinks" },
+      { name: "Bandung", description: "Rose syrup with evaporated milk", price: "2.00", coin: "USDC", category: "Drinks" },
+      { name: "Cendol", description: "Shaved ice with pandan jelly, coconut milk, gula melaka", price: "3.50", coin: "USDC", category: "Desserts" },
+      { name: "Ice Kachang", description: "Shaved ice with red beans, corn, jelly, and syrup", price: "3.50", coin: "USDC", category: "Desserts" },
+    ],
+  },
+  {
+    id: "bubble_tea",
+    label: "Bubble Tea",
+    emoji: "🧋",
+    description: "Boba & milk teas",
+    defaultMenuName: "Bubble Tea Menu",
+    items: [
+      { name: "Classic Milk Tea", description: "Black tea with creamer, choice of sugar level", price: "4.50", coin: "USDC", category: "Milk Tea" },
+      { name: "Brown Sugar Boba Milk", description: "Tiger stripes brown sugar syrup with fresh milk", price: "6.00", coin: "USDC", category: "Milk Tea" },
+      { name: "Taro Milk Tea", description: "Creamy taro with black tea and pearls", price: "5.50", coin: "USDC", category: "Milk Tea" },
+      { name: "Matcha Milk Tea", description: "Japanese matcha with milk and pearls", price: "5.50", coin: "USDC", category: "Milk Tea" },
+      { name: "Strawberry Milk Tea", description: "Fresh strawberry with milk and pearls", price: "5.50", coin: "USDC", category: "Milk Tea" },
+      { name: "Jasmine Green Tea", description: "Light and floral, served with lychee jelly", price: "4.50", coin: "USDC", category: "Fruit Tea" },
+      { name: "Oolong Milk Tea", description: "Roasted oolong with creamy milk", price: "5.00", coin: "USDC", category: "Milk Tea" },
+      { name: "Cheese Foam Milk Tea", description: "Black tea topped with salted cream cheese foam", price: "6.50", coin: "USDC", category: "Milk Tea" },
+      { name: "Passion Fruit Green Tea", description: "Tangy passion fruit with green tea and aloe vera", price: "5.00", coin: "USDC", category: "Fruit Tea" },
+      { name: "Wintermelon Tea", description: "Refreshing wintermelon with honey pearls", price: "4.50", coin: "USDC", category: "Fruit Tea" },
+      { name: "Mango Smoothie", description: "Blended fresh mango with milk, no tea", price: "6.00", coin: "USDC", category: "Smoothies" },
+      { name: "Avocado Smoothie", description: "Creamy avocado blended with milk and honey", price: "6.50", coin: "USDC", category: "Smoothies" },
+      // Add-ons
+      { name: "Extra Pearls", description: "Additional tapioca pearls", price: "0.50", coin: "USDC", category: "Add-ons" },
+      { name: "Pudding Add-on", description: "Egg pudding or grass jelly", price: "0.80", coin: "USDC", category: "Add-ons" },
+      { name: "Upgrade to Large", description: "Upsize any drink to large (700ml)", price: "1.00", coin: "USDC", category: "Add-ons" },
+    ],
+  },
+  {
+    id: "electronics",
+    label: "Electronics",
+    emoji: "💻",
+    description: "Gadgets & accessories",
+    defaultMenuName: "Electronics Store",
+    items: [
+      { name: "USB-C Hub 7-in-1", description: "HDMI, USB-A ×3, SD, TF, USB-C PD", price: "35.00", coin: "USDC", category: "Accessories" },
+      { name: "Wireless Earbuds", description: "Bluetooth 5.3, ANC, 30hr total battery", price: "79.00", coin: "USDC", category: "Audio" },
+      { name: "Phone Case (iPhone)", description: "Shockproof MagSafe-compatible silicone", price: "15.00", coin: "USDC", category: "Phone" },
+      { name: "Phone Case (Samsung)", description: "Military-grade drop protection", price: "15.00", coin: "USDC", category: "Phone" },
+      { name: "Tempered Glass Screen Protector", description: "9H hardness, 2-pack", price: "9.00", coin: "USDC", category: "Phone" },
+      { name: "USB-C to USB-C Cable 2m", description: "240W fast charge, braided nylon", price: "15.00", coin: "USDC", category: "Cables" },
+      { name: "Lightning to USB-C Cable", description: "MFi certified, 1.2m", price: "18.00", coin: "USDC", category: "Cables" },
+      { name: "Power Bank 10000mAh", description: "22.5W fast charge, USB-A + USB-C", price: "45.00", coin: "USDC", category: "Power" },
+      { name: "Power Bank 20000mAh", description: "65W PD, charges laptops", price: "75.00", coin: "USDC", category: "Power" },
+      { name: "65W GaN Charger", description: "Dual USB-C + USB-A, foldable plug", price: "39.00", coin: "USDC", category: "Power" },
+      { name: "Wireless Charger Pad", description: "15W Qi2, compatible with MagSafe", price: "28.00", coin: "USDC", category: "Power" },
+      { name: "Portable Bluetooth Speaker", description: "IPX7 waterproof, 12hr battery", price: "55.00", coin: "USDC", category: "Audio" },
+      { name: "Laptop Stand", description: "Adjustable aluminium, foldable", price: "32.00", coin: "USDC", category: "Accessories" },
+      { name: "Mechanical Keyboard", description: "TKL, hot-swap, RGB backlight", price: "89.00", coin: "USDC", category: "Accessories" },
+      { name: "Webcam 1080p", description: "Built-in microphone, plug-and-play", price: "49.00", coin: "USDC", category: "Accessories" },
+      { name: "Mouse Pad XL", description: "900×400mm, stitched edges", price: "18.00", coin: "USDC", category: "Accessories" },
+      { name: "Cable Management Kit", description: "Velcro straps, clips, and sleeves", price: "12.00", coin: "USDC", category: "Accessories" },
+      { name: "SSD 1TB (USB-C)", description: "1050MB/s read, pocket-sized", price: "85.00", coin: "USDC", category: "Storage" },
+    ],
+  },
+  {
+    id: "retail",
+    label: "Retail",
+    emoji: "🛍️",
+    description: "General merchandise",
+    defaultMenuName: "Store Catalogue",
+    items: [
+      { name: "Canvas Tote Bag", description: "Natural cotton, 10kg capacity", price: "18.00", coin: "USDC", category: "Bags" },
+      { name: "Dotted Notebook A5", description: "160 pages, hardcover, lay-flat binding", price: "12.00", coin: "USDC", category: "Stationery" },
+      { name: "Insulated Water Bottle 500ml", description: "Stainless steel, keeps cold 24hr", price: "25.00", coin: "USDC", category: "Drinkware" },
+      { name: "Insulated Water Bottle 1L", description: "Wide mouth, carry loop lid", price: "35.00", coin: "USDC", category: "Drinkware" },
+      { name: "Soy Wax Candle", description: "40hr burn, choice of scent", price: "22.00", coin: "USDC", category: "Home" },
+      { name: "Reed Diffuser", description: "100ml, 30-day fragrance", price: "28.00", coin: "USDC", category: "Home" },
+      { name: "Ceramic Mug", description: "350ml, microwave and dishwasher safe", price: "15.00", coin: "USDC", category: "Drinkware" },
+      { name: "Bamboo Pen Set (3pc)", description: "Ballpoint, rollerball, and fountain", price: "20.00", coin: "USDC", category: "Stationery" },
+      { name: "Desk Organiser", description: "Bamboo, 5 compartments", price: "30.00", coin: "USDC", category: "Stationery" },
+      { name: "Sticky Notes Set", description: "6 pads, assorted colours and sizes", price: "8.00", coin: "USDC", category: "Stationery" },
+      { name: "Washi Tape Set (5 rolls)", description: "Botanical print, 15mm wide", price: "10.00", coin: "USDC", category: "Stationery" },
+      { name: "Tote + Notebook Bundle", description: "Canvas tote and dotted A5 notebook", price: "26.00", coin: "USDC", category: "Bundles" },
+      { name: "Gift Box (Small)", description: "Rigid box with ribbon, fits up to 3 items", price: "8.00", coin: "USDC", category: "Gifts" },
+      { name: "Gift Wrap Service", description: "Premium wrapping with ribbon and tag", price: "5.00", coin: "USDC", category: "Gifts" },
+      { name: "Greeting Card", description: "Hand-illustrated, blank inside", price: "4.00", coin: "USDC", category: "Gifts" },
+    ],
+  },
+  {
+    id: "fashion",
+    label: "Fashion",
+    emoji: "👗",
+    description: "Clothing & accessories",
+    defaultMenuName: "Fashion Collection",
+    items: [
+      { name: "Classic T-Shirt", description: "100% cotton, unisex, sizes XS–3XL", price: "28.00", coin: "USDC", category: "Tops" },
+      { name: "Oversized T-Shirt", description: "Relaxed fit, 240gsm cotton", price: "35.00", coin: "USDC", category: "Tops" },
+      { name: "Graphic Tee", description: "Limited print, pre-shrunk cotton", price: "38.00", coin: "USDC", category: "Tops" },
+      { name: "Slim Fit Jeans", description: "Stretch denim, available in blue and black", price: "65.00", coin: "USDC", category: "Bottoms" },
+      { name: "Wide Leg Trousers", description: "Linen blend, elastic waistband", price: "55.00", coin: "USDC", category: "Bottoms" },
+      { name: "Cargo Shorts", description: "6-pocket, ripstop fabric", price: "45.00", coin: "USDC", category: "Bottoms" },
+      { name: "Hoodie", description: "400gsm fleece, kangaroo pocket, unisex", price: "65.00", coin: "USDC", category: "Outerwear" },
+      { name: "Bomber Jacket", description: "Lightweight, ribbed cuffs and hem", price: "89.00", coin: "USDC", category: "Outerwear" },
+      { name: "Canvas Sneakers", description: "Low-top, rubber sole, multiple colours", price: "55.00", coin: "USDC", category: "Footwear" },
+      { name: "Leather Belt", description: "Genuine leather, pin buckle, 3.5cm wide", price: "30.00", coin: "USDC", category: "Accessories" },
+      { name: "Baseball Cap", description: "6-panel, adjustable strap", price: "25.00", coin: "USDC", category: "Accessories" },
+      { name: "Beanie", description: "Ribbed knit, one size fits all", price: "20.00", coin: "USDC", category: "Accessories" },
+      { name: "Tote Bag (Fashion)", description: "Canvas with brand print", price: "22.00", coin: "USDC", category: "Accessories" },
+      { name: "Sunglasses", description: "UV400 polarised lenses, acetate frame", price: "40.00", coin: "USDC", category: "Accessories" },
+      { name: "Socks 3-Pack", description: "Cotton blend, crew length, assorted", price: "15.00", coin: "USDC", category: "Accessories" },
+    ],
+  },
+  {
+    id: "beauty",
+    label: "Beauty",
+    emoji: "💄",
+    description: "Skincare & cosmetics",
+    defaultMenuName: "Beauty Menu",
+    items: [
+      // Skincare
+      { name: "Gentle Foam Cleanser 150ml", description: "pH-balanced, suitable for all skin types", price: "22.00", coin: "USDC", category: "Skincare" },
+      { name: "Micellar Water 200ml", description: "No-rinse makeup remover", price: "18.00", coin: "USDC", category: "Skincare" },
+      { name: "Vitamin C Serum 30ml", description: "Brightening, 15% L-ascorbic acid", price: "45.00", coin: "USDC", category: "Skincare" },
+      { name: "Hyaluronic Acid Serum 30ml", description: "3-weight HA for deep hydration", price: "38.00", coin: "USDC", category: "Skincare" },
+      { name: "Moisturiser SPF30 50ml", description: "Daily hydration with broad-spectrum protection", price: "35.00", coin: "USDC", category: "Skincare" },
+      { name: "Night Cream 50ml", description: "Retinol and peptide repair formula", price: "48.00", coin: "USDC", category: "Skincare" },
+      { name: "Eye Cream 15ml", description: "Caffeine and vitamin K for dark circles", price: "32.00", coin: "USDC", category: "Skincare" },
+      { name: "Sheet Mask", description: "Hyaluronic acid brightening, single use", price: "5.00", coin: "USDC", category: "Skincare" },
+      { name: "Sheet Mask 5-Pack", description: "Assorted: brightening, hydrating, firming", price: "22.00", coin: "USDC", category: "Skincare" },
+      { name: "Sunscreen SPF50 PA++++", description: "Lightweight, no white cast, 50ml", price: "28.00", coin: "USDC", category: "Skincare" },
+      // Cosmetics
+      { name: "Tinted Lip Balm", description: "SPF15, 6 shades available", price: "14.00", coin: "USDC", category: "Cosmetics" },
+      { name: "Lip Balm Set (3pc)", description: "Assorted flavours, nourishing formula", price: "12.00", coin: "USDC", category: "Cosmetics" },
+      { name: "Mascara", description: "Lengthening and volumising, waterproof", price: "22.00", coin: "USDC", category: "Cosmetics" },
+      { name: "Nail Polish", description: "Long-wear formula, 30+ shades", price: "10.00", coin: "USDC", category: "Cosmetics" },
+      { name: "Perfume Discovery Set", description: "5 × 2ml vials, curated selection", price: "25.00", coin: "USDC", category: "Cosmetics" },
+      // Tools
+      { name: "Jade Roller", description: "Natural jade, dual-ended", price: "20.00", coin: "USDC", category: "Tools" },
+      { name: "Gua Sha Stone", description: "Rose quartz, facial sculpting tool", price: "18.00", coin: "USDC", category: "Tools" },
+      { name: "Makeup Brush Set (5pc)", description: "Synthetic bristles, vegan", price: "30.00", coin: "USDC", category: "Tools" },
+    ],
+  },
+  {
+    id: "grocery",
+    label: "Grocery",
+    emoji: "🛒",
+    description: "Fresh produce & pantry",
+    defaultMenuName: "Grocery List",
+    items: [
+      // Produce
+      { name: "Organic Eggs (12)", description: "Free-range, certified organic", price: "6.00", coin: "USDC", category: "Produce" },
+      { name: "Mixed Salad Greens 200g", description: "Pre-washed, ready to eat", price: "4.50", coin: "USDC", category: "Produce" },
+      { name: "Cherry Tomatoes 250g", description: "Sweet and ripe", price: "3.50", coin: "USDC", category: "Produce" },
+      { name: "Avocado (each)", description: "Hass variety, ripe and ready", price: "2.50", coin: "USDC", category: "Produce" },
+      { name: "Banana Bunch", description: "Approximately 6 bananas", price: "2.00", coin: "USDC", category: "Produce" },
+      // Dairy & Bakery
+      { name: "Whole Milk 1L", description: "Full-cream pasteurised", price: "3.00", coin: "USDC", category: "Dairy & Bakery" },
+      { name: "Greek Yoghurt 500g", description: "Full-fat, no added sugar", price: "5.50", coin: "USDC", category: "Dairy & Bakery" },
+      { name: "Cheddar Cheese 250g", description: "Aged 12 months, sharp flavour", price: "7.00", coin: "USDC", category: "Dairy & Bakery" },
+      { name: "Sourdough Loaf", description: "Freshly baked, 700g", price: "8.00", coin: "USDC", category: "Dairy & Bakery" },
+      { name: "Butter 250g", description: "Unsalted, grass-fed", price: "6.50", coin: "USDC", category: "Dairy & Bakery" },
+      // Pantry
+      { name: "Extra Virgin Olive Oil 500ml", description: "Cold pressed, first extraction", price: "12.00", coin: "USDC", category: "Pantry" },
+      { name: "Pasta 500g", description: "Bronze-die cut, durum wheat", price: "4.00", coin: "USDC", category: "Pantry" },
+      { name: "Jasmine Rice 2kg", description: "Fragrant long-grain", price: "7.00", coin: "USDC", category: "Pantry" },
+      { name: "Canned Tomatoes 400g", description: "Whole peeled, Italian", price: "2.50", coin: "USDC", category: "Pantry" },
+      { name: "Chickpeas 400g (can)", description: "Ready to eat, no added salt", price: "2.00", coin: "USDC", category: "Pantry" },
+      { name: "Soy Sauce 500ml", description: "Naturally brewed, reduced sodium", price: "4.50", coin: "USDC", category: "Pantry" },
+      { name: "Honey 500g", description: "Raw, unfiltered, local", price: "9.00", coin: "USDC", category: "Pantry" },
+      { name: "Oats 1kg", description: "Rolled oats, whole grain", price: "5.00", coin: "USDC", category: "Pantry" },
+      { name: "Dark Chocolate 100g", description: "70% cacao, single origin", price: "5.50", coin: "USDC", category: "Pantry" },
+      { name: "Sparkling Water 6-pack", description: "330ml cans, natural mineral water", price: "8.00", coin: "USDC", category: "Drinks" },
+    ],
+  },
+  {
+    id: "services",
+    label: "Services",
+    emoji: "🔧",
+    description: "Freelance & professional",
+    defaultMenuName: "Services Menu",
+    items: [
+      // Consulting
+      { name: "Discovery Call (30min)", description: "Initial consultation to understand your needs", price: "40.00", coin: "USDC", category: "Consulting" },
+      { name: "Consultation (1hr)", description: "One-on-one advisory session", price: "80.00", coin: "USDC", category: "Consulting" },
+      { name: "Strategy Workshop (3hr)", description: "Deep-dive planning session with deliverables", price: "250.00", coin: "USDC", category: "Consulting" },
+      // Design
+      { name: "Logo Design", description: "Custom brand identity, 3 concepts, 2 revisions", price: "250.00", coin: "USDC", category: "Design" },
+      { name: "Brand Identity Package", description: "Logo, colours, typography, brand guide", price: "600.00", coin: "USDC", category: "Design" },
+      { name: "Social Media Post", description: "1 custom designed post with caption copy", price: "30.00", coin: "USDC", category: "Design" },
+      { name: "Social Media Pack (10 posts)", description: "10 posts with captions, 5-day turnaround", price: "250.00", coin: "USDC", category: "Design" },
+      { name: "Presentation Design", description: "Up to 20 slides, branded template", price: "180.00", coin: "USDC", category: "Design" },
+      // Development
+      { name: "Website Audit", description: "SEO, performance, and UX review with report", price: "150.00", coin: "USDC", category: "Development" },
+      { name: "Landing Page", description: "Single-page site, responsive, 5-day delivery", price: "400.00", coin: "USDC", category: "Development" },
+      { name: "Bug Fix (1hr)", description: "Debugging and code fix, hourly rate", price: "60.00", coin: "USDC", category: "Development" },
+      // Writing
+      { name: "Blog Post (1000 words)", description: "SEO-optimised, researched, with meta description", price: "80.00", coin: "USDC", category: "Writing" },
+      { name: "Email Copywriting", description: "Single email with subject line variants", price: "60.00", coin: "USDC", category: "Writing" },
+      { name: "Product Description (5 items)", description: "Conversion-focused copy for 5 products", price: "100.00", coin: "USDC", category: "Writing" },
+      // Retainers
+      { name: "Monthly Retainer (10hrs)", description: "10hrs/month ongoing support, priority response", price: "500.00", coin: "USDC", category: "Retainers" },
+      { name: "Monthly Retainer (20hrs)", description: "20hrs/month, dedicated account manager", price: "900.00", coin: "USDC", category: "Retainers" },
+    ],
+  },
+  {
+    id: "events",
+    label: "Events / Popup",
+    emoji: "🎪",
+    description: "Tickets, merch & event items",
+    defaultMenuName: "Event Menu",
+    items: [
+      // Tickets
+      { name: "General Admission", description: "Standard entry ticket", price: "15.00", coin: "USDC", category: "Tickets" },
+      { name: "VIP Ticket", description: "Priority entry + exclusive area access", price: "45.00", coin: "USDC", category: "Tickets" },
+      { name: "Early Bird Ticket", description: "Limited availability, discounted entry", price: "10.00", coin: "USDC", category: "Tickets" },
+      { name: "Group Ticket (4 persons)", description: "4 general admission tickets", price: "50.00", coin: "USDC", category: "Tickets" },
+      // Food & Drinks
+      { name: "Food Voucher $10", description: "Redeemable at any food stall", price: "10.00", coin: "USDC", category: "Food & Drinks" },
+      { name: "Drinks Voucher (3 drinks)", description: "Any 3 non-alcoholic drinks", price: "9.00", coin: "USDC", category: "Food & Drinks" },
+      { name: "Meal Deal", description: "1 main + 1 drink + 1 dessert", price: "18.00", coin: "USDC", category: "Food & Drinks" },
+      // Merch
+      { name: "Event T-Shirt", description: "Limited edition, sizes S–XXL", price: "30.00", coin: "USDC", category: "Merch" },
+      { name: "Event Tote Bag", description: "Canvas with event artwork", price: "20.00", coin: "USDC", category: "Merch" },
+      { name: "Lanyard + Badge", description: "Event branded, collectible", price: "8.00", coin: "USDC", category: "Merch" },
+      { name: "Photo Print", description: "Instant print, 4×6 inches", price: "5.00", coin: "USDC", category: "Merch" },
+      { name: "Sticker Pack", description: "6 event-themed stickers", price: "5.00", coin: "USDC", category: "Merch" },
+      // Experiences
+      { name: "Workshop Add-on", description: "30-min hands-on workshop session", price: "20.00", coin: "USDC", category: "Experiences" },
+      { name: "Meet & Greet Pass", description: "Access to artist/speaker meet & greet", price: "35.00", coin: "USDC", category: "Experiences" },
+      { name: "Donation", description: "Support the event or cause", price: "5.00", coin: "USDC", category: "Experiences" },
+    ],
+  },
+  {
+    id: "fitness",
+    label: "Fitness / Wellness",
+    emoji: "💪",
+    description: "Classes, sessions & supplements",
+    defaultMenuName: "Fitness Menu",
+    items: [
+      // Classes
+      { name: "Drop-in Class", description: "Single session, any class type", price: "20.00", coin: "USDC", category: "Classes" },
+      { name: "Class Pack (5 sessions)", description: "Valid 60 days from purchase", price: "90.00", coin: "USDC", category: "Classes" },
+      { name: "Class Pack (10 sessions)", description: "Valid 90 days from purchase", price: "170.00", coin: "USDC", category: "Classes" },
+      { name: "Monthly Unlimited", description: "Unlimited classes for 30 days", price: "120.00", coin: "USDC", category: "Classes" },
+      // Personal Training
+      { name: "PT Session (1hr)", description: "One-on-one personal training", price: "80.00", coin: "USDC", category: "Personal Training" },
+      { name: "PT Pack (5 sessions)", description: "5 × 1hr personal training sessions", price: "370.00", coin: "USDC", category: "Personal Training" },
+      { name: "Online Coaching (1 month)", description: "Custom programme + weekly check-ins", price: "150.00", coin: "USDC", category: "Personal Training" },
+      // Wellness
+      { name: "Sports Massage (60min)", description: "Deep tissue, post-workout recovery", price: "70.00", coin: "USDC", category: "Wellness" },
+      { name: "Yoga Mat Rental", description: "Per session, sanitised after each use", price: "3.00", coin: "USDC", category: "Wellness" },
+      { name: "Locker Rental (Day)", description: "Full-day locker access", price: "5.00", coin: "USDC", category: "Wellness" },
+      // Nutrition
+      { name: "Protein Shake", description: "25g protein, choice of flavour", price: "6.00", coin: "USDC", category: "Nutrition" },
+      { name: "Electrolyte Drink", description: "Post-workout hydration, 500ml", price: "4.00", coin: "USDC", category: "Nutrition" },
+      { name: "Meal Prep Box", description: "High-protein, macro-balanced, 2 meals", price: "22.00", coin: "USDC", category: "Nutrition" },
+      { name: "Supplement Starter Pack", description: "Whey protein + creatine + shaker", price: "55.00", coin: "USDC", category: "Nutrition" },
+    ],
+  },
+];
+
+export const SCRATCH_TEMPLATE: MenuTemplate = {
+  id: "scratch",
+  label: "Start from Scratch",
+  emoji: "✏️",
+  description: "Build your own menu",
+  defaultMenuName: "",
+  items: [],
+};

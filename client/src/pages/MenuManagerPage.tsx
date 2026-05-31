@@ -1,0 +1,1174 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { AppLayout } from "@/components/AppLayout";
+import { fetchApi } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Plus, Trash2, Edit2, ExternalLink, Copy, Check, X,
+  ShoppingCart, QrCode, Download, Camera, Minus, Image as ImageIcon,
+  ChevronDown, UtensilsCrossed, Search,
+} from "lucide-react";
+import { toast } from "sonner";
+import { buildPaymentUrl, OrderItem } from "@/lib/payment";
+import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
+import { useMerchantProfile } from "@/hooks/use-merchant";
+import { useAuth } from "@/hooks/use-auth";
+import QRCodeStyling from "qr-code-styling";
+import { useLocation, useSearch } from "wouter";
+import { MENU_TEMPLATES } from "@/lib/menuTemplates";
+import { STABLECOINS } from "@/lib/stablecoins";
+import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
+import { CurrencySelectModal } from "@/components/CurrencySelectModal";
+import { QRStyled, buildQrOptions, type QrStyle } from "@/components/QRStyled";
+import { prepareImageForUpload } from "@/lib/imageUpload";
+
+// Build a name→category lookup from all templates for backfill
+const TEMPLATE_CATEGORY_MAP: Record<string, string> = {};
+for (const t of MENU_TEMPLATES) {
+  for (const item of t.items) {
+    const cat = (item as any).category;
+    if (cat && item.name) TEMPLATE_CATEGORY_MAP[item.name.toLowerCase()] = cat;
+  }
+}
+
+function inferCategory(item: MenuItem): string | null {
+  if (item.category) return item.category;
+  return TEMPLATE_CATEGORY_MAP[item.name.toLowerCase()] || null;
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface Menu {
+  id: string;
+  name: string;
+  description: string | null;
+  slug: string;
+  isActive: number;
+  createdAt: string;
+}
+
+interface MenuItem {
+  id: string;
+  menuId: string;
+  name: string;
+  description: string | null;
+  price: string;
+  coin: string;
+  imageUrl: string | null;
+  sortOrder: number;
+  isActive: number;
+  category: string | null;
+}
+
+interface CartEntry {
+  item: MenuItem;
+  qty: number;
+}
+
+const CART_STORAGE_KEY = "serapay_pos_cart";
+const CART_TTL_MS = 24 * 60 * 60 * 1000;
+
+type StoredCart = {
+  savedAt: number;
+  cart: CartEntry[];
+};
+
+function readStoredCart(): CartEntry[] {
+  const saved = localStorage.getItem(CART_STORAGE_KEY);
+  if (!saved) return [];
+  const parsed = JSON.parse(saved) as StoredCart | CartEntry[];
+  if (Array.isArray(parsed)) {
+    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), cart: parsed }));
+    return parsed;
+  }
+  if (!parsed || !Array.isArray(parsed.cart)) {
+    localStorage.removeItem(CART_STORAGE_KEY);
+    return [];
+  }
+  if (!Number.isFinite(parsed.savedAt) || Date.now() - parsed.savedAt > CART_TTL_MS) {
+    localStorage.removeItem(CART_STORAGE_KEY);
+    return [];
+  }
+  return parsed.cart;
+}
+
+function writeStoredCart(cart: CartEntry[]) {
+  if (cart.length === 0) {
+    localStorage.removeItem(CART_STORAGE_KEY);
+    return;
+  }
+  localStorage.setItem(CART_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), cart }));
+}
+
+// ── Coin options — derived from the canonical STABLECOINS list ───────────────
+
+const COIN_OPTIONS = STABLECOINS.map(s => s.symbol);
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function menuPublicUrl(slug: string) {
+  return buildClientAppUrl(`/menu/${slug}`);
+}
+
+// ── Item Edit Dialog ──────────────────────────────────────────────────────────
+
+function ItemEditDialog({
+  item,
+  menuId,
+  onSave,
+  onCancel,
+  loading,
+}: {
+  item: MenuItem;
+  menuId: string;
+  onSave: (data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string }) => void;
+  onCancel: () => void;
+  loading: boolean;
+}) {
+  const [name, setName] = useState(item.name);
+  const [description, setDescription] = useState(item.description || "");
+  const [price, setPrice] = useState(item.price);
+  const [coin, setCoin] = useState(item.coin);
+  const [category, setCategory] = useState(item.category || "");
+  const [imageUrl, setImageUrl] = useState(item.imageUrl || "");
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingImage(true);
+    try {
+      const prepared = await prepareImageForUpload(file, { maxDimension: 1600, quality: 0.86 });
+      const result = await fetchApi<{ imageUrl: string }>(`/menus/${menuId}/items/${item.id}/image`, {
+        method: "POST",
+        body: JSON.stringify({ imageData: prepared.dataUrl }),
+      });
+      setImageUrl(result.imageUrl);
+      toast.success("Photo uploaded");
+    } catch (err: any) {
+      toast.error(err.message || "Upload failed");
+    } finally {
+      setUploadingImage(false);
+      e.target.value = "";
+    }
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold text-gray-900">Edit Item</h3>
+            <button onClick={onCancel} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+          </div>
+
+          {/* Photo */}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Photo (optional)</label>
+            <div className="flex items-center gap-3">
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className="w-16 h-16 rounded-xl overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center cursor-pointer hover:border-[#00C853] transition-colors shrink-0 relative"
+              >
+                {imageUrl ? (
+                  <img src={imageUrl} alt={name} className="w-full h-full object-cover" />
+                ) : uploadingImage ? (
+                  <div className="w-5 h-5 border-2 border-[#00C853] border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Camera className="w-5 h-5 text-gray-400" />
+                )}
+              </div>
+              <div className="text-xs text-gray-500">
+                <p>JPEG, PNG, WebP · max 10MB</p>
+                {imageUrl && (
+                  <button onClick={() => setImageUrl("")} className="text-red-400 hover:text-red-600 mt-1">Remove photo</button>
+                )}
+              </div>
+              <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleImageUpload} />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Item Name</label>
+            <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Kopi O" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Description (optional)</label>
+            <Input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Traditional black coffee" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Category</label>
+            <Input value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. Mains, Drinks, Services" maxLength={60} />
+          </div>
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
+              <Input value={price} onChange={e => setPrice(e.target.value)} placeholder="0.00" type="number" min="0" step="0.01" />
+            </div>
+            <div className="w-32">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
+              <Select value={coin} onValueChange={setCoin}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="flex gap-2 pt-1">
+            <Button
+              className="flex-1 bg-[#00C853] hover:bg-[#00B847] text-white"
+              onClick={() => onSave({ name, description, price, coin, imageUrl: imageUrl || undefined, category })}
+              disabled={loading || !name.trim() || !price}
+            >
+              {loading ? "Saving…" : "Save Item"}
+            </Button>
+            <Button variant="outline" onClick={onCancel} disabled={loading}>Cancel</Button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Add Item Dialog ───────────────────────────────────────────────────────────
+
+function AddItemDialog({
+  menuId,
+  onSave,
+  onCancel,
+  loading,
+}: {
+  menuId: string;
+  onSave: (data: { name: string; description: string; price: string; coin: string; category?: string }) => void;
+  onCancel: () => void;
+  loading: boolean;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [price, setPrice] = useState("");
+  const [coin, setCoin] = useState("USDC");
+  const [category, setCategory] = useState("");
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold text-gray-900">Add Item</h3>
+            <button onClick={onCancel} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Item Name</label>
+            <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Kopi O" autoFocus />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Description (optional)</label>
+            <Input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Traditional black coffee" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Category</label>
+            <Input value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. Drinks, Mains, Add-ons" maxLength={60} />
+          </div>
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
+              <Input value={price} onChange={e => setPrice(e.target.value)} placeholder="0.00" type="number" min="0" step="0.01" />
+            </div>
+            <div className="w-32">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
+              <Select value={coin} onValueChange={setCoin}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="flex gap-2 pt-1">
+            <Button
+              className="flex-1 bg-[#00C853] hover:bg-[#00B847] text-white"
+              onClick={() => onSave({ name, description, price, coin, category })}
+              disabled={loading || !name.trim() || !price}
+            >
+              {loading ? "Adding…" : "Add Item"}
+            </Button>
+            <Button variant="outline" onClick={onCancel} disabled={loading}>Cancel</Button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── QR Save Modal ─────────────────────────────────────────────────────────────
+
+function QRSaveModal({ url, menuName, merchantProfile, onClose }: { url: string; menuName: string; merchantProfile: any; onClose: () => void }) {
+  const code = url.split("/").filter(Boolean).pop() || "menu";
+  const fgColor = merchantProfile?.qrFgColor || "#000000";
+  const bgColor = merchantProfile?.qrBgColor || "#ffffff";
+  const qrStyle = (merchantProfile?.qrStyle as QrStyle) || "rounded";
+  const logo = merchantProfile?.logoData || undefined;
+
+  const handleDownload = async () => {
+    const qr = new QRCodeStyling(buildQrOptions(url, 720, fgColor, bgColor, qrStyle, logo));
+    const raw = await qr.getRawData("png");
+    const blob = raw instanceof Blob ? raw : new Blob([raw as BlobPart], { type: "image/png" });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.download = `${menuName.replace(/\s+/g, "-").toLowerCase()}-qr.png`;
+    link.href = objectUrl;
+    link.click();
+    URL.revokeObjectURL(objectUrl);
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xs overflow-hidden text-center">
+          <div className="bg-[#00C853] px-6 py-4 text-white">
+            <p className="text-[10px] font-bold uppercase tracking-wider opacity-80">SeraPay Order</p>
+            <h3 className="font-semibold truncate">{merchantProfile?.name || "Your Store"}</h3>
+          </div>
+          <div className="p-6">
+          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-[#E6FAF5]">
+            {merchantProfile?.logoData ? (
+              <img src={merchantProfile.logoData} alt="Store logo" className="h-full w-full object-cover" />
+            ) : (
+              <span className="text-sm font-bold text-[#00A87A]">SP</span>
+            )}
+          </div>
+          <h3 className="font-semibold text-gray-900 mb-1 truncate">{menuName}</h3>
+          <p className="text-xs text-gray-500 mb-4">Scan, enter pax, and order</p>
+          <div className="flex justify-center mb-4 rounded-xl p-2" style={{ background: bgColor }}>
+            <QRStyled value={url} size={280} fgColor={fgColor} bgColor={bgColor} style={qrStyle} logo={logo} />
+          </div>
+          <p className="mb-4 rounded-lg bg-gray-50 px-3 py-2 text-[11px] font-mono text-gray-500 break-all">{code}</p>
+          <div className="flex gap-2">
+            <Button onClick={handleDownload} className="flex-1 gap-1.5 bg-[#00C853] hover:bg-[#00B847] text-white">
+              <Download className="w-4 h-4" /> Save QR
+            </Button>
+            <Button variant="outline" onClick={onClose}>Close</Button>
+          </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Cart Sidebar ──────────────────────────────────────────────────────────────
+
+function CartSidebar({
+  cart,
+  activeMenu,
+  merchantProfile,
+  onUpdateQty,
+  onClear,
+  variant = "sidebar",
+  onClose,
+}: {
+  cart: CartEntry[];
+  activeMenu: Menu | null;
+  merchantProfile: any;
+  onUpdateQty: (itemId: string, delta: number) => void;
+  onClear: () => void;
+  variant?: "sidebar" | "drawer";
+  onClose?: () => void;
+}) {
+  const [, navigate] = useLocation();
+  const [confirmClear, setConfirmClear] = useState(false);
+  const totalQty = cart.reduce((s, e) => s + e.qty, 0);
+
+  // Per-currency totals for mixed-currency carts
+  const coinTotals: Record<string, number> = {};
+  for (const e of cart) {
+    const c = e.item.coin || "USDC";
+    coinTotals[c] = (coinTotals[c] || 0) + parseFloat(e.item.price) * e.qty;
+  }
+  const coinEntries = Object.entries(coinTotals); // [[coin, total], ...]
+  // Dominant coin = the one with the highest total value (used as receiveCoin)
+  const dominantCoin = coinEntries.reduce((a, b) => b[1] > a[1] ? b : a, ["", 0])[0]
+    || merchantProfile?.receiveCoin || "USDC";
+  const dominantTotal = coinTotals[dominantCoin] || 0;
+
+  const handleGenerateQR = () => {
+    if (!merchantProfile?.walletAddress) { toast.error("Wallet address not found"); return; }
+    const orderItems: OrderItem[] = cart.map(e => ({
+      id: e.item.id,
+      n: e.item.name,
+      p: e.item.price,
+      q: e.qty,
+      c: e.item.coin || undefined,
+    }));
+    const url = buildPaymentUrl({
+      receiverAddress: merchantProfile.walletAddress,
+      receiveCoin: dominantCoin,
+      amount: dominantTotal.toFixed(2),
+      merchantName: merchantProfile.name,
+      merchantIcon: merchantProfile.logoData || undefined,
+      orderItems,
+      menuName: activeMenu?.name,
+    });
+    navigate(getClientAppPath(url));
+  };
+
+  const rootClass = variant === "drawer"
+    ? "w-full bg-white rounded-t-2xl shadow-2xl flex flex-col max-h-[84vh]"
+    : "hidden lg:flex w-80 shrink-0 bg-white border-l border-gray-100 flex-col h-full";
+
+  return (
+    <div className={rootClass}>
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <ShoppingCart className="w-4 h-4 text-[#00C853]" />
+          <span className="font-semibold text-gray-900">Order</span>
+          {totalQty > 0 && (
+            <span className="text-xs bg-[#E6FAF5] text-[#00A87A] px-2 py-0.5 rounded-full font-medium">{totalQty}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {cart.length > 0 && (
+            <button onClick={() => setConfirmClear(true)} className="text-xs font-semibold text-red-500 transition-colors hover:text-red-600">Clear</button>
+          )}
+          {variant === "drawer" && (
+            <button onClick={onClose} className="p-1 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors">
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Items */}
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+        {cart.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center py-12">
+            <ShoppingCart className="w-10 h-10 text-gray-200 mb-3" />
+            <p className="text-sm text-gray-400 font-medium">Cart is empty</p>
+            <p className="text-xs text-gray-300 mt-1">Tap items to add them</p>
+          </div>
+        ) : (
+          cart.map(entry => (
+            <div key={entry.item.id} className="flex items-center gap-3 py-2">
+              {entry.item.imageUrl ? (
+                <img src={entry.item.imageUrl} alt={entry.item.name} className="w-10 h-10 rounded-lg object-cover shrink-0" />
+              ) : (
+                <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
+                  <ImageIcon className="w-4 h-4 text-gray-300" />
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-gray-900 truncate">{entry.item.name}</p>
+                <p className="text-xs text-gray-400">{parseFloat(entry.item.price).toFixed(2)} {entry.item.coin}</p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={() => onUpdateQty(entry.item.id, -1)}
+                  className="w-6 h-6 rounded-full border border-gray-200 flex items-center justify-center hover:bg-gray-50 transition-colors"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <span className="text-sm font-semibold w-5 text-center">{entry.qty}</span>
+                <button
+                  onClick={() => onUpdateQty(entry.item.id, 1)}
+                  className="w-6 h-6 rounded-full bg-[#00C853] text-white flex items-center justify-center hover:bg-[#00B847] transition-colors"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+              </div>
+              <p className="text-sm font-semibold text-gray-900 w-14 text-right shrink-0">
+                {(parseFloat(entry.item.price) * entry.qty).toFixed(2)}
+              </p>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="px-5 py-4 border-t border-gray-100 space-y-3">
+        <div className="space-y-1">
+          {coinEntries.length === 0 ? (
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Total</span>
+              <span className="text-xl font-bold text-gray-900">0.00 <span className="text-sm font-normal text-gray-400">USDC</span></span>
+            </div>
+          ) : coinEntries.length === 1 ? (
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-500">Total</span>
+              <span className="text-xl font-bold text-gray-900">{coinEntries[0][1].toFixed(2)} <span className="text-sm font-normal text-gray-400">{coinEntries[0][0]}</span></span>
+            </div>
+          ) : (
+            <>
+              {coinEntries.map(([c, amt]) => (
+                <div key={c} className="flex items-center justify-between">
+                  <span className="text-sm text-gray-500">{c === dominantCoin ? "Total" : ""}</span>
+                  <span className={`font-bold text-gray-900 ${c === dominantCoin ? "text-xl" : "text-sm text-gray-500"}`}>
+                    {amt.toFixed(2)} <span className="text-sm font-normal text-gray-400">{c}</span>
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+        <Button
+          onClick={handleGenerateQR}
+          disabled={cart.length === 0}
+          className="w-full gap-2 bg-[#00C853] hover:bg-[#00B847] text-white font-semibold h-11"
+        >
+          <QrCode className="w-4 h-4" /> Generate Payment QR
+        </Button>
+      </div>
+      {confirmClear && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-xs rounded-2xl bg-white p-5 shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-900">Clear this order?</h3>
+            <p className="mt-1 text-sm text-gray-500">This removes every item from the current cart.</p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <Button variant="outline" onClick={() => setConfirmClear(false)} className="bg-white">Cancel</Button>
+              <Button onClick={() => { onClear(); setConfirmClear(false); }} className="bg-red-500 text-white hover:bg-red-600">Clear</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Item Tile ─────────────────────────────────────────────────────────────────
+
+function ItemTile({
+  item,
+  cartQty,
+  onAdd,
+  onRemove,
+  onEdit,
+  onDelete,
+}: {
+  item: MenuItem;
+  cartQty: number;
+  onAdd: () => void;
+  onRemove: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      className={`relative rounded-2xl overflow-hidden border-2 transition-all cursor-pointer group
+        ${cartQty > 0 ? "border-[#00C853] shadow-md" : "border-gray-100 hover:border-gray-200 shadow-sm"}`}
+      onClick={onAdd}
+    >
+      {/* Photo or placeholder */}
+      <div className="aspect-[4/3] bg-gray-50 relative">
+        {item.imageUrl ? (
+          <img src={item.imageUrl} alt={item.name} className="w-full h-full object-cover" />
+        ) : (
+          <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
+            <UtensilsCrossed className="w-8 h-8 text-gray-200" />
+          </div>
+        )}
+        {/* Cart qty badge */}
+        {cartQty > 0 && (
+          <div className="absolute top-2 right-2 w-6 h-6 bg-[#00C853] text-white text-xs font-bold rounded-full flex items-center justify-center shadow">
+            {cartQty}
+          </div>
+        )}
+        {/* Edit / delete overlay */}
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+        <div className="absolute top-2 left-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={e => { e.stopPropagation(); onEdit(); }}
+            className="w-7 h-7 bg-white/90 rounded-lg flex items-center justify-center text-gray-600 hover:text-[#00A87A] shadow-sm"
+          >
+            <Edit2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={e => { e.stopPropagation(); onDelete(); }}
+            className="w-7 h-7 bg-white/90 rounded-lg flex items-center justify-center text-gray-600 hover:text-red-500 shadow-sm"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Info */}
+      <div className="p-3 bg-white">
+        <p className="text-sm font-semibold text-gray-900 truncate leading-tight">{item.name}</p>
+        {item.description && (
+          <p className="text-xs text-gray-400 truncate mt-0.5">{item.description}</p>
+        )}
+        <div className="flex items-center justify-between mt-2">
+          <span className="text-sm font-bold text-[#00A87A]">
+            {parseFloat(item.price).toFixed(2)} <span className="text-xs font-normal text-gray-400">{item.coin}</span>
+          </span>
+          {cartQty > 0 ? (
+            <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+              <button
+                onClick={onRemove}
+                className="w-6 h-6 rounded-full border border-gray-200 flex items-center justify-center hover:bg-gray-50"
+              >
+                <Minus className="w-3 h-3" />
+              </button>
+              <span className="text-xs font-bold w-4 text-center">{cartQty}</span>
+              <button
+                onClick={onAdd}
+                className="w-6 h-6 rounded-full bg-[#00C853] text-white flex items-center justify-center hover:bg-[#00B847]"
+              >
+                <Plus className="w-3 h-3" />
+              </button>
+            </div>
+          ) : (
+            <div className="w-7 h-7 rounded-full bg-[#E6FAF5] text-[#00A87A] flex items-center justify-center group-hover:bg-[#00C853] group-hover:text-white transition-colors">
+              <Plus className="w-3.5 h-3.5" />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── POS View (main content) ───────────────────────────────────────────────────
+
+function POSView({
+  menu,
+  allMenus,
+  cart,
+  merchantProfile,
+  onSwitchMenu,
+  onAddToCart,
+  onRemoveFromCart,
+  onUpdateCartQty,
+  onClearCart,
+  onNewMenu,
+  onRenameMenu,
+  onDeleteMenu,
+}: {
+  menu: Menu;
+  allMenus: Menu[];
+  cart: CartEntry[];
+  merchantProfile: any;
+  onSwitchMenu: (menuId: string) => void;
+  onAddToCart: (item: MenuItem) => void;
+  onRemoveFromCart: (itemId: string) => void;
+  onUpdateCartQty: (itemId: string, delta: number) => void;
+  onClearCart: () => void;
+  onNewMenu: () => void;
+  onRenameMenu: (menuId: string, menuName: string) => void;
+  onDeleteMenu: (menuId: string, menuName: string) => void;
+}) {
+  const [items, setItems] = useState<MenuItem[]>([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string>("All");
+  const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
+  const [addingItem, setAddingItem] = useState(false);
+  const [savingItem, setSavingItem] = useState(false);
+  const [showQR, setShowQR] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [menuDropdownOpen, setMenuDropdownOpen] = useState(false);
+  const [mobileCartOpen, setMobileCartOpen] = useState(false);
+  const [bulkCoinOpen, setBulkCoinOpen] = useState(false);
+  const [bulkCoin, setBulkCoin] = useState<string>("USDC");
+  const [bulkCoinSaving, setBulkCoinSaving] = useState(false);
+  const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
+  const publicUrl = menuPublicUrl(menu.slug);
+  const currencyList = useMemo(() => currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const })), [currencyOptions]);
+
+  const handleBulkCoinUpdate = async () => {
+    const fromCoin = (items[0]?.coin || "USDC").toUpperCase();
+    const toCoin = bulkCoin.toUpperCase();
+    setBulkCoinSaving(true);
+    try {
+      const { rate } = await getCurrencyRate(fromCoin, toCoin);
+      await fetchApi(`/menus/${menu.id}/items/coin`, {
+        method: "PATCH",
+        body: JSON.stringify({ coin: toCoin, rate }),
+      });
+      setItems(prev => prev.map(i => ({ ...i, coin: toCoin, price: (Number(i.price) * rate).toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00") })));
+      setBulkCoinOpen(false);
+      toast.success(`Prices converted from ${fromCoin} to ${toCoin}`);
+    } catch (e: any) {
+      toast.error(e.message || "Failed to convert currency");
+    } finally {
+      setBulkCoinSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSeraCurrencies().then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
+  }, []);
+
+  useEffect(() => {
+    setLoadingItems(true);
+    fetchApi<MenuItem[]>(`/menus/${menu.id}/items`)
+      .then(data => {
+        // Backfill categories for items that were created before the category column was added
+        const enriched = data.map(item => ({
+          ...item,
+          category: inferCategory(item),
+        }));
+        setItems(enriched);
+        setActiveCategory("All");
+      })
+      .catch(e => toast.error(e.message || "Failed to load items"))
+      .finally(() => setLoadingItems(false));
+  }, [menu.id]);
+
+  // Derive unique categories from items
+  const categories = useMemo(() => {
+    const cats = Array.from(new Set(items.map(i => i.category).filter(Boolean))) as string[];
+    return cats.length > 0 ? ["All", ...cats] : [];
+  }, [items]);
+
+  const handleAddItem = async (data: { name: string; description: string; price: string; coin: string; category?: string }) => {
+    setSavingItem(true);
+    try {
+      const created = await fetchApi<MenuItem>(`/menus/${menu.id}/items`, {
+        method: "POST",
+        body: JSON.stringify({ ...data, sortOrder: items.length }),
+      });
+      setItems(prev => [...prev, created]);
+      setAddingItem(false);
+      toast.success("Item added");
+    } catch (e: any) {
+      toast.error(e.message || "Failed to add item");
+    } finally {
+      setSavingItem(false);
+    }
+  };
+
+  const handleUpdateItem = async (item: MenuItem, data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string }) => {
+    setSavingItem(true);
+    try {
+      const updated = await fetchApi<MenuItem>(`/menus/${menu.id}/items/${item.id}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+      setItems(prev => prev.map(i => i.id === item.id ? updated : i));
+      setEditingItem(null);
+      toast.success("Item updated");
+    } catch (e: any) {
+      toast.error(e.message || "Failed to update item");
+    } finally {
+      setSavingItem(false);
+    }
+  };
+
+  const handleDeleteItem = async (itemId: string) => {
+    if (!confirm("Remove this item?")) return;
+    try {
+      await fetchApi(`/menus/${menu.id}/items/${itemId}`, { method: "DELETE" });
+      setItems(prev => prev.filter(i => i.id !== itemId));
+      toast.success("Item removed");
+    } catch (e: any) {
+      toast.error(e.message || "Failed to delete item");
+    }
+  };
+
+  const handleCopyLink = async () => {
+    await navigator.clipboard.writeText(publicUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const filtered = items.filter(i => {
+    const matchesSearch = !search || i.name.toLowerCase().includes(search.toLowerCase()) || (i.description || "").toLowerCase().includes(search.toLowerCase());
+    const matchesCategory = activeCategory === "All" || i.category === activeCategory;
+    return matchesSearch && matchesCategory;
+  });
+  const mobileCartQty = cart.reduce((sum, entry) => sum + entry.qty, 0);
+  const mobileCartCoin = cart[0]?.item.coin || merchantProfile?.receiveCoin || "USDC";
+  const mobileCartTotal = cart.reduce((sum, entry) => sum + Number(entry.item.price) * entry.qty, 0);
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      {/* Left: POS grid */}
+      <div className="flex-1 flex flex-col overflow-hidden pb-24 lg:pb-0">
+        {/* Top bar */}
+        <div className="bg-white border-b border-gray-100 px-4 sm:px-5 py-3 flex flex-wrap items-center gap-3 shrink-0">
+          {/* Menu selector */}
+          <div className="relative">
+            <button
+              onClick={() => setMenuDropdownOpen(v => !v)}
+              className="flex min-h-10 items-center gap-3 rounded-2xl border border-gray-200 bg-white px-3.5 py-2 text-sm font-semibold text-gray-900 shadow-none transition-all hover:border-[#00C853] hover:bg-[#F9FFFC] focus:outline-none focus:ring-2 focus:ring-[#00C853]/25"
+            >
+              <span className="max-w-[160px] truncate">{menu.name}</span>
+              <ChevronDown className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+            </button>
+            {menuDropdownOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setMenuDropdownOpen(false)} />
+                <div className="absolute top-full left-0 z-20 mt-2 max-h-[22rem] min-w-[260px] overflow-y-auto rounded-2xl border border-gray-200 bg-white p-1.5 shadow-[0_18px_50px_rgba(10,31,26,0.14)]">
+                  {allMenus.map(m => (
+                    <div key={m.id} className="group flex items-center rounded-xl transition-colors hover:bg-[#F4FFF9]">
+                      <button
+                        onClick={() => { onSwitchMenu(m.id); setMenuDropdownOpen(false); }}
+                        className={`min-w-0 flex-1 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${m.id === menu.id ? "font-semibold text-[#00A87A]" : "font-medium text-gray-700"}`}
+                      >
+                        <span className="block truncate">{m.name}</span>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onRenameMenu(m.id, m.name); setMenuDropdownOpen(false); }}
+                        className="mr-0.5 flex h-8 w-8 items-center justify-center rounded-lg text-gray-300 opacity-100 transition-all hover:bg-white hover:text-[#00A87A] sm:opacity-0 sm:group-hover:opacity-100"
+                        title="Rename menu"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDeleteMenu(m.id, m.name); setMenuDropdownOpen(false); }}
+                        className="mr-1 flex h-8 w-8 items-center justify-center rounded-lg text-gray-300 opacity-100 transition-all hover:bg-white hover:text-red-400 sm:opacity-0 sm:group-hover:opacity-100"
+                        title="Delete menu"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="mt-1 border-t border-gray-100 pt-1">
+                    <button
+                      onClick={() => { onNewMenu(); setMenuDropdownOpen(false); }}
+                      className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-sm font-semibold text-[#00A87A] transition-colors hover:bg-[#F4FFF9]"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> New Menu
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Search */}
+          <div className="flex-1 relative min-w-[180px] max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search items…"
+              className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#00C853]/30 focus:border-[#00C853]"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto overflow-x-auto max-w-full pb-0.5">
+            {/* Share buttons */}
+            <a href={publicUrl} target="_blank" rel="noopener noreferrer"
+              className="p-2 rounded-xl text-gray-400 hover:text-[#00A87A] hover:bg-gray-50 transition-colors" title="Open public menu">
+              <ExternalLink className="w-4 h-4" />
+            </a>
+            <button
+              onClick={handleCopyLink}
+              className="flex shrink-0 items-center gap-1.5 px-3 py-2 text-xs font-medium border border-gray-200 rounded-xl hover:border-[#00C853] hover:text-[#00A87A] transition-colors"
+              title={copied ? "Copied" : "Copy link"}
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-[#00C853]" /> : <Copy className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">{copied ? "Copied!" : "Copy Link"}</span>
+            </button>
+            <button
+              onClick={() => setShowQR(true)}
+              className="flex shrink-0 items-center gap-1.5 px-3 py-2 text-xs font-medium border border-gray-200 rounded-xl hover:border-[#00C853] hover:text-[#00A87A] transition-colors"
+              title="Save QR"
+            >
+              <Download className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Save QR</span>
+            </button>
+            <Button
+              onClick={() => { setBulkCoin(items[0]?.coin || "USDC"); setBulkCoinOpen(true); }}
+              size="sm"
+              variant="outline"
+              className="gap-1.5 text-gray-600 border-gray-200 hover:border-[#00C853] hover:text-[#00A87A] bg-white shrink-0"
+              title="Change currency for all items"
+            >
+              <span className="text-xs font-mono">{items[0]?.coin || "USDC"}</span>
+              <ChevronDown className="w-3 h-3" />
+            </Button>
+            <Button
+              onClick={() => setAddingItem(true)}
+              size="sm"
+              className="bg-[#00C853] hover:bg-[#00B847] text-white gap-1.5 shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add Item
+            </Button>
+          </div>
+        </div>
+
+        {/* Bulk coin update modal */}
+        {bulkCoinOpen && (
+          <CurrencySelectModal
+            title="Change Menu Currency"
+            subtitle={`Updates and converts all ${items.length} items in this menu.`}
+            currencies={currencyList}
+            selectedSymbol={bulkCoin}
+            onSelect={setBulkCoin}
+            onClose={() => setBulkCoinOpen(false)}
+            onConfirm={handleBulkCoinUpdate}
+            confirmLabel={`Update all to ${bulkCoin}`}
+            confirming={bulkCoinSaving}
+          />
+        )}
+
+        {/* Category tabs */}
+        {categories.length > 1 && (
+          <div className="bg-white border-b border-gray-100 px-5 py-2 flex items-center gap-2 overflow-x-auto shrink-0 scrollbar-hide">
+            {categories.map(cat => (
+              <button
+                key={cat}
+                onClick={() => setActiveCategory(cat)}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition-colors ${
+                  activeCategory === cat
+                    ? "bg-[#00C853] text-white"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Item grid */}
+        <div className="flex-1 overflow-y-auto p-3 sm:p-5">
+          {loadingItems ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
+              {[1,2,3,4,5,6].map(i => (
+                <div key={i} className="rounded-2xl overflow-hidden border border-gray-100 animate-pulse">
+                  <div className="aspect-[4/3] bg-gray-100" />
+                  <div className="p-3 space-y-2">
+                    <div className="h-3 bg-gray-100 rounded w-3/4" />
+                    <div className="h-3 bg-gray-100 rounded w-1/2" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 text-center">
+              {search ? (
+                <>
+                  <Search className="w-10 h-10 text-gray-200 mb-3" />
+                  <p className="text-sm text-gray-400">No items match "{search}"</p>
+                </>
+              ) : (
+                <>
+                  <UtensilsCrossed className="w-10 h-10 text-gray-200 mb-3" />
+                  <p className="font-medium text-gray-500">No items yet</p>
+                  <p className="text-sm text-gray-400 mt-1 mb-4">Add your first item to start taking orders</p>
+                  <Button onClick={() => setAddingItem(true)} className="bg-[#00C853] hover:bg-[#00B847] text-white gap-1.5">
+                    <Plus className="w-4 h-4" /> Add Item
+                  </Button>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+              {filtered.map(item => {
+                const cartEntry = cart.find(e => e.item.id === item.id);
+                return (
+                  <ItemTile
+                    key={item.id}
+                    item={item}
+                    cartQty={cartEntry?.qty || 0}
+                    onAdd={() => onAddToCart(item)}
+                    onRemove={() => onRemoveFromCart(item.id)}
+                    onEdit={() => setEditingItem(item)}
+                    onDelete={() => handleDeleteItem(item.id)}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right: Cart sidebar */}
+      <CartSidebar
+        cart={cart}
+        activeMenu={menu}
+        merchantProfile={merchantProfile}
+        onUpdateQty={onUpdateCartQty}
+        onClear={onClearCart}
+      />
+
+      {mobileCartQty > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-30 lg:hidden px-4 pb-4 pt-2 bg-gradient-to-t from-[#F5F7FA] to-transparent">
+          <button
+            onClick={() => setMobileCartOpen(true)}
+            className="mx-auto flex w-full max-w-lg items-center justify-between rounded-2xl bg-[#00C853] px-5 py-3.5 text-sm font-semibold text-white shadow-lg"
+          >
+            <span className="flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> {mobileCartQty} item{mobileCartQty === 1 ? "" : "s"}</span>
+            <span>{mobileCartTotal.toFixed(2)} {mobileCartCoin}</span>
+          </button>
+        </div>
+      )}
+
+      {mobileCartOpen && (
+        <>
+          <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm lg:hidden" onClick={() => setMobileCartOpen(false)} />
+          <div className="fixed inset-x-0 bottom-0 z-50 lg:hidden">
+            <CartSidebar
+              cart={cart}
+              activeMenu={menu}
+              merchantProfile={merchantProfile}
+              onUpdateQty={onUpdateCartQty}
+              onClear={onClearCart}
+              variant="drawer"
+              onClose={() => setMobileCartOpen(false)}
+            />
+          </div>
+        </>
+      )}
+
+      {/* Dialogs */}
+      {editingItem && (
+        <ItemEditDialog
+          item={editingItem}
+          menuId={menu.id}
+          onSave={(data) => handleUpdateItem(editingItem, data)}
+          onCancel={() => setEditingItem(null)}
+          loading={savingItem}
+        />
+      )}
+      {addingItem && (
+        <AddItemDialog
+          menuId={menu.id}
+          onSave={handleAddItem}
+          onCancel={() => setAddingItem(false)}
+          loading={savingItem}
+        />
+      )}
+      {showQR && <QRSaveModal url={publicUrl} menuName={menu.name} merchantProfile={merchantProfile} onClose={() => setShowQR(false)} />}
+    </div>
+  );
+}
+
+// ── Main Page ─────────────────────────────────────────────────────────────────
+
+export function MenuManager() {
+  const [menus, setMenus] = useState<Menu[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+  const [cart, setCart] = useState<CartEntry[]>([]);
+  const { apiKey: dashboardApiKey, isAuthenticated } = useAuth();
+  const { data: merchantProfile } = useMerchantProfile(dashboardApiKey || undefined);
+  const [, navigate] = useLocation();
+  const search = useSearch();
+
+  // Restore cart from localStorage
+  useEffect(() => {
+    try { setCart(readStoredCart()); } catch { localStorage.removeItem(CART_STORAGE_KEY); }
+  }, []);
+
+  const persistCart = useCallback((updater: CartEntry[] | ((prev: CartEntry[]) => CartEntry[])) => {
+    setCart(prev => {
+      const newCart = typeof updater === "function" ? updater(prev) : updater;
+      try { writeStoredCart(newCart); } catch {}
+      return newCart;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated || !dashboardApiKey) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    // Read ?menuId= from URL — URL param always wins over the default first-menu selection
+    const urlMenuId = new URLSearchParams(search).get("menuId");
+    fetchApi<Menu[]>("/menus")
+      .then(data => {
+        setMenus(data);
+        if (urlMenuId && data.some(m => m.id === urlMenuId)) {
+          setActiveMenuId(urlMenuId);
+        } else if (data.length > 0) {
+          setActiveMenuId(data[0].id);
+        }
+      })
+      .catch(e => toast.error(e.message || "Failed to load menus"))
+      .finally(() => setLoading(false));
+  }, [dashboardApiKey, isAuthenticated, search]);
+
+  const handleAddToCart = (item: MenuItem) => {
+    persistCart((prev: CartEntry[]) => {
+      const existing = prev.find((e: CartEntry) => e.item.id === item.id);
+      if (existing) return prev.map((e: CartEntry) => e.item.id === item.id ? { ...e, qty: e.qty + 1 } : e);
+      return [...prev, { item, qty: 1 }];
+    });
+  };
+
+  const handleRemoveFromCart = (itemId: string) => {
+    persistCart((prev: CartEntry[]) => {
+      const existing = prev.find((e: CartEntry) => e.item.id === itemId);
+      if (!existing) return prev;
+      if (existing.qty <= 1) return prev.filter((e: CartEntry) => e.item.id !== itemId);
+      return prev.map((e: CartEntry) => e.item.id === itemId ? { ...e, qty: e.qty - 1 } : e);
+    });
+  };
+
+  const handleUpdateCartQty = (itemId: string, delta: number) => {
+    if (delta > 0) {
+      persistCart((prev: CartEntry[]) => prev.map((e: CartEntry) => e.item.id === itemId ? { ...e, qty: e.qty + 1 } : e));
+    } else {
+      handleRemoveFromCart(itemId);
+    }
+  };
+
+  const handleDeleteMenu = async (menuId: string, menuName: string) => {
+    if (!confirm(`Delete "${menuName}"? This will remove all items and cannot be undone.`)) return;
+    try {
+      await fetchApi(`/menus/${menuId}`, { method: "DELETE" });
+      const updated = menus.filter(m => m.id !== menuId);
+      setMenus(updated);
+      if (activeMenuId === menuId) {
+        if (updated.length > 0) setActiveMenuId(updated[0].id);
+        else navigate("/menu-manager/new");
+      }
+      toast.success(`"${menuName}" deleted`);
+    } catch (e: any) {
+      toast.error(e.message || "Failed to delete menu");
+    }
+  };
+
+  const handleRenameMenu = async (menuId: string, menuName: string) => {
+    const nextName = window.prompt("Rename menu", menuName)?.trim();
+    if (!nextName || nextName === menuName) return;
+    try {
+      const updated = await fetchApi<Menu>(`/menus/${menuId}`, {
+        method: "PUT",
+        body: JSON.stringify({ name: nextName }),
+      });
+      setMenus(prev => prev.map(m => m.id === menuId ? { ...m, ...updated } : m));
+      toast.success(`Renamed to "${nextName}"`);
+    } catch (e: any) {
+      toast.error(e.message || "Failed to rename menu");
+    }
+  };
+
+  const activeMenu = menus.find(m => m.id === activeMenuId) || menus[0] || null;
+
+  // Empty state — no menus yet → redirect to template picker
+  useEffect(() => {
+    if (!loading && menus.length === 0) navigate("/menu-manager/new");
+  }, [loading, menus.length]);
+
+  return (
+    <AppLayout noPadding>
+      {loading ? (
+        <div className="flex items-center justify-center h-64">
+          <div className="w-6 h-6 border-2 border-[#00C853] border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : activeMenu ? (
+        <POSView
+          menu={activeMenu}
+          allMenus={menus}
+          cart={cart}
+          merchantProfile={merchantProfile}
+          onSwitchMenu={setActiveMenuId}
+          onAddToCart={handleAddToCart}
+          onRemoveFromCart={handleRemoveFromCart}
+          onUpdateCartQty={handleUpdateCartQty}
+          onClearCart={() => persistCart([])}
+          onNewMenu={() => navigate("/menu-manager/new")}
+          onRenameMenu={handleRenameMenu}
+          onDeleteMenu={handleDeleteMenu}
+        />
+      ) : null}
+    </AppLayout>
+  );
+}

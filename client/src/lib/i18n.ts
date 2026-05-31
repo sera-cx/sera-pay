@@ -1,0 +1,432 @@
+export type Locale = "en" | "ms" | "id" | "zh" | "ja" | "ko" | "es" | "fr" | "de" | "pt" | "th" | "vi" | "ar" | "hi";
+
+export const RTL_LOCALES: Set<Locale> = new Set(["ar"]);
+
+export type I18nStrings = {
+  connectWallet: string;
+  connectWalletDesc: string;
+  selectCoin: string;
+  selectCoinDesc: string;
+  payWith: string;
+  merchantReceives: string;
+  searchCoins: string;
+  noCoinsFound: string;
+  amountDue: string;
+  openAmount: string;
+  enterAmount: string;
+  amountMin: string;
+  memo: string;
+  memoPlaceholder: string;
+  confirmAndPay: string;
+  paying: string;
+  paymentSuccess: string;
+  paymentFailed: string;
+  tryAgain: string;
+  copyTxHash: string;
+  copied: string;
+  viewOnEtherscan: string;
+  invalidLink: string;
+  invalidLinkDesc: string;
+  expiredLink: string;
+  expiredLinkDesc: string;
+  rateUpdated: string;
+  rateUpdatedDesc: string;
+  previousAmount: string;
+  newAmount: string;
+  acceptAndPay: string;
+  cancel: string;
+  shareLink: string;
+  copyLink: string;
+  linkCopied: string;
+  calculating: string;
+  networkFee: string;
+  close: string;
+};
+
+const en: I18nStrings = {
+  connectWallet: "Connect Wallet",
+  connectWalletDesc: "Connect your wallet to pay",
+  selectCoin: "Select Coin",
+  selectCoinDesc: "Choose the coin you want to pay with",
+  payWith: "Pay With",
+  merchantReceives: "Merchant receives",
+  searchCoins: "Search coins...",
+  noCoinsFound: "No supported coins found for this network.",
+  amountDue: "Amount Due",
+  openAmount: "Open Amount",
+  enterAmount: "Enter amount",
+  amountMin: "Minimum 0.01",
+  memo: "Memo / Reference",
+  memoPlaceholder: "Optional note for this payment",
+  confirmAndPay: "Confirm & Pay",
+  paying: "Processing...",
+  paymentSuccess: "Payment Sent",
+  paymentFailed: "Payment Failed",
+  tryAgain: "Try Again",
+  copyTxHash: "Copy TX Hash",
+  copied: "Copied!",
+  viewOnEtherscan: "View on Etherscan",
+  invalidLink: "Invalid Payment Link",
+  invalidLinkDesc: "This payment link is invalid or has expired.",
+  expiredLink: "Payment Link Expired",
+  expiredLinkDesc: "This payment link has expired and can no longer be used.",
+  rateUpdated: "Exchange Rate Updated",
+  rateUpdatedDesc: "The rate has changed since you last saw it.",
+  previousAmount: "Previous amount",
+  newAmount: "New amount",
+  acceptAndPay: "Accept & Pay",
+  cancel: "Cancel",
+  shareLink: "Share",
+  copyLink: "Copy Link",
+  linkCopied: "Link copied!",
+  calculating: "Calculating amount...",
+  networkFee: "Network fee",
+  close: "Close",
+};
+
+const translations: Record<Locale, I18nStrings> = {
+  en,
+  ms: {
+    ...en,
+    connectWallet: "Sambung Dompet",
+    connectWalletDesc: "Sambungkan dompet anda untuk membayar",
+    selectCoin: "Pilih Syiling",
+    selectCoinDesc: "Pilih syiling untuk pembayaran",
+    payWith: "Bayar Dengan",
+    merchantReceives: "Peniaga menerima",
+    searchCoins: "Cari syiling...",
+    noCoinsFound: "Tiada syiling disokong untuk rangkaian ini.",
+    amountDue: "Jumlah Perlu Dibayar",
+    openAmount: "Jumlah Terbuka",
+    enterAmount: "Masukkan jumlah",
+    amountMin: "Minimum 0.01",
+    memoPlaceholder: "Nota pilihan untuk pembayaran ini",
+    confirmAndPay: "Sahkan & Bayar",
+    paying: "Memproses...",
+    paymentSuccess: "Pembayaran Berjaya",
+    paymentFailed: "Pembayaran Gagal",
+    tryAgain: "Cuba Lagi",
+    copied: "Disalin!",
+    invalidLink: "Pautan Pembayaran Tidak Sah",
+    rateUpdated: "Kadar Pertukaran Dikemas Kini",
+    acceptAndPay: "Terima & Bayar",
+    cancel: "Batal",
+    shareLink: "Kongsi",
+    copyLink: "Salin Pautan",
+    calculating: "Mengira jumlah...",
+    close: "Tutup",
+  },
+  id: {
+    ...en,
+    connectWallet: "Hubungkan Dompet",
+    connectWalletDesc: "Hubungkan dompet Anda untuk membayar",
+    selectCoin: "Pilih Koin",
+    selectCoinDesc: "Pilih koin untuk pembayaran",
+    payWith: "Bayar Dengan",
+    merchantReceives: "Merchant menerima",
+    searchCoins: "Cari koin...",
+    amountDue: "Jumlah Tagihan",
+    openAmount: "Jumlah Terbuka",
+    enterAmount: "Masukkan jumlah",
+    confirmAndPay: "Konfirmasi & Bayar",
+    paying: "Memproses...",
+    paymentSuccess: "Pembayaran Terkirim",
+    paymentFailed: "Pembayaran Gagal",
+    tryAgain: "Coba Lagi",
+    copied: "Disalin!",
+    invalidLink: "Tautan Pembayaran Tidak Valid",
+    rateUpdated: "Kurs Diperbarui",
+    acceptAndPay: "Terima & Bayar",
+    cancel: "Batal",
+    shareLink: "Bagikan",
+    copyLink: "Salin Tautan",
+    calculating: "Menghitung jumlah...",
+    close: "Tutup",
+  },
+  zh: {
+    ...en,
+    connectWallet: "连接钱包",
+    connectWalletDesc: "连接钱包以完成付款",
+    selectCoin: "选择币种",
+    selectCoinDesc: "选择要支付的币种",
+    payWith: "支付币种",
+    merchantReceives: "商家收款",
+    searchCoins: "搜索稳定币...",
+    noCoinsFound: "此网络没有支持的币种。",
+    amountDue: "应付金额",
+    openAmount: "自定义金额",
+    enterAmount: "输入金额",
+    amountMin: "最低 0.01",
+    memo: "备注 / 参考",
+    memoPlaceholder: "此付款的可选备注",
+    confirmAndPay: "确认并支付",
+    paying: "处理中...",
+    paymentSuccess: "付款已发送",
+    paymentFailed: "付款失败",
+    tryAgain: "重试",
+    copied: "已复制！",
+    invalidLink: "无效付款链接",
+    invalidLinkDesc: "此付款链接无效或已过期。",
+    expiredLink: "付款链接已过期",
+    rateUpdated: "汇率已更新",
+    previousAmount: "之前金额",
+    newAmount: "新金额",
+    acceptAndPay: "接受并支付",
+    cancel: "取消",
+    shareLink: "分享",
+    copyLink: "复制链接",
+    calculating: "正在计算金额...",
+    close: "关闭",
+  },
+  ja: {
+    ...en,
+    connectWallet: "ウォレット接続",
+    connectWalletDesc: "支払いのためにウォレットを接続してください",
+    selectCoin: "通貨を選択",
+    payWith: "支払い通貨",
+    merchantReceives: "加盟店の受取",
+    searchCoins: "通貨を検索...",
+    amountDue: "支払金額",
+    openAmount: "自由入力",
+    confirmAndPay: "確認して支払う",
+    paying: "処理中...",
+    paymentSuccess: "支払い送信済み",
+    paymentFailed: "支払い失敗",
+    tryAgain: "再試行",
+    copied: "コピーしました！",
+    invalidLink: "無効な支払いリンク",
+    rateUpdated: "為替レート更新",
+    acceptAndPay: "承認して支払う",
+    cancel: "キャンセル",
+    close: "閉じる",
+  },
+  ko: {
+    ...en,
+    connectWallet: "지갑 연결",
+    connectWalletDesc: "결제를 위해 지갑을 연결하세요",
+    selectCoin: "코인 선택",
+    payWith: "결제 코인",
+    merchantReceives: "판매자 수령",
+    searchCoins: "코인 검색...",
+    amountDue: "결제 금액",
+    openAmount: "직접 입력 금액",
+    confirmAndPay: "확인 및 결제",
+    paying: "처리 중...",
+    paymentSuccess: "결제 전송됨",
+    paymentFailed: "결제 실패",
+    tryAgain: "다시 시도",
+    copied: "복사됨!",
+    invalidLink: "유효하지 않은 결제 링크",
+    rateUpdated: "환율 업데이트됨",
+    acceptAndPay: "수락 및 결제",
+    cancel: "취소",
+    close: "닫기",
+  },
+  es: {
+    ...en,
+    connectWallet: "Conectar billetera",
+    connectWalletDesc: "Conecta tu billetera para pagar",
+    selectCoin: "Seleccionar moneda",
+    payWith: "Pagar con",
+    merchantReceives: "El comercio recibe",
+    searchCoins: "Buscar monedas...",
+    amountDue: "Importe a pagar",
+    openAmount: "Importe abierto",
+    enterAmount: "Introduce el importe",
+    confirmAndPay: "Confirmar y pagar",
+    paying: "Procesando...",
+    paymentSuccess: "Pago enviado",
+    paymentFailed: "Pago fallido",
+    tryAgain: "Intentar de nuevo",
+    copied: "Copiado",
+    invalidLink: "Enlace de pago no válido",
+    rateUpdated: "Tipo de cambio actualizado",
+    acceptAndPay: "Aceptar y pagar",
+    cancel: "Cancelar",
+    shareLink: "Compartir",
+    copyLink: "Copiar enlace",
+    calculating: "Calculando importe...",
+    close: "Cerrar",
+  },
+  fr: {
+    ...en,
+    connectWallet: "Connecter le wallet",
+    connectWalletDesc: "Connectez votre wallet pour payer",
+    selectCoin: "Choisir une monnaie",
+    payWith: "Payer avec",
+    merchantReceives: "Le marchand reçoit",
+    searchCoins: "Rechercher des monnaies...",
+    amountDue: "Montant dû",
+    openAmount: "Montant libre",
+    confirmAndPay: "Confirmer et payer",
+    paying: "Traitement...",
+    paymentSuccess: "Paiement envoyé",
+    paymentFailed: "Paiement échoué",
+    tryAgain: "Réessayer",
+    copied: "Copié",
+    invalidLink: "Lien de paiement invalide",
+    rateUpdated: "Taux de change mis à jour",
+    acceptAndPay: "Accepter et payer",
+    cancel: "Annuler",
+    shareLink: "Partager",
+    copyLink: "Copier le lien",
+    calculating: "Calcul du montant...",
+    close: "Fermer",
+  },
+  de: {
+    ...en,
+    connectWallet: "Wallet verbinden",
+    connectWalletDesc: "Verbinde dein Wallet zum Bezahlen",
+    selectCoin: "Coin auswählen",
+    payWith: "Bezahlen mit",
+    merchantReceives: "Händler erhält",
+    searchCoins: "Coins suchen...",
+    amountDue: "Fälliger Betrag",
+    openAmount: "Freier Betrag",
+    confirmAndPay: "Bestätigen & zahlen",
+    paying: "Wird verarbeitet...",
+    paymentSuccess: "Zahlung gesendet",
+    paymentFailed: "Zahlung fehlgeschlagen",
+    tryAgain: "Erneut versuchen",
+    copied: "Kopiert",
+    invalidLink: "Ungültiger Zahlungslink",
+    rateUpdated: "Wechselkurs aktualisiert",
+    acceptAndPay: "Akzeptieren & zahlen",
+    cancel: "Abbrechen",
+    shareLink: "Teilen",
+    copyLink: "Link kopieren",
+    calculating: "Betrag wird berechnet...",
+    close: "Schließen",
+  },
+  pt: {
+    ...en,
+    connectWallet: "Conectar carteira",
+    connectWalletDesc: "Conecte sua carteira para pagar",
+    selectCoin: "Selecionar moeda",
+    payWith: "Pagar com",
+    merchantReceives: "Comerciante recebe",
+    searchCoins: "Buscar moedas...",
+    amountDue: "Valor devido",
+    openAmount: "Valor aberto",
+    confirmAndPay: "Confirmar e pagar",
+    paying: "Processando...",
+    paymentSuccess: "Pagamento enviado",
+    paymentFailed: "Pagamento falhou",
+    tryAgain: "Tentar novamente",
+    copied: "Copiado",
+    invalidLink: "Link de pagamento inválido",
+    rateUpdated: "Taxa de câmbio atualizada",
+    acceptAndPay: "Aceitar e pagar",
+    cancel: "Cancelar",
+    shareLink: "Compartilhar",
+    copyLink: "Copiar link",
+    calculating: "Calculando valor...",
+    close: "Fechar",
+  },
+  th: {
+    ...en,
+    connectWallet: "เชื่อมต่อกระเป๋า",
+    connectWalletDesc: "เชื่อมต่อกระเป๋าเพื่อชำระเงิน",
+    selectCoin: "เลือกเหรียญ",
+    payWith: "ชำระด้วย",
+    merchantReceives: "ร้านค้ารับ",
+    searchCoins: "ค้นหาเหรียญ...",
+    amountDue: "ยอดที่ต้องชำระ",
+    confirmAndPay: "ยืนยันและชำระ",
+    paying: "กำลังประมวลผล...",
+    paymentSuccess: "ส่งการชำระเงินแล้ว",
+    paymentFailed: "ชำระเงินล้มเหลว",
+    tryAgain: "ลองอีกครั้ง",
+    copied: "คัดลอกแล้ว",
+    invalidLink: "ลิงก์ชำระเงินไม่ถูกต้อง",
+    rateUpdated: "อัปเดตอัตราแลกเปลี่ยนแล้ว",
+    acceptAndPay: "ยอมรับและชำระ",
+    cancel: "ยกเลิก",
+    close: "ปิด",
+  },
+  vi: {
+    ...en,
+    connectWallet: "Kết nối ví",
+    connectWalletDesc: "Kết nối ví để thanh toán",
+    selectCoin: "Chọn đồng tiền",
+    payWith: "Thanh toán bằng",
+    merchantReceives: "Người bán nhận",
+    searchCoins: "Tìm đồng tiền...",
+    amountDue: "Số tiền cần trả",
+    confirmAndPay: "Xác nhận & thanh toán",
+    paying: "Đang xử lý...",
+    paymentSuccess: "Đã gửi thanh toán",
+    paymentFailed: "Thanh toán thất bại",
+    tryAgain: "Thử lại",
+    copied: "Đã sao chép",
+    invalidLink: "Liên kết thanh toán không hợp lệ",
+    rateUpdated: "Tỷ giá đã cập nhật",
+    acceptAndPay: "Chấp nhận & thanh toán",
+    cancel: "Hủy",
+    close: "Đóng",
+  },
+  ar: {
+    ...en,
+    connectWallet: "ربط المحفظة",
+    connectWalletDesc: "اربط محفظتك للدفع",
+    selectCoin: "اختر العملة",
+    payWith: "ادفع باستخدام",
+    merchantReceives: "يستلم التاجر",
+    searchCoins: "ابحث عن العملات...",
+    amountDue: "المبلغ المستحق",
+    confirmAndPay: "تأكيد ودفع",
+    paying: "جار المعالجة...",
+    paymentSuccess: "تم إرسال الدفع",
+    paymentFailed: "فشل الدفع",
+    tryAgain: "حاول مرة أخرى",
+    copied: "تم النسخ",
+    invalidLink: "رابط دفع غير صالح",
+    rateUpdated: "تم تحديث سعر الصرف",
+    acceptAndPay: "قبول ودفع",
+    cancel: "إلغاء",
+    close: "إغلاق",
+  },
+  hi: {
+    ...en,
+    connectWallet: "वॉलेट कनेक्ट करें",
+    connectWalletDesc: "भुगतान करने के लिए अपना वॉलेट कनेक्ट करें",
+    selectCoin: "कॉइन चुनें",
+    payWith: "इससे भुगतान करें",
+    merchantReceives: "मर्चेंट प्राप्त करता है",
+    searchCoins: "कॉइन खोजें...",
+    amountDue: "देय राशि",
+    confirmAndPay: "पुष्टि करें और भुगतान करें",
+    paying: "प्रोसेस हो रहा है...",
+    paymentSuccess: "भुगतान भेजा गया",
+    paymentFailed: "भुगतान विफल",
+    tryAgain: "फिर कोशिश करें",
+    copied: "कॉपी किया गया",
+    invalidLink: "अमान्य भुगतान लिंक",
+    rateUpdated: "विनिमय दर अपडेट हुई",
+    acceptAndPay: "स्वीकार करें और भुगतान करें",
+    cancel: "रद्द करें",
+    close: "बंद करें",
+  },
+};
+
+export function detectLocale(): Locale {
+  const lang = navigator.language?.toLowerCase() || "en";
+  if (lang.startsWith("zh")) return "zh";
+  if (lang.startsWith("ja")) return "ja";
+  if (lang.startsWith("ko")) return "ko";
+  if (lang.startsWith("ms")) return "ms";
+  if (lang.startsWith("id")) return "id";
+  if (lang.startsWith("es")) return "es";
+  if (lang.startsWith("fr")) return "fr";
+  if (lang.startsWith("de")) return "de";
+  if (lang.startsWith("pt")) return "pt";
+  if (lang.startsWith("th")) return "th";
+  if (lang.startsWith("vi")) return "vi";
+  if (lang.startsWith("ar")) return "ar";
+  if (lang.startsWith("hi")) return "hi";
+  return "en";
+}
+
+export function getTranslations(locale: Locale): I18nStrings {
+  return translations[locale] || translations.en;
+}

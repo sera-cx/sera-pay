@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Primary SEO -->
+    <title>SeraPay — Accept Stablecoin Payments Instantly</title>
+    <meta name="description" content="SeraPay lets merchants accept USDC, USDT and other stablecoins via QR code or payment link. No bank account or KYC required. Powered by Sera Protocol." />
+    <meta name="keywords" content="stablecoin payments, accept USDC, accept USDT, crypto QR payment, SeraPay, Sera Protocol" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="SeraPay — Accept Stablecoin Payments Instantly" />
+    <meta property="og:description" content="Accept USDC, USDT and other stablecoins via QR code or payment link. No bank account or KYC required." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://pay.sera.cx" />
+    <meta property="og:image" content="/icon-512.png" />
+    <meta property="og:image:width" content="1129" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="SeraPay — Accept Stablecoin Payments Instantly" />
+    <meta name="twitter:description" content="Accept USDC, USDT and other stablecoins via QR code or payment link. No bank account or KYC required." />
+
+    <!-- Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "SeraPay",
+      "url": "https://pay.sera.cx",
+      "description": "SeraPay lets merchants accept USDC, USDT and other stablecoins via QR code or payment link. No bank account or KYC required. Powered by Sera Protocol.",
+      "applicationCategory": "FinanceApplication",
+      "operatingSystem": "Any",
+      "browserRequirements": "Requires JavaScript",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "creator": {
+        "@type": "Organization",
+        "name": "Sera Protocol",
+        "url": "https://sera.cx"
+      }
+    }
+    </script>
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- iOS PWA -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="SeraPay" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-startup-image" href="/apple-touch-icon.png" />
+
+    <!-- Android / Chrome PWA -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="SeraPay" />
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <meta name="theme-color" content="#22c55e" />
+    <meta name="msapplication-TileColor" content="#22c55e" />
+    <meta name="msapplication-TileImage" content="/icon-192.png" />
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+    <!-- Performance: preconnect to critical third-party origins -->
+    <!-- Privy auth API -->
+    <link rel="preconnect" href="https://auth.privy.io" />
+    <link rel="dns-prefetch" href="https://auth.privy.io" />
+    <!-- Alchemy RPC -->
+    <link rel="dns-prefetch" href="https://eth-mainnet.g.alchemy.com" />
+    <link rel="dns-prefetch" href="https://eth-sepolia.g.alchemy.com" />
+    <!-- WalletConnect -->
+    <link rel="dns-prefetch" href="https://relay.walletconnect.com" />
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+
+</html>
