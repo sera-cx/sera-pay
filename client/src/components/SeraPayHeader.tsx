@@ -37,6 +37,7 @@ type SeraPayHeaderProps = {
   centerContent?: React.ReactNode;
   rightContent?: React.ReactNode;
   beforeWalletContent?: React.ReactNode;
+  afterLogoContent?: React.ReactNode;
   compact?: boolean;
   homeHeader?: boolean;
 };
@@ -51,6 +52,7 @@ export function SeraPayHeader({
   centerContent,
   rightContent,
   beforeWalletContent,
+  afterLogoContent,
   compact = false,
   homeHeader = false,
 }: SeraPayHeaderProps) {
@@ -136,6 +138,7 @@ export function SeraPayHeader({
           <Link href="/" style={{ display: "flex", alignItems: "center", textDecoration: "none" }}>
             <SeraLogo size={homeHeader ? 25 : compact ? 28 : 32} />
           </Link>
+          {afterLogoContent ? <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>{afterLogoContent}</div> : null}
         </div>
 
         {centerContent ? <div style={{ minWidth: 0, justifySelf: "center" }}>{centerContent}</div> : null}

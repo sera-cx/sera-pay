@@ -6,11 +6,8 @@ import { cn, shortenAddress } from "@/lib/dashboard-utils";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useEvents } from "@/hooks/use-events";
 import { motion, AnimatePresence } from "framer-motion";
-import { useSwitchChain, useChainId } from "wagmi";
-import { mainnet, sepolia } from "wagmi/chains";
 import { SeraLogo } from "@/components/SeraPayHeader";
-import { useSeraApiConfig, useUpdateSeraApiConfig } from "@/hooks/use-gateway";
-import { DEFAULT_SERA_API_BASE_URL, DEFAULT_SERA_API_TESTNET_BASE_URL } from "@shared/gateway";
+import { NetworkModeButton, NetworkSwitcherModal, useActiveNetworkMode } from "@/components/NetworkSwitcher";
 
 const navItems = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -22,141 +19,6 @@ const navItems = [
 ];
 
 const LS_SIDEBAR = "serapay_sidebar_collapsed";
-
-// ── Network info ──────────────────────────────────────────────────────────────
-const NETWORKS: Record<number, { label: string; color: string; bg: string; isTest: boolean }> = {
-  [sepolia.id]: { label: "Sepolia", color: "#00A87A", bg: "#E6FAF5", isTest: true },
-  [mainnet.id]: { label: "Ethereum", color: "#627EEA", bg: "#EEF1FD", isTest: false },
-};
-
-// ── Network Switcher Modal ────────────────────────────────────────────────────
-export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
-  const chainId = useChainId();
-  const { switchChain, isPending } = useSwitchChain();
-  const { data: seraConfig } = useSeraApiConfig();
-  const updateConfig = useUpdateSeraApiConfig();
-  const activeMode = seraConfig?.mode === "live" ? "live" : seraConfig?.mode === "test" ? "test" : chainId === mainnet.id ? "live" : "test";
-  const current = activeMode === "live" ? NETWORKS[mainnet.id] : NETWORKS[sepolia.id];
-
-  const handleSwitch = async (targetChainId: number) => {
-    const targetMode = targetChainId === mainnet.id ? "live" : "test";
-    try {
-      await updateConfig.mutateAsync({
-        mode: targetMode,
-        seraApiBaseUrl: targetMode === "test" ? DEFAULT_SERA_API_TESTNET_BASE_URL : DEFAULT_SERA_API_BASE_URL,
-      });
-      await switchChain({ chainId: targetChainId });
-      onClose();
-    } catch {
-      // Wallet may not have the chain — try wallet_addEthereumChain as fallback
-      try {
-        const provider = (window as any).ethereum;
-        if (!provider) return;
-        if (targetChainId === sepolia.id) {
-          await provider.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: "0xaa36a7",
-              chainName: "Sepolia",
-              nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
-              rpcUrls: [import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com"],
-              blockExplorerUrls: ["https://sepolia.etherscan.io"],
-            }],
-          });
-        } else if (targetChainId === mainnet.id) {
-          await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] });
-        }
-        onClose();
-      } catch (addErr) {
-        console.error("[NetworkSwitch] Failed:", addErr);
-      }
-    }
-  };
-
-  return (
-    <>
-      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-sm p-5">
-          {/* Header */}
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-sm font-semibold text-foreground">Switch Network</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Currently on <span className="font-medium" style={{ color: current.color }}>{current.label}</span>
-              </p>
-            </div>
-            <button onClick={onClose} className="w-11 h-11 rounded-full flex items-center justify-center hover:bg-muted transition-colors" aria-label="Close">
-              <X className="w-3.5 h-3.5 text-muted-foreground" />
-            </button>
-          </div>
-
-          {/* Warning banner */}
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex gap-2.5">
-            <span className="text-amber-500 text-base leading-none mt-0.5">⚠️</span>
-            <p className="text-xs text-amber-800 leading-relaxed">
-              <strong>Sepolia is a test network.</strong> Transactions use test ETH and have no real value.
-              Switch to <strong>Ethereum Mainnet</strong> to accept real payments from customers.
-            </p>
-          </div>
-
-          {/* Network options */}
-          <div className="space-y-2">
-            {/* Sepolia */}
-            <button
-              onClick={() => handleSwitch(sepolia.id)}
-              disabled={isPending || updateConfig.isPending || activeMode === "test"}
-              className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
-                activeMode === "test"
-                  ? "border-[#00D1A0] bg-[#E6FAF5]"
-                  : "border-border hover:border-[#00D1A0]/50 hover:bg-muted/40"
-              )}
-            >
-              <div className="w-8 h-8 rounded-full bg-[#E6FAF5] flex items-center justify-center shrink-0">
-                <span className="text-sm">🧪</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-foreground">Sepolia Testnet</p>
-                <p className="text-xs text-muted-foreground">For testing only — no real value</p>
-              </div>
-              {activeMode === "test" && (
-                <span className="text-xs font-medium text-[#00A87A] bg-[#E6FAF5] px-2 py-0.5 rounded-full shrink-0">Active</span>
-              )}
-            </button>
-
-            {/* Ethereum Mainnet */}
-            <button
-              onClick={() => handleSwitch(mainnet.id)}
-              disabled={isPending || updateConfig.isPending || activeMode === "live"}
-              className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
-                activeMode === "live"
-                  ? "border-[#627EEA] bg-[#EEF1FD]"
-                  : "border-border hover:border-[#627EEA]/50 hover:bg-muted/40"
-              )}
-            >
-              <div className="w-8 h-8 rounded-full bg-[#EEF1FD] flex items-center justify-center shrink-0">
-                <span className="text-sm">💎</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-foreground">Ethereum Mainnet</p>
-                <p className="text-xs text-muted-foreground">Live network — real payments</p>
-              </div>
-              {activeMode === "live" && (
-                <span className="text-xs font-medium text-[#627EEA] bg-[#EEF1FD] px-2 py-0.5 rounded-full shrink-0">Active</span>
-              )}
-            </button>
-          </div>
-
-          {(isPending || updateConfig.isPending) && (
-            <p className="text-xs text-center text-muted-foreground mt-3">Switching network in your wallet…</p>
-          )}
-        </div>
-      </div>
-    </>
-  );
-}
 
 // ── Wallet Dropdown ──────────────────────────────────────────────────────────
 function WalletDropdown({ address, onLogout }: { address: string; onLogout: () => void }) {
@@ -259,10 +121,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
   const [showNetworkModal, setShowNetworkModal] = useState(false);
   const [showNetworkTip, setShowNetworkTip] = useState(false);
 
-  const chainId = useChainId();
-  const { data: seraConfig } = useSeraApiConfig();
-  const activeMode = seraConfig?.mode === "live" ? "live" : seraConfig?.mode === "test" ? "test" : chainId === mainnet.id ? "live" : "test";
-  const networkInfo = activeMode === "live" ? NETWORKS[mainnet.id] : NETWORKS[sepolia.id];
+  const { activeMode, networkInfo } = useActiveNetworkMode();
 
   useEvents();
 
@@ -297,16 +156,16 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
   if (!apiKey) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center px-4">
-        <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 text-center shadow-sm">
+        <div className="w-full max-w-sm min-w-0 overflow-hidden rounded-2xl border border-border bg-card p-6 text-center shadow-sm">
           <div className="flex justify-center">
             <SeraLogo size={34} />
           </div>
           {error ? null : <div className="mx-auto mt-6 h-8 w-8 rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0] animate-spin" />}
           <h1 className="mt-5 text-lg font-semibold text-foreground">{error ? "Dashboard setup needs attention" : "Opening dashboard"}</h1>
-          <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+          <p className="mt-2 text-sm text-muted-foreground leading-relaxed [overflow-wrap:anywhere]">
             {error || "Your wallet is connected. We will continue automatically when the workspace is ready."}
           </p>
-          {walletAddress ? <p className="mt-4 text-xs font-mono text-muted-foreground break-all">{walletAddress}</p> : null}
+          {walletAddress ? <p className="mt-4 text-xs font-mono text-muted-foreground break-all [overflow-wrap:anywhere]">{walletAddress}</p> : null}
           {error ? (
             <button
               onClick={retry}
@@ -526,31 +385,11 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
 
             {/* Test / Live pill toggle */}
             <div className="relative">
-              <button
+              <NetworkModeButton
+                activeMode={activeMode}
                 onClick={() => setShowNetworkModal(true)}
-                className="flex items-center h-7 rounded-full border border-border bg-muted p-0.5 gap-0 transition-all hover:border-foreground/20 cursor-pointer"
                 title={networkInfo.isTest ? "Test mode — click to switch to Live" : "Live mode — click to switch to Test"}
-                aria-label="Switch network"
-              >
-                {/* Test label */}
-                <span className={cn(
-                  "px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-all",
-                  networkInfo.isTest
-                    ? "bg-amber-100 text-amber-700"
-                    : "text-muted-foreground"
-                )}>
-                  Test
-                </span>
-                {/* Live label */}
-                <span className={cn(
-                  "px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-all",
-                  !networkInfo.isTest
-                    ? "bg-[#E6FAF5] text-[#00A87A]"
-                    : "text-muted-foreground"
-                )}>
-                  Live
-                </span>
-              </button>
+              />
 
               {/* ? tooltip */}
               <div className="absolute -right-5 top-0 h-7 flex items-center">

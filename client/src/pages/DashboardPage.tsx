@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
-import { AppLayout, NetworkSwitcherModal } from "@/components/AppLayout";
+import { AppLayout } from "@/components/AppLayout";
+import { NetworkSwitcherModal, useActiveNetworkMode } from "@/components/NetworkSwitcher";
 import { Card, Skeleton, Badge } from "@/components/dashboard-ui";
 import { useTransactions } from "@/hooks/use-transactions";
 import { useMerchantStats } from "@/hooks/use-stats";
@@ -7,8 +8,6 @@ import { formatAmount, getTransactionStatusLabel, shortenAddress } from "@/lib/d
 import { ArrowDownRight, Activity, Clock, CheckCircle2, TrendingUp, QrCode, AlertTriangle, Rocket } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { format, parseISO, subDays, startOfDay } from "date-fns";
-import { useChainId } from "wagmi";
-import { sepolia } from "wagmi/chains";
 
 type ChartRange = "7d" | "30d" | "90d";
 
@@ -18,8 +17,8 @@ export function Dashboard() {
   const [chartRange, setChartRange] = useState<ChartRange>("7d");
   const [showNetworkModal, setShowNetworkModal] = useState(false);
 
-  const chainId = useChainId();
-  const isTestnet = chainId === sepolia.id;
+  const { activeMode } = useActiveNetworkMode();
+  const isTestnet = activeMode === "test";
 
   const isLoading = txLoading || statsLoading;
   const recentTransactions = txData?.transactions ?? [];

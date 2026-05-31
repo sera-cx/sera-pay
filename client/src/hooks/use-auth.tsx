@@ -64,6 +64,40 @@ function registrationMessage(walletAddress: string, privyUserId: string, timesta
   ].join("\n");
 }
 
+function parseProviderError(value: unknown): { code?: number; message?: string } {
+  if (value && typeof value === "object") {
+    const err = value as any;
+    if (typeof err.message === "string") {
+      const parsed = parseProviderError(err.message);
+      return { code: typeof err.code === "number" ? err.code : parsed.code, message: parsed.message || err.message };
+    }
+    return { code: typeof err.code === "number" ? err.code : undefined, message: typeof err.error === "string" ? err.error : undefined };
+  }
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object") {
+      return {
+        code: typeof parsed.code === "number" ? parsed.code : undefined,
+        message: typeof parsed.message === "string" ? parsed.message : value,
+      };
+    }
+  } catch {}
+  return { message: value };
+}
+
+function formatAccountSetupError(err: unknown): string {
+  const parsed = parseProviderError(err);
+  const message = parsed.message || (err instanceof Error ? err.message : "") || "Account setup failed. Please retry.";
+  if (parsed.code === -32002 || /personal_sign.+already pending|request.+already pending/i.test(message)) {
+    return "A wallet signature request is already open. Please approve it in your wallet, or close it and retry account setup.";
+  }
+  if (/user rejected|user denied|request rejected|signature rejected|denied transaction/i.test(message)) {
+    return "Wallet signature was cancelled. Tap Retry account setup when you are ready.";
+  }
+  return message;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { authenticated, user, login: privyLogin, logout: privyLogout, ready, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
@@ -342,7 +376,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setRetryCount((count) => count + 1);
           }, retryDelay);
         } else {
-          setError(rawMessage || "Account setup failed. Please retry.");
+          setError(formatAccountSetupError(err));
         }
       } finally {
         if (!controller.signal.aborted) setIsLoading(false);
