@@ -485,9 +485,10 @@ export function Transactions() {
 
   const handleShowQR = (amount: string, coin: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!profile?.walletAddress) return;
+    const receiverAddress = profile?.storeAddress || profile?.walletAddress;
+    if (!receiverAddress) return;
     const url = buildPaymentUrl({
-      receiverAddress: profile.walletAddress,
+      receiverAddress,
       receiveCoin: profile.receiveCoin || coin,
       amount: amount && parseFloat(amount) > 0 ? amount : undefined,
       payCoin: coin !== (profile.receiveCoin || coin) ? coin : undefined,

@@ -162,7 +162,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
           {error ? null : <div className="mx-auto mt-6 h-8 w-8 rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0] animate-spin" />}
           <h1 className="mt-5 text-lg font-semibold text-foreground">{error ? "Dashboard setup needs attention" : "Opening dashboard"}</h1>
           <p className="mt-2 text-sm text-muted-foreground leading-relaxed [overflow-wrap:anywhere]">
-            {error || "Your wallet is connected. We will continue automatically when the workspace is ready."}
+            {error || "We will continue automatically when your workspace is ready."}
           </p>
           {walletAddress ? <p className="mt-4 text-xs font-mono text-muted-foreground break-all [overflow-wrap:anywhere]">{walletAddress}</p> : null}
           {error ? (

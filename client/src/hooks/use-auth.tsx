@@ -32,6 +32,7 @@ const WALLET_KEY = DASHBOARD_WALLET_STORAGE_KEY;
 type WalletInfo = {
   address: string;
   walletType: string;
+  kind: "external" | "privy";
 };
 
 function isExternalWalletType(walletType: string): boolean {
@@ -53,6 +54,19 @@ function walletTypeFrom(value: any): string {
 function isPrivyWallet(value: any): boolean {
   const marker = `${value?.walletClientType || ""} ${value?.wallet_client_type || ""} ${value?.connectorType || ""} ${value?.connector_type || ""} ${value?.type || ""}`.toLowerCase();
   return marker.includes("privy") || marker.includes("embedded");
+}
+
+function isExternalWallet(value: any): boolean {
+  return !isPrivyWallet(value);
+}
+
+function walletInfo(address: string, source: any, fallbackKind: WalletInfo["kind"]): WalletInfo {
+  const kind = fallbackKind === "privy" || isPrivyWallet(source) ? "privy" : "external";
+  return {
+    address,
+    walletType: kind === "privy" ? "privy" : walletTypeFrom(source),
+    kind,
+  };
 }
 
 function registrationMessage(walletAddress: string, privyUserId: string, timestamp: string) {
@@ -195,30 +209,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const connectedWallets = (wallets as any[] || [])
       .map((wallet) => ({ address: normalizeAddress(wallet?.address), wallet }))
       .filter((item): item is { address: string; wallet: any } => Boolean(item.address));
-    const connectedExternal = connectedWallets.find((item) => !isPrivyWallet(item.wallet));
-    if (connectedExternal) return { address: connectedExternal.address, walletType: walletTypeFrom(connectedExternal.wallet) };
+    const connectedExternal = connectedWallets.find((item) => isExternalWallet(item.wallet));
+    if (connectedExternal) return walletInfo(connectedExternal.address, connectedExternal.wallet, "external");
     const connected = connectedWallets[0];
-    if (connected) return { address: connected.address, walletType: walletTypeFrom(connected.wallet) };
+    if (connected) return walletInfo(connected.address, connected.wallet, "privy");
 
     const linkedAccounts = ((user as any).linkedAccounts as any[] | undefined) || [];
     const linkedWallets = linkedAccounts
       .map((account) => ({ address: normalizeAddress(account?.address), account }))
       .filter((item): item is { address: string; account: any } => Boolean(item.address));
-    const linkedExternal = linkedWallets.find((item) => !isPrivyWallet(item.account));
-    if (linkedExternal) return { address: linkedExternal.address, walletType: walletTypeFrom(linkedExternal.account) };
+    const linkedExternal = linkedWallets.find((item) => isExternalWallet(item.account));
+    if (linkedExternal) return walletInfo(linkedExternal.address, linkedExternal.account, "external");
 
     const wallet = (user as any).wallet;
     const userWalletAddress = normalizeAddress(wallet?.address);
-    if (userWalletAddress) return { address: userWalletAddress, walletType: walletTypeFrom(wallet) };
+    if (userWalletAddress) return walletInfo(userWalletAddress, wallet, "privy");
     const linked = linkedWallets[0];
-    return linked ? { address: linked.address, walletType: walletTypeFrom(linked.account) } : null;
+    return linked ? walletInfo(linked.address, linked.account, "privy") : null;
   }, [user, wallets]);
 
   const signWalletProof = useCallback(async (address: string, walletType: string) => {
     const privyUserId = String((user as any)?.id || (user as any)?.userId || "");
     if (!privyUserId) return null;
-    const wallet = ((wallets as any[]) || []).find((item) => normalizeAddress(item?.address) === address);
-    const provider = wallet?.getEthereumProvider ? await wallet.getEthereumProvider() : (window as any).ethereum;
+    const wallet = ((wallets as any[]) || []).find((item) => normalizeAddress(item?.address) === address && isExternalWallet(item));
+    if (!wallet?.getEthereumProvider) return null;
+    const provider = await wallet.getEthereumProvider();
     if (!provider?.request) return null;
     const timestamp = new Date().toISOString();
     const message = registrationMessage(address, privyUserId, timestamp);
@@ -305,7 +320,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           signal: controller.signal,
         });
 
-        const initialWalletProof = isExternalWalletType(walletInfo.walletType)
+        const initialWalletProof = walletInfo.kind === "external" && isExternalWalletType(walletInfo.walletType)
           ? await signWalletProof(addr, walletInfo.walletType)
           : null;
 
@@ -316,7 +331,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!res.ok) {
           let body = await res.json().catch(() => null);
           if (["PRIVY_USER_LOOKUP_FAILED", "PRIVY_CONFIG_MISSING", "PRIVY_WALLET_MISMATCH"].includes(body?.code)) {
-            const walletProof = await signWalletProof(addr, walletInfo.walletType);
+            const walletProof = walletInfo.kind === "external"
+              ? await signWalletProof(addr, walletInfo.walletType)
+              : null;
             if (walletProof && !controller.signal.aborted) {
               res = await registerMerchant(walletProof);
               if (res.ok) {

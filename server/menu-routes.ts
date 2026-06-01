@@ -345,13 +345,22 @@ menuRouter.get("/public/menu/:slug", async (req, res) => {
       name: merchants.name,
       logoData: merchants.logoData,
       walletAddress: merchants.walletAddress,
+      storeAddress: merchants.storeAddress,
       receiveCoin: merchants.receiveCoin,
     }).from(merchants).where(eq(merchants.id, menu.merchantId));
     if (!merchant) { res.status(404).json({ error: "Merchant not found" }); return; }
     const items = await db.select().from(menuItems)
       .where(and(eq(menuItems.menuId, menu.id), eq(menuItems.isActive, 1)))
       .orderBy(asc(menuItems.sortOrder), asc(menuItems.createdAt));
-    res.json({ menu, merchant, items });
+    res.json({
+      menu,
+      merchant: {
+        ...merchant,
+        walletAddress: merchant.storeAddress || merchant.walletAddress,
+        ownerWalletAddress: merchant.walletAddress,
+      },
+      items,
+    });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
 });
 

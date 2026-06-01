@@ -22,6 +22,7 @@ import {
   listSeraApiRequestLogs,
   listPaymentIntents,
   listSubWallets,
+  updateMerchant,
   updatePaymentIntent,
   updateSubWallet,
   upsertApiKeyConfig,
@@ -125,6 +126,60 @@ function apiConfigToJson(config: any) {
     mode,
     encryptionReady: isSecretEncryptionReady(),
     updatedAt: config?.updatedAt,
+  };
+}
+
+function walletViewsForMerchant(merchant: any, subWallets: any[]) {
+  const merchantWallet = String(merchant.walletAddress || "").toLowerCase();
+  const defaultAddress = String(merchant.storeAddress || merchant.walletAddress || "").toLowerCase();
+  const masterIsDefault = !merchant.storeAddress || defaultAddress === merchantWallet;
+  const viewedSubWallets = subWallets.map((wallet) => ({
+    ...wallet,
+    isDefault: String(wallet.address || "").toLowerCase() === defaultAddress,
+  }));
+  const selectedSubWallet = viewedSubWallets.find((wallet) => wallet.isDefault);
+  const hasCustomDefault = Boolean(merchant.storeAddress) && !masterIsDefault && !selectedSubWallet;
+  return {
+    masterWallet: {
+      id: merchant.id,
+      merchantId: merchant.id,
+      type: "master",
+      address: merchant.walletAddress,
+      settlementAddress: merchant.storeAddress || merchant.walletAddress,
+      receiveCoin: merchant.receiveCoin,
+      chainId: 1,
+      isDefault: masterIsDefault,
+      createdAt: merchant.createdAt,
+    },
+    subWallets: viewedSubWallets,
+    defaultWallet: selectedSubWallet
+      ? {
+          id: selectedSubWallet.id,
+          type: "sub-wallet",
+          label: selectedSubWallet.label,
+          address: selectedSubWallet.address,
+          receiveCoin: selectedSubWallet.receiveCoin,
+          chainId: selectedSubWallet.chainId,
+        }
+      : hasCustomDefault
+      ? {
+          id: "custom",
+          type: "custom",
+          label: "Custom Address",
+          address: merchant.storeAddress,
+          receiveCoin: merchant.receiveCoin,
+          chainId: 1,
+        }
+      : {
+          id: "master",
+          type: "master",
+          label: "Master Wallet",
+          address: merchant.walletAddress,
+          receiveCoin: merchant.receiveCoin,
+          chainId: 1,
+        },
+    defaultWalletId: selectedSubWallet?.id ?? (hasCustomDefault ? "custom" : "master"),
+    defaultWalletAddress: defaultAddress || merchantWallet,
   };
 }
 
@@ -360,6 +415,7 @@ gatewayRouter.get("/wallets/master", requireApiKey as any, async (req: any, res)
     settlementAddress: merchant.storeAddress || merchant.walletAddress,
     receiveCoin: merchant.receiveCoin,
     chainId: 1,
+    isDefault: !merchant.storeAddress || String(merchant.storeAddress).toLowerCase() === String(merchant.walletAddress).toLowerCase(),
     createdAt: merchant.createdAt,
   });
 });
@@ -368,22 +424,46 @@ gatewayRouter.get("/wallets", requireApiKey as any, async (req: any, res) => {
   try {
     const merchant = req.merchant;
     const subWallets = await listSubWallets(merchant.id);
-    res.json({
-      masterWallet: {
-        id: merchant.id,
-        merchantId: merchant.id,
-        type: "master",
-        address: merchant.walletAddress,
-        settlementAddress: merchant.storeAddress || merchant.walletAddress,
-        receiveCoin: merchant.receiveCoin,
-        chainId: 1,
-        createdAt: merchant.createdAt,
-      },
-      subWallets,
-    });
+    res.json(walletViewsForMerchant(merchant, subWallets));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+gatewayRouter.put("/wallets/default", requireApiKey as any, async (req: any, res) => {
+  try {
+    const walletId = String(req.body?.walletId ?? req.body?.id ?? "").trim();
+    if (!walletId) {
+      res.status(400).json({ error: "walletId is required" });
+      return;
+    }
+
+    if (walletId === "master" || walletId === req.merchant.id) {
+      await updateMerchant(req.merchant.id, { storeAddress: null });
+      const subWallets = await listSubWallets(req.merchant.id);
+      res.json(walletViewsForMerchant({ ...req.merchant, storeAddress: null }, subWallets));
+      return;
+    }
+
+    const wallet = await getSubWalletById(walletId);
+    if (!wallet || wallet.merchantId !== req.merchant.id || wallet.status !== "active") {
+      res.status(404).json({ error: "Sub-wallet not found" });
+      return;
+    }
+
+    const compliance = await screenWalletAddress(wallet.address, "recipient_wallet", req.merchant.id);
+    if (compliance.blocked) {
+      res.status(403).json({ error: "Wallet address failed compliance screening", compliance });
+      return;
+    }
+
+    await updateMerchant(req.merchant.id, { storeAddress: wallet.address });
+    const subWallets = await listSubWallets(req.merchant.id);
+    res.json(walletViewsForMerchant({ ...req.merchant, storeAddress: wallet.address }, subWallets));
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to set default wallet" });
   }
 });
 
@@ -435,6 +515,9 @@ gatewayRouter.delete("/sub-wallets/:id", requireApiKey as any, async (req: any, 
       return;
     }
     await updateSubWallet(wallet.id, { status: "archived" });
+    if (String(req.merchant.storeAddress || "").toLowerCase() === String(wallet.address || "").toLowerCase()) {
+      await updateMerchant(req.merchant.id, { storeAddress: null });
+    }
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : "Unable to delete sub-wallet" });

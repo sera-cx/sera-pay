@@ -7,14 +7,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Plus, Trash2, Edit2, ExternalLink, Copy, Check, X,
   ShoppingCart, QrCode, Download, Camera, Minus, Image as ImageIcon,
-  ChevronDown, UtensilsCrossed, Search,
+  ChevronDown, UtensilsCrossed, Search, WalletCards,
 } from "lucide-react";
 import { toast } from "sonner";
 import { buildPaymentUrl, resolvePaymentChainId, OrderItem } from "@/lib/payment";
 import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
-import { useSeraApiConfig } from "@/hooks/use-gateway";
+import { useSeraApiConfig, useSetDefaultWallet, useWallets } from "@/hooks/use-gateway";
 import QRCodeStyling from "qr-code-styling";
 import { useLocation, useSearch } from "wouter";
 import { useChainId } from "wagmi";
@@ -389,6 +389,119 @@ function QRSaveModal({ url, menuName, merchantProfile, onClose }: { url: string;
 
 // ── Cart Sidebar ──────────────────────────────────────────────────────────────
 
+function shortAddress(address: string) {
+  return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "";
+}
+
+function MenuWalletSelector() {
+  const { data, isLoading } = useWallets();
+  const setDefaultWallet = useSetDefaultWallet();
+  const [open, setOpen] = useState(false);
+  const [, navigate] = useLocation();
+  const ref = useRef<HTMLDivElement>(null);
+  const defaultWallet = data?.defaultWallet;
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const handleSetDefault = (walletId: string) => {
+    setDefaultWallet.mutate(walletId, {
+      onSuccess: () => {
+        toast.success("Default wallet updated");
+        setOpen(false);
+      },
+      onError: (error: any) => toast.error(error.message || "Unable to set default wallet"),
+    });
+  };
+
+  const walletRows = data ? [
+    {
+      id: "master",
+      label: "Master Wallet",
+      address: data.masterWallet.address,
+      coin: data.masterWallet.receiveCoin || "USDC",
+      isDefault: data.defaultWalletId === "master",
+    },
+    ...data.subWallets.map((wallet) => ({
+      id: wallet.id,
+      label: wallet.label,
+      address: wallet.address,
+      coin: wallet.receiveCoin || "USDC",
+      isDefault: Boolean(wallet.isDefault),
+    })),
+  ] : [];
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="flex min-h-10 items-center gap-2 rounded-2xl border border-gray-200 bg-white px-3.5 py-2 text-sm font-semibold text-gray-900 shadow-none transition-all hover:border-[#00C853] hover:bg-[#F9FFFC] focus:outline-none focus:ring-2 focus:ring-[#00C853]/25"
+        title={defaultWallet ? `Receiving to ${defaultWallet.label}` : "Choose receiving wallet"}
+      >
+        <WalletCards className="h-4 w-4 text-[#00A87A]" />
+        <span className="hidden max-w-[110px] truncate sm:inline">{defaultWallet?.label || (isLoading ? "Wallets" : "Wallet")}</span>
+        <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full z-30 mt-2 w-[min(22rem,calc(100vw-2rem))] rounded-2xl border border-gray-200 bg-white p-2 shadow-[0_18px_50px_rgba(10,31,26,0.14)]">
+          <div className="px-2 pb-2 pt-1">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Receiving Wallet</p>
+            <p className="mt-1 truncate text-xs text-gray-500">{defaultWallet ? shortAddress(defaultWallet.address) : "No wallet loaded"}</p>
+          </div>
+          <div className="max-h-64 overflow-y-auto">
+            {walletRows.map((wallet) => (
+              <div key={wallet.id} className="flex items-center gap-2 rounded-xl px-2 py-2 transition-colors hover:bg-[#F4FFF9]">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#E6FAF5] text-[#00A87A]">
+                  <WalletCards className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p className="truncate text-sm font-semibold text-gray-900">{wallet.label}</p>
+                    {wallet.isDefault ? <span className="rounded-full bg-[#E6FAF5] px-2 py-0.5 text-[10px] font-bold text-[#00A87A]">Default</span> : null}
+                  </div>
+                  <p className="truncate font-mono text-[11px] text-gray-400">{shortAddress(wallet.address)} - {wallet.coin}</p>
+                </div>
+                {wallet.isDefault ? (
+                  <Check className="h-4 w-4 shrink-0 text-[#00C853]" />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleSetDefault(wallet.id)}
+                    disabled={setDefaultWallet.isPending}
+                    className="shrink-0 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:border-[#00C853] hover:text-[#00A87A] disabled:opacity-50"
+                  >
+                    Set
+                  </button>
+                )}
+              </div>
+            ))}
+            {!isLoading && walletRows.length === 1 ? (
+              <p className="px-2 py-3 text-xs text-gray-400">Add sub-wallets to route this merchant to another receiving address.</p>
+            ) : null}
+          </div>
+          <div className="mt-1 border-t border-gray-100 pt-1">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); navigate("/wallets"); }}
+              className="flex w-full items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold text-[#00A87A] transition-colors hover:bg-[#F4FFF9]"
+            >
+              <WalletCards className="h-4 w-4" /> Manage wallets
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CartSidebar({
   cart,
   activeMenu,
@@ -424,9 +537,10 @@ function CartSidebar({
   const dominantCoin = coinEntries.reduce((a, b) => b[1] > a[1] ? b : a, ["", 0])[0]
     || merchantProfile?.receiveCoin || "USDC";
   const dominantTotal = coinTotals[dominantCoin] || 0;
+  const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress;
 
   const handleGenerateQR = () => {
-    if (!merchantProfile?.walletAddress) { toast.error("Wallet address not found"); return; }
+    if (!receiverAddress) { toast.error("Wallet address not found"); return; }
     const orderItems: OrderItem[] = cart.map(e => ({
       id: e.item.id,
       n: e.item.name,
@@ -435,7 +549,7 @@ function CartSidebar({
       c: e.item.coin || undefined,
     }));
     const url = buildPaymentUrl({
-      receiverAddress: merchantProfile.walletAddress,
+      receiverAddress,
       receiveCoin: dominantCoin,
       amount: dominantTotal.toFixed(2),
       chainId: paymentChainId,
@@ -895,6 +1009,8 @@ function POSView({
               </>
             )}
           </div>
+
+          <MenuWalletSelector />
 
           {/* Search */}
           <div className="flex-1 relative min-w-[180px] max-w-xs">

@@ -1,26 +1,45 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AppLayout } from "@/components/AppLayout";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Skeleton } from "@/components/dashboard-ui";
-import { useCreateSubWallet, useDeleteSubWallet, useWallets } from "@/hooks/use-gateway";
+import { useCreateSubWallet, useDeleteSubWallet, useSetDefaultWallet, useSeraApiConfig, useWallets } from "@/hooks/use-gateway";
 import { useMerchantStats } from "@/hooks/use-stats";
 import { formatAmount } from "@/lib/dashboard-utils";
 import { useToast } from "@/components/toast-system";
-import { AlertTriangle, Copy, Landmark, Plus, Trash2, Wallet, X } from "lucide-react";
+import { CurrencySelectModal } from "@/components/CurrencySelectModal";
+import { loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
+import { resolvePaymentChainId } from "@/lib/payment";
+import { STABLECOINS } from "@/lib/stablecoins";
+import { AlertTriangle, CheckCircle2, ChevronDown, Copy, Landmark, Plus, Trash2, Wallet, X } from "lucide-react";
+import { useChainId } from "wagmi";
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
 export function Wallets() {
   const { data, isLoading, error } = useWallets();
   const { data: stats } = useMerchantStats();
+  const { data: seraConfig } = useSeraApiConfig();
   const createSubWallet = useCreateSubWallet();
   const deleteSubWallet = useDeleteSubWallet();
+  const setDefaultWallet = useSetDefaultWallet();
   const { toast } = useToast();
+  const walletChainId = useChainId();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [label, setLabel] = useState("");
   const [address, setAddress] = useState("");
   const [receiveCoin, setReceiveCoin] = useState("USDC");
   const [chainId, setChainId] = useState(1);
   const [showAddWallet, setShowAddWallet] = useState(false);
+  const [showCoinPicker, setShowCoinPicker] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null);
+  const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
+  const currencyList = useMemo(
+    () => currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const })),
+    [currencyOptions],
+  );
+
+  useEffect(() => {
+    loadSeraCurrencies(paymentChainId).then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
+  }, [paymentChainId]);
 
   const copy = async (value: string) => {
     await navigator.clipboard.writeText(value);
@@ -39,12 +58,21 @@ export function Wallets() {
         onSuccess: () => {
           setLabel("");
           setAddress("");
+          setReceiveCoin("USDC");
+          setChainId(1);
           setShowAddWallet(false);
           toast({ title: "Sub-wallet added", type: "success" });
         },
         onError: (err: any) => toast({ title: "Could not add sub-wallet", description: err.message, type: "error" }),
       }
     );
+  };
+
+  const handleSetDefault = (walletId: string) => {
+    setDefaultWallet.mutate(walletId, {
+      onSuccess: () => toast({ title: "Default wallet updated", type: "success" }),
+      onError: (err: any) => toast({ title: "Could not set default wallet", description: err.message, type: "error" }),
+    });
   };
 
   const handleDelete = () => {
@@ -98,17 +126,49 @@ export function Wallets() {
                   <div className="rounded-xl border border-border p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-xs text-muted-foreground mb-1">Settlement address</p>
+                        <div className="mb-1 flex flex-wrap items-center gap-2">
+                          <p className="text-xs text-muted-foreground">Master address</p>
+                          {data.masterWallet.isDefault ? <Badge variant="success">Default</Badge> : null}
+                        </div>
                         <p className="font-mono text-sm break-all">{data.masterWallet.settlementAddress}</p>
+                        {data.masterWallet.settlementAddress.toLowerCase() !== data.masterWallet.address.toLowerCase() ? (
+                          <p className="mt-1 text-xs text-muted-foreground">Receiving through selected default wallet.</p>
+                        ) : null}
                       </div>
-                      <button
-                        onClick={() => copy(data.masterWallet.settlementAddress)}
-                        className="w-9 h-9 rounded-lg border border-border flex items-center justify-center shrink-0 hover:bg-muted"
-                        title="Copy settlement address"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {!data.masterWallet.isDefault ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={setDefaultWallet.isPending}
+                            onClick={() => handleSetDefault("master")}
+                            className="hidden bg-white sm:inline-flex"
+                          >
+                            Set as Default
+                          </Button>
+                        ) : null}
+                        <button
+                          onClick={() => copy(data.masterWallet.settlementAddress)}
+                          className="w-9 h-9 rounded-lg border border-border flex items-center justify-center hover:bg-muted"
+                          title="Copy settlement address"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
+                    {!data.masterWallet.isDefault ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={setDefaultWallet.isPending}
+                        onClick={() => handleSetDefault("master")}
+                        className="mt-3 w-full bg-white sm:hidden"
+                      >
+                        Set as Default
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
               ) : null}
@@ -134,15 +194,30 @@ export function Wallets() {
             ) : data?.subWallets.length ? (
               <div className="divide-y divide-border rounded-xl border border-border">
                 {data.subWallets.map((wallet) => (
-                  <div key={wallet.id} className="flex items-center justify-between gap-3 p-4">
-                    <div className="min-w-0">
+                  <div key={wallet.id} className="group flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 self-stretch sm:self-auto">
                       <div className="flex items-center gap-2 mb-1">
                         <p className="font-medium text-sm">{wallet.label}</p>
                         <Badge variant={wallet.status === "active" ? "success" : "secondary"}>{wallet.status}</Badge>
+                        {wallet.isDefault ? <Badge variant="warning">Default</Badge> : null}
                       </div>
                       <p className="font-mono text-xs text-muted-foreground break-all">{wallet.address}</p>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex shrink-0 items-center gap-2 self-end sm:self-auto">
+                      {!wallet.isDefault ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={setDefaultWallet.isPending}
+                          onClick={() => handleSetDefault(wallet.id)}
+                          className="hidden bg-white sm:inline-flex"
+                        >
+                          Set as Default
+                        </Button>
+                      ) : (
+                        <CheckCircle2 className="hidden h-4 w-4 text-[#00B88A] sm:block" />
+                      )}
                       <div className="text-right">
                         <p className="text-xs font-semibold">{wallet.receiveCoin || "USDC"}</p>
                         <p className="text-[11px] text-muted-foreground">Chain {wallet.chainId}</p>
@@ -158,12 +233,24 @@ export function Wallets() {
                       <button
                         type="button"
                         onClick={() => setDeleteTarget({ id: wallet.id, label: wallet.label })}
-                        className="w-9 h-9 rounded-lg border border-red-200 bg-red-50 flex items-center justify-center text-red-600 hover:bg-red-100"
+                        className="w-9 h-9 rounded-lg border border-red-200 bg-red-50 flex items-center justify-center text-red-600 opacity-100 transition-all hover:bg-red-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
                         title="Delete sub-wallet"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
+                    {!wallet.isDefault ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={setDefaultWallet.isPending}
+                        onClick={() => handleSetDefault(wallet.id)}
+                        className="mt-2 w-full bg-white sm:hidden"
+                      >
+                        Set as Default
+                      </Button>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -201,7 +288,14 @@ export function Wallets() {
               <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1.5">
                   <Label>Coin</Label>
-                  <Input value={receiveCoin} onChange={(e) => setReceiveCoin(e.target.value.toUpperCase())} />
+                  <button
+                    type="button"
+                    onClick={() => setShowCoinPicker(true)}
+                    className="flex h-10 w-full items-center justify-between rounded-xl border border-border bg-background px-3 py-2 text-left text-sm transition-all hover:border-[#00C853] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/10"
+                  >
+                    <span className="font-semibold">{receiveCoin}</span>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  </button>
                 </div>
                 <div className="space-y-1.5">
                   <Label>Chain ID</Label>
@@ -221,6 +315,19 @@ export function Wallets() {
             </form>
           </div>
         </div>
+      )}
+
+      {showCoinPicker && (
+        <CurrencySelectModal
+          title="Choose Coin"
+          subtitle="Sera-supported currencies are loaded from the Sera token list."
+          currencies={currencyList}
+          selectedSymbol={receiveCoin}
+          onSelect={setReceiveCoin}
+          onClose={() => setShowCoinPicker(false)}
+          onConfirm={() => setShowCoinPicker(false)}
+          confirmLabel={`Use ${receiveCoin}`}
+        />
       )}
 
       {deleteTarget && (

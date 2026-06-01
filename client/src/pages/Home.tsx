@@ -10,6 +10,7 @@ import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { useQueryClient } from "@tanstack/react-query";
+import { ArrowUpDown } from "lucide-react";
 import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal } from "@/components/NetworkSwitcher";
@@ -65,7 +66,7 @@ function AccountSetupScreen({
             {error ? "Finish Account Setup" : "Preparing Your Payment Page"}
           </h1>
           <p style={{ margin: 0, color: "rgba(60,60,67,0.68)", fontSize: 14, lineHeight: 1.55, overflowWrap: "anywhere", wordBreak: "break-word" }}>
-            {error || "Your wallet is connected. Please approve the wallet signature so SeraPay can open your merchant workspace and load your payment settings."}
+            {error || "SeraPay is opening your merchant workspace and loading your payment settings."}
           </p>
           {walletAddress ? (
             <p style={{ margin: "18px 0 0", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, color: "rgba(60,60,67,0.55)", overflowWrap: "anywhere", wordBreak: "break-word" }}>
@@ -1113,6 +1114,7 @@ export default function Home() {
     user?.wallet?.address ||
     (user?.linkedAccounts as any[])?.find((a: any) => a.type === "wallet")?.address ||
     "";
+  const receiverAddress = merchantProfile?.storeAddress || walletAddress;
   const isConnected = authenticated;
   const merchantWorkspaceReady = Boolean(dashboardApiKey && walletAddress);
 
@@ -1232,14 +1234,14 @@ export default function Home() {
     includeExpiry?: boolean;
   } = {}) => {
     const receiveCoin = overrides.receiveCoin ?? selectedCoin;
-    if (!receiveCoin || !walletAddress) return "";
+    if (!receiveCoin || !receiverAddress) return "";
     const receiveAmount = overrides.receiveAmount ?? amount;
     const payCoin = overrides.payCoin ?? customerCoin;
     const payAmount = overrides.payAmount ?? customerAmount;
     const includeExpiry = overrides.includeExpiry ?? true;
 
     return buildPaymentUrl({
-      receiverAddress: walletAddress,
+      receiverAddress,
       receiveCoin: receiveCoin.symbol,
       chainId: paymentChainId,
       amount: receiveAmount || undefined,
@@ -1250,7 +1252,7 @@ export default function Home() {
       expiresAt: includeExpiry ? getExpiresAt() : undefined,
       singleUse: includeExpiry ? singleUse || undefined : undefined,
     });
-  }, [selectedCoin, walletAddress, amount, customerCoin, customerAmount, merchantName, description, getExpiresAt, singleUse, paymentChainId]);
+  }, [selectedCoin, receiverAddress, amount, customerCoin, customerAmount, merchantName, description, getExpiresAt, singleUse, paymentChainId]);
 
   const handleSwapCoins = useCallback(() => {
     if (!selectedCoin || !customerCoin) return;
@@ -1402,7 +1404,7 @@ export default function Home() {
         const addrY = qrY + qrSize + (_displayAmount && _displayCoin ? 60 : 28);
         ctx.fillStyle = "rgba(60,60,67,0.3)";
         ctx.font = "500 10px monospace, -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillText(walletAddress, W / 2, addrY);
+        ctx.fillText(receiverAddress, W / 2, addrY);
         // Footer branding
         const footerY = H - 52;
         ctx.fillStyle = "rgba(60,60,67,0.25)";
@@ -1419,7 +1421,7 @@ export default function Home() {
       }
       setQrDownloading(false);
     }, 150);
-  }, [selectedCoin, customerCoin, customerAmount, amount, merchantName, localLogoData, merchantProfile, walletAddress]);
+  }, [selectedCoin, customerCoin, customerAmount, amount, merchantName, localLogoData, merchantProfile, receiverAddress]);
 
   const handleReset = useCallback(() => {
     setStep(1);
@@ -1683,7 +1685,7 @@ export default function Home() {
             </div>
             {/* Wallet address — subtle */}
             <p style={{ fontSize: 10, color: "rgba(60,60,67,0.2)", marginTop: 10, marginBottom: 0, wordBreak: "break-all", lineHeight: 1.4 }}>
-              {walletAddress}
+              {receiverAddress}
             </p>
           </div>
           {/* Merchant receives line — directly above action buttons */}
@@ -2057,12 +2059,7 @@ export default function Home() {
             {rateLoading ? (
               <div style={{ width: 12, height: 12, borderRadius: "50%", border: "2px solid rgba(0,200,83,0.2)", borderTopColor: "#00C853", animation: "spin 0.7s linear infinite" }} />
             ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M7 7h11l-3-3" />
-                <path d="M17 17H6l3 3" />
-                <path d="M18 7l-3 3" />
-                <path d="M6 17l3-3" />
-              </svg>
+              <ArrowUpDown size={14} strokeWidth={2.4} />
             )}
           </button>
           {exchangeRate !== null && selectedCoin && customerCoin && selectedCoin.symbol !== customerCoin.symbol && (
@@ -2217,17 +2214,17 @@ export default function Home() {
         {/* Generate QR button */}
         <button
           onClick={handleGenerateQR}
-          disabled={!selectedCoin || !walletAddress}
+          disabled={!selectedCoin || !receiverAddress}
           className="serapay-action-primary"
           style={{
             width: "100%", height: 54, borderRadius: 16,
-            background: selectedCoin && walletAddress
+            background: selectedCoin && receiverAddress
               ? "linear-gradient(135deg, #4ECE9A, #3AB882)"
               : "rgba(0,0,0,0.08)",
             border: "none",
-            color: selectedCoin && walletAddress ? "#fff" : "rgba(60,60,67,0.3)",
-            fontSize: 16, fontWeight: 700, cursor: selectedCoin && walletAddress ? "pointer" : "not-allowed",
-            boxShadow: selectedCoin && walletAddress ? "0 6px 20px rgba(78,206,154,0.28)" : "none",
+            color: selectedCoin && receiverAddress ? "#fff" : "rgba(60,60,67,0.3)",
+            fontSize: 16, fontWeight: 700, cursor: selectedCoin && receiverAddress ? "pointer" : "not-allowed",
+            boxShadow: selectedCoin && receiverAddress ? "0 6px 20px rgba(78,206,154,0.28)" : "none",
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             transition: "all 0.2s",
           }}

@@ -86,9 +86,21 @@ function PrivyConfigMissing() {
   );
 }
 
+function RouteLoadingFallback() {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center px-4">
+      <div className="flex flex-col items-center text-center">
+        <img src="/icon-512.png" alt="SeraPay" className="h-12 w-12 object-contain" />
+        <div className="mt-5 h-8 w-8 rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0] animate-spin" />
+        <p className="mt-4 text-sm font-medium text-muted-foreground">Opening SeraPay</p>
+      </div>
+    </div>
+  );
+}
+
 function Router() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<RouteLoadingFallback />}>
       <Switch>
         <Route path="/" component={Home} />
         <Route path="/pay/:encoded" component={PayPage} />
@@ -167,7 +179,7 @@ function App() {
             walletChainType: "ethereum-only",
           },
           embeddedWallets: {
-            ethereum: { createOnLogin: "all-users" },
+            ethereum: { createOnLogin: "users-without-wallets" },
           },
           legal: {
             termsAndConditionsUrl: "https://sera.cx/terms",

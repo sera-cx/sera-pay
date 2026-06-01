@@ -11,6 +11,7 @@ export interface GatewayMasterWallet {
   settlementAddress: string;
   receiveCoin: string | null;
   chainId: number;
+  isDefault: boolean;
   createdAt: string;
 }
 
@@ -22,8 +23,18 @@ export interface GatewaySubWallet {
   chainId: number;
   receiveCoin: string | null;
   status: "active" | "archived";
+  isDefault?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface GatewayDefaultWallet {
+  id: string;
+  type: "master" | "sub-wallet" | "custom";
+  label: string;
+  address: string;
+  receiveCoin: string | null;
+  chainId: number;
 }
 
 export interface GatewayPaymentIntent {
@@ -59,7 +70,13 @@ export interface SeraApiConfigView {
 
 export function useWallets() {
   const { apiKey, isAuthenticated } = useAuth();
-  return useQuery<{ masterWallet: GatewayMasterWallet; subWallets: GatewaySubWallet[] }>({
+  return useQuery<{
+    masterWallet: GatewayMasterWallet;
+    subWallets: GatewaySubWallet[];
+    defaultWallet: GatewayDefaultWallet;
+    defaultWalletId: string;
+    defaultWalletAddress: string;
+  }>({
     queryKey: ["/wallets", apiKey || ""],
     queryFn: () => fetchApi("/wallets"),
     enabled: isAuthenticated && !!apiKey,
@@ -87,6 +104,22 @@ export function useDeleteSubWallet() {
     mutationFn: (id: string) => fetchApi(`/sub-wallets/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/wallets"] });
+      queryClient.invalidateQueries({ queryKey: ["/merchant/profile"] });
+    },
+  });
+}
+
+export function useSetDefaultWallet() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (walletId: string) =>
+      fetchApi("/wallets/default", {
+        method: "PUT",
+        body: JSON.stringify({ walletId }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/wallets"] });
+      queryClient.invalidateQueries({ queryKey: ["/merchant/profile"] });
     },
   });
 }
