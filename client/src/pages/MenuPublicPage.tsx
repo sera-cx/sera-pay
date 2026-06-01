@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
-import { ShoppingCart, X, Plus, Minus, Image as ImageIcon, ChevronDown } from "lucide-react";
+import { ShoppingCart, X, Plus, Minus, Image as ImageIcon, ChevronDown, ChevronUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { buildPaymentUrl, OrderItem } from "@/lib/payment";
 import { getClientAppPath } from "@/lib/app-url";
@@ -33,6 +33,7 @@ interface MenuItem {
 
 interface Merchant {
   name: string;
+  description: string | null;
   logoData: string | null;
   walletAddress: string;
   receiveCoin: string;
@@ -213,18 +214,19 @@ function CartDrawer({
   checkoutDisabled?: boolean;
 }) {
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
 
   return (
     <>
-      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-end justify-center">
-        <div className="bg-white rounded-t-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
+      <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm" onClick={() => setConfirmClose(true)} />
+      <div className="pointer-events-none fixed inset-0 z-[51] flex items-end justify-center">
+        <div className="pointer-events-auto bg-white rounded-t-2xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
           <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-gray-100">
             <div className="flex items-center gap-2">
               <ShoppingCart className="w-4 h-4 text-[#00C853]" />
               <h3 className="font-semibold text-gray-900">Your Order</h3>
               <span className="text-xs bg-[#E6FAF5] text-[#00A87A] px-2 py-0.5 rounded-full font-medium">
-                {cart.reduce((s, e) => s + e.qty, 0)} items
+                {cart.reduce((s, e) => s + e.qty, 0)} item{cart.reduce((s, e) => s + e.qty, 0) === 1 ? "" : "s"}
               </span>
             </div>
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 transition-colors">
@@ -278,8 +280,7 @@ function CartDrawer({
             <Button
               onClick={onPay}
               disabled={creatingOrder || checkoutDisabled}
-              className="w-full font-semibold text-white"
-              style={{ background: "#00C853" }}
+              className="serapay-green-button serapay-shine-button w-full bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] font-semibold text-white"
             >
               {creatingOrder ? "Preparing order..." : checkoutDisabled ? "Updating prices..." : `Pay Now — ${displayTotal} ${displayCoin}`}
             </Button>
@@ -299,7 +300,31 @@ function CartDrawer({
             <p className="mt-1 text-sm text-gray-500">This removes every item before checkout.</p>
             <div className="mt-5 grid grid-cols-2 gap-2">
               <Button variant="outline" onClick={() => setConfirmClear(false)} className="bg-white">Cancel</Button>
-              <Button onClick={() => { onClear(); setConfirmClear(false); }} className="bg-red-500 text-white hover:bg-red-600">Clear</Button>
+              <Button onClick={() => { onClear(); setConfirmClear(false); }} variant="destructive" className="bg-red-500 text-white hover:bg-red-600">Clear</Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmClose && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-950">Forgotten to add on something?</h3>
+            <p className="mt-1 text-sm text-gray-500">Close your order and go back to the menu?</p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                onClick={() => { setConfirmClose(false); onClose(); }}
+                className="border-[#00A87A] bg-white text-[#00A87A] hover:border-[#008A64] hover:bg-white hover:text-[#008A64]"
+              >
+                Yes
+              </Button>
+              <Button
+                onClick={() => setConfirmClose(false)}
+                className="serapay-green-button bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white"
+                autoFocus
+              >
+                No
+              </Button>
             </div>
           </div>
         </div>
@@ -310,6 +335,131 @@ function CartDrawer({
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
+function PaxStartModal({
+  pax,
+  onChange,
+  onCancel,
+  onConfirm,
+}: {
+  pax: number;
+  onChange: (value: number) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [manualEntry, setManualEntry] = useState(false);
+  const lastTapRef = useRef(0);
+  const clampPax = (value: number) => Math.max(1, Math.min(99, value || 1));
+  const setPax = (value: number) => onChange(clampPax(value));
+  const wheelOffsets = [-2, -1, 0, 1, 2];
+  const revealManualEntry = () => setManualEntry(true);
+  const handleTouchEnd = () => {
+    const now = Date.now();
+    if (now - lastTapRef.current < 320) {
+      revealManualEntry();
+      lastTapRef.current = 0;
+      return;
+    }
+    lastTapRef.current = now;
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 z-[51] flex items-center justify-center p-4">
+        <div className="w-full max-w-sm rounded-3xl bg-white p-5 shadow-[0_24px_70px_rgba(10,31,26,0.18)]">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-950">How many pax?</h3>
+              <p className="mt-1 text-sm text-gray-500">Choose the table size before ordering.</p>
+            </div>
+            <button onClick={onCancel} className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-100 text-gray-400 hover:text-gray-600">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="mt-5 rounded-3xl border border-[#00A87A]/10 bg-gradient-to-b from-[#F4FFFB] to-white p-4">
+            <div className="mx-auto flex max-w-[210px] flex-col items-center">
+              <button
+                type="button"
+                onClick={() => setPax(pax - 1)}
+                className="flex h-9 w-14 items-center justify-center rounded-full border border-[#00A87A]/15 bg-white text-[#00A87A] shadow-sm transition-colors hover:border-[#00A87A]/40"
+              >
+                <ChevronUp className="h-4 w-4" />
+              </button>
+
+              <div
+                className="relative my-2 flex h-44 w-full items-center justify-center overflow-hidden rounded-[28px] bg-white shadow-inner"
+                onWheel={(event) => {
+                  event.preventDefault();
+                  setPax(pax + (event.deltaY > 0 ? 1 : -1));
+                }}
+              >
+                <div className="pointer-events-none absolute inset-x-4 top-1/2 h-16 -translate-y-1/2 rounded-2xl border border-[#00A87A]/20 bg-[#E6FAF5]/70" />
+                <div className="pointer-events-none absolute inset-x-0 top-0 h-12 bg-gradient-to-b from-white to-white/0" />
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-white to-white/0" />
+                <div className="relative z-10 flex w-full flex-col items-center gap-1">
+                  {wheelOffsets.map(offset => {
+                    const value = pax + offset;
+                    const distance = Math.abs(offset);
+                    const selected = offset === 0;
+                    if (value < 1 || value > 99) return <div key={offset} className="h-10 w-28" />;
+                    if (selected && manualEntry) {
+                      return (
+                        <div key={offset} className="flex h-10 w-28 scale-110 items-center justify-center rounded-2xl text-center transition-all">
+                          <input
+                            autoFocus
+                            value={pax}
+                            onChange={event => setPax(Number(event.target.value))}
+                            onBlur={() => setManualEntry(false)}
+                            type="number"
+                            min={1}
+                            max={99}
+                            inputMode="numeric"
+                            className="h-12 w-24 rounded-2xl border border-[#00A87A]/25 bg-white text-center text-3xl font-black text-[#008A64] outline-none ring-4 ring-[#00A87A]/10"
+                          />
+                        </div>
+                      );
+                    }
+                    return (
+                      <button
+                        key={offset}
+                        type="button"
+                        onClick={() => setPax(value)}
+                        onDoubleClick={selected ? revealManualEntry : undefined}
+                        onTouchEnd={selected ? handleTouchEnd : undefined}
+                        className={`flex h-10 w-28 items-center justify-center rounded-2xl text-center transition-all ${
+                          selected
+                            ? "scale-110 bg-transparent text-4xl font-black text-[#008A64]"
+                            : distance === 1
+                              ? "text-lg font-bold text-gray-400"
+                              : "text-sm font-semibold text-gray-300"
+                        }`}
+                      >
+                        {value}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setPax(pax + 1)}
+                className="flex h-9 w-14 items-center justify-center rounded-full border border-[#00A87A]/15 bg-white text-[#00A87A] shadow-sm transition-colors hover:border-[#00A87A]/40"
+              >
+                <ChevronDown className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <Button onClick={onConfirm} className="serapay-green-button serapay-shine-button mt-5 h-12 w-full bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white">
+            Start ordering
+          </Button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function MenuPublicPage() {
   const params = useParams<{ slug: string }>();
   const [, navigate] = useLocation();
@@ -319,6 +469,9 @@ export default function MenuPublicPage() {
   const [cart, setCart] = useState<CartEntry[]>([]);
   const [showCart, setShowCart] = useState(false);
   const [pax, setPax] = useState(1);
+  const [paxDraft, setPaxDraft] = useState(1);
+  const [started, setStarted] = useState(false);
+  const [showPaxPrompt, setShowPaxPrompt] = useState(false);
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [displayCoin, setDisplayCoin] = useState("");
   const [showCurrencySelect, setShowCurrencySelect] = useState(false);
@@ -335,9 +488,15 @@ export default function MenuPublicPage() {
     const options = currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const }));
     return options.filter((coin) => supported.has(coin.symbol));
   }, [currencyOptions]);
+  const startSessionKey = params.slug ? `serapay_menu_started_${params.slug}` : "";
 
   useEffect(() => {
     if (!params.slug) return;
+    try {
+      setStarted(sessionStorage.getItem(`serapay_menu_started_${params.slug}`) === "1");
+    } catch {
+      setStarted(false);
+    }
     fetch(`/api/public/menu/${params.slug}`)
       .then(r => {
         if (!r.ok) throw new Error(r.status === 404 ? "Menu not found" : "Failed to load menu");
@@ -347,6 +506,16 @@ export default function MenuPublicPage() {
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }, [params.slug]);
+
+  const confirmStartOrdering = () => {
+    const nextPax = Math.max(1, Math.min(99, paxDraft || 1));
+    setPax(nextPax);
+    setStarted(true);
+    setShowPaxPrompt(false);
+    try {
+      if (startSessionKey) sessionStorage.setItem(startSessionKey, "1");
+    } catch {}
+  };
 
   useEffect(() => {
     loadSeraCurrencies(paymentChainId).then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
@@ -501,11 +670,49 @@ export default function MenuPublicPage() {
   }, 0);
   const totalPending = convertingPrices || missingConvertedCartPrice;
   const displayTotal = totalPending ? "Updating..." : formatTokenAmount(displayTotalNumber);
+  const merchantDescription = merchant.description || menu.description || "Browse the menu and place your order with stablecoin checkout.";
+
+  if (!started) {
+    return (
+      <div className="flex min-h-screen flex-col bg-[#F5F7FA]">
+        <SeraPayHeader maxWidth={1240} compact />
+        <main className="mx-auto flex w-full max-w-[1240px] flex-1 items-center justify-center px-4 py-8">
+          <section className="w-full max-w-md rounded-3xl border border-gray-100 bg-white p-6 text-center shadow-[0_18px_50px_rgba(10,31,26,0.08)]">
+            <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center overflow-hidden rounded-2xl border border-[#00D1A0]/20 bg-[#E6FAF5]">
+              {merchant.logoData ? (
+                <img src={merchant.logoData} alt={merchant.name} className="h-full w-full object-cover" />
+              ) : (
+                <span className="text-xl font-bold text-[#00A87A]">{merchant.name.slice(0, 2).toUpperCase()}</span>
+              )}
+            </div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#00A87A]">{menu.name}</p>
+            <h1 className="mt-1 text-2xl font-bold text-gray-950">{merchant.name}</h1>
+            <p className="mt-3 text-sm leading-relaxed text-gray-500">{merchantDescription}</p>
+            <Button
+              onClick={() => { setPaxDraft(pax); setShowPaxPrompt(true); }}
+              className="serapay-green-button serapay-shine-button mt-6 h-12 w-full bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white"
+            >
+              Start ordering
+            </Button>
+          </section>
+        </main>
+        <SeraPayFooter compact />
+        {showPaxPrompt && (
+          <PaxStartModal
+            pax={paxDraft}
+            onChange={setPaxDraft}
+            onCancel={() => setShowPaxPrompt(false)}
+            onConfirm={confirmStartOrdering}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-[#F5F7FA]" style={{ paddingBottom: totalCount > 0 ? "88px" : "0" }}>
+    <div className="flex min-h-screen flex-col bg-[#F5F7FA]" style={{ paddingBottom: totalCount > 0 && !showCart ? "180px" : "0" }}>
       <SeraPayHeader
-        maxWidth={656}
+        maxWidth={1240}
         compact
         centerContent={(
           <div className="flex min-w-0 items-center gap-2.5">
@@ -546,7 +753,8 @@ export default function MenuPublicPage() {
         )}
       />
 
-      <div className="max-w-lg mx-auto px-4 pt-4">
+      <main className="mx-auto w-full max-w-[1240px] flex-1 px-4 py-6">
+      <div className="mx-auto max-w-2xl lg:max-w-none">
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-[#00C853] text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden">
@@ -574,20 +782,20 @@ export default function MenuPublicPage() {
 
       {/* Menu description */}
       {menu.description && (
-        <div className="max-w-lg mx-auto px-4 pt-4">
+        <div className="mx-auto max-w-2xl pt-4 lg:max-w-none">
           <p className="text-sm text-gray-600 bg-white rounded-xl px-4 py-3 border border-gray-100">{menu.description}</p>
         </div>
       )}
 
       {/* Items grid */}
-      <div className="max-w-lg mx-auto px-4 py-4">
+      <div className="mx-auto max-w-2xl py-4 lg:max-w-none">
         {items.length === 0 ? (
           <div className="text-center py-16">
             <ShoppingCart className="w-10 h-10 text-gray-300 mx-auto mb-3" />
             <p className="text-gray-500 text-sm">No items in this menu yet.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
             {items.map(item => {
               const itemDisplayPrice = item.coin.toUpperCase() === activeDisplayCoin ? item.price : convertedPrices[item.id];
               return (
@@ -605,17 +813,20 @@ export default function MenuPublicPage() {
           </div>
         )}
       </div>
+      </main>
 
       <SeraPayFooter compact />
 
       {/* Sticky cart bar */}
-      {totalCount > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 z-20 px-4 pb-4 pt-2 bg-gradient-to-t from-[#F5F7FA] to-transparent">
-          <div className="max-w-lg mx-auto">
+      {totalCount > 0 && !showCart && (
+        <div
+          className="pointer-events-none fixed inset-x-0 z-40 px-4 pt-3"
+          style={{ bottom: "max(10vh, calc(env(safe-area-inset-bottom) + 72px))" }}
+        >
+          <div className="pointer-events-auto mx-auto max-w-2xl lg:max-w-[720px]">
             <button
               onClick={() => setShowCart(true)}
-              className="w-full flex items-center justify-between px-5 py-3.5 rounded-2xl shadow-lg text-white font-semibold"
-              style={{ background: "#00C853" }}
+              className="serapay-green-button w-full flex items-center justify-between px-5 py-3.5 rounded-2xl bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] shadow-[0_16px_34px_rgba(0,138,100,0.25)] text-white font-semibold"
             >
               <div className="flex items-center gap-2">
                 <ShoppingCart className="w-4 h-4" />

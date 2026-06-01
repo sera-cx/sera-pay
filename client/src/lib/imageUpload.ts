@@ -1,6 +1,7 @@
 export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+export const MAX_RENDERED_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export type PreparedImage = {
   dataUrl: string;
@@ -10,7 +11,7 @@ export type PreparedImage = {
   outputBytes: number;
 };
 
-function readFileAsDataUrl(file: File) {
+export function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
@@ -19,7 +20,7 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
-function loadImage(src: string) {
+export function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
@@ -28,7 +29,7 @@ function loadImage(src: string) {
   });
 }
 
-function dataUrlBytes(dataUrl: string) {
+export function dataUrlBytes(dataUrl: string) {
   const base64 = dataUrl.split(",")[1] || "";
   return Math.floor((base64.length * 3) / 4);
 }
@@ -61,6 +62,49 @@ export async function prepareImageForUpload(file: File, options: { maxDimension?
     width,
     height,
     originalBytes: file.size,
+    outputBytes: dataUrlBytes(dataUrl),
+  };
+}
+
+export async function renderCroppedImageForUpload({
+  source,
+  crop,
+  outputWidth = 1600,
+  outputHeight = 1200,
+  quality = 0.88,
+  maxBytes = MAX_RENDERED_IMAGE_BYTES,
+}: {
+  source: string;
+  crop: { x: number; y: number; width: number; height: number };
+  outputWidth?: number;
+  outputHeight?: number;
+  quality?: number;
+  maxBytes?: number;
+}): Promise<PreparedImage> {
+  const image = await loadImage(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = outputWidth;
+  canvas.height = outputHeight;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Unable to prepare image");
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, outputWidth, outputHeight);
+  context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, outputWidth, outputHeight);
+
+  let nextQuality = quality;
+  let dataUrl = canvas.toDataURL("image/jpeg", nextQuality);
+  while (dataUrlBytes(dataUrl) > maxBytes && nextQuality > 0.62) {
+    nextQuality -= 0.06;
+    dataUrl = canvas.toDataURL("image/jpeg", nextQuality);
+  }
+
+  return {
+    dataUrl,
+    width: outputWidth,
+    height: outputHeight,
+    originalBytes: dataUrlBytes(source),
     outputBytes: dataUrlBytes(dataUrl),
   };
 }

@@ -407,7 +407,7 @@ function RateChangedModal({ oldAmount, newAmount, coin, onAccept, onCancel }: {
               <span style={{ fontSize: 13, fontWeight: 700, color: "#1C1C1E" }}>{newAmount} {coin}</span>
             </div>
           </div>
-          <button onClick={onAccept} style={{ width: "100%", height: 50, borderRadius: 14, background: "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", marginBottom: 10 }}>
+          <button onClick={onAccept} className="serapay-action-primary serapay-shine-button" style={{ width: "100%", height: 50, borderRadius: 14, background: "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", marginBottom: 10 }}>
             Accept & Pay {newAmount} {coin}
           </button>
           <button onClick={onCancel} style={{ width: "100%", height: 44, borderRadius: 14, background: "none", border: "none", color: "rgba(60,60,67,0.5)", fontSize: 14, cursor: "pointer" }}>
@@ -768,7 +768,7 @@ export default function PayPage() {
 
       const createRes = await fetch("/api/payment/create", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ merchantAddress: req.receiverAddress, coin: selectedCoin.symbol, amount: sendAmount, chainId: cid, orderId: (req as any).orderId }),
+        body: JSON.stringify({ merchantAddress: req.receiverAddress, coin: selectedCoin.symbol, amount: sendAmount, chainId: cid, orderId: (req as any).orderId, paymentUrl: window.location.href }),
       });
       const createData = await createRes.json();
       if (!createRes.ok) throw new Error(createData.error || "Failed to create payment");
@@ -1146,7 +1146,7 @@ export default function PayPage() {
               <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke={copied ? "#00D1A0" : "rgba(60,60,67,0.3)"} strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
             </button>
           )}
-          <button onClick={handleDownloadReceipt} style={{ width: "100%", height: 52, borderRadius: 14, background: "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, boxShadow: "0 6px 20px rgba(78,206,154,0.28)" }}>
+          <button onClick={handleDownloadReceipt} className="serapay-action-primary serapay-shine-button" style={{ width: "100%", height: 52, borderRadius: 14, background: "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, boxShadow: "0 6px 20px rgba(78,206,154,0.28)" }}>
             <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
             Download Receipt (PDF)
           </button>
@@ -1492,7 +1492,7 @@ export default function PayPage() {
             )}
             <button
               onClick={handlePay}
-              className="serapay-action-primary"
+              className="serapay-action-primary serapay-shine-button"
               disabled={!selectedCoin || rateLoading || (!req?.amount && !payAmount) || !!amountError || !selectedCoinSupported}
               style={{
                 width: "100%", height: 54, borderRadius: 14, border: "none",

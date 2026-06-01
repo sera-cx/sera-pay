@@ -9,7 +9,7 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-gradient-to-r from-[#00A855] to-[#007A30] text-white shadow-none hover:shadow-[0_12px_28px_rgba(0,122,48,0.24)] hover:brightness-105",
+        default: "serapay-green-button bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white shadow-none",
         destructive:
           "bg-destructive text-white shadow-none hover:bg-destructive/90 hover:shadow-[0_12px_26px_rgba(255,59,48,0.22)] focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
         outline:

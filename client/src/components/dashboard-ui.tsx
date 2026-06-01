@@ -8,7 +8,7 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-gradient-to-r from-[#00A855] to-[#007A30] text-white shadow-none hover:shadow-[0_12px_28px_rgba(0,122,48,0.24)] hover:brightness-105",
+        default: "serapay-green-button bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white shadow-none",
         destructive: "bg-destructive text-destructive-foreground shadow-none hover:bg-destructive/90 hover:shadow-[0_12px_26px_rgba(255,59,48,0.22)]",
         outline: "border border-border bg-white shadow-none hover:border-[#00C853] hover:bg-[#F9FFFC] hover:text-[#00A87A] hover:shadow-[0_10px_24px_rgba(10,31,26,0.08)]",
         secondary: "bg-muted text-foreground shadow-none hover:bg-muted/80 hover:shadow-[0_10px_24px_rgba(10,31,26,0.08)]",
@@ -57,7 +57,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
       <input
         type={type}
         className={cn(
-          "flex h-10 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/10 focus-visible:border-foreground/20 disabled:cursor-not-allowed disabled:opacity-50 transition-all",
+          "flex h-10 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00C853]/20 focus-visible:border-[#00C853] disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 ease-in-out",
           className
         )}
         ref={ref}
@@ -69,7 +69,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
 Input.displayName = "Input";
 
 const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(({ className, ...props }, ref) => (
-  <div ref={ref} className={cn("rounded-2xl border border-border bg-card text-card-foreground", className)} {...props} />
+  <div ref={ref} className={cn("rounded-2xl border border-border bg-card text-card-foreground transition-all duration-200 ease-in-out hover:border-[#00C853]/60 hover:shadow-sm", className)} {...props} />
 ));
 Card.displayName = "Card";
 

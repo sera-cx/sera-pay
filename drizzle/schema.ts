@@ -40,6 +40,7 @@ export const merchants = pgTable(
     id: varchar("id", { length: 36 }).primaryKey(),
     walletAddress: varchar("walletAddress", { length: 42 }).notNull().unique(),
     name: varchar("name", { length: 120 }).notNull(),
+    description: varchar("description", { length: 500 }),
     apiKey: varchar("apiKey", { length: 80 }).notNull().unique(),
     receiveCoin: varchar("receiveCoin", { length: 20 }).default("USDC"),
     logoData: text("logoData"),

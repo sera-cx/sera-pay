@@ -20,6 +20,7 @@ import {
   getTransactionByHash,
   updateTransaction,
   getMerchantTransactions,
+  getPendingTransactions,
   createWebhookLog,
   getMerchantWebhookLogs,
   getTransactionsByFromAddress,
@@ -52,6 +53,17 @@ function getSeraApiBaseUrlForChain(chainId?: number | null): string {
     ? ENV.seraApiTestnetBaseUrl || DEFAULT_SERA_API_TESTNET_BASE_URL
     : ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL;
   return normalizeSeraBaseUrl(baseUrl);
+}
+
+function transactionToJson(tx: Transaction) {
+  let meta: any = null;
+  if (typeof tx.notes === "string" && tx.notes.trim().startsWith("{")) {
+    try { meta = JSON.parse(tx.notes); } catch {}
+  }
+  return {
+    ...tx,
+    paymentUrl: typeof meta?.paymentUrl === "string" ? meta.paymentUrl : null,
+  };
 }
 
 paymentRouter.get("/storage/objects/*", async (req, res) => {
@@ -330,6 +342,7 @@ paymentRouter.get("/merchant/public/:address?", async (req, res) => {
     res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=120");
     res.json({
       name: merchant.name,
+      description: (merchant as any).description,
       logoData: merchant.logoData,
       receiveCoin: merchant.receiveCoin,
       storeAddress: merchant.storeAddress,
@@ -344,11 +357,15 @@ paymentRouter.get("/merchant/public/:address?", async (req, res) => {
 paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, res) => {
   try {
     const merchant = req.merchant;
-    const { name, receiveCoin, logoData, webhookUrl, webhookSecret, storeAddress, qrFgColor, qrBgColor, qrStyle } = req.body;
+    const { name, description, receiveCoin, logoData, webhookUrl, webhookSecret, storeAddress, qrFgColor, qrBgColor, qrStyle } = req.body;
     const updates: Record<string, any> = {};
     if (name !== undefined) {
       if (typeof name !== "string" || name.trim().length < 1 || name.length > 120) { res.status(400).json({ error: "Invalid name" }); return; }
       updates.name = name.trim();
+    }
+    if (description !== undefined) {
+      if (description !== null && typeof description !== "string") { res.status(400).json({ error: "Invalid description" }); return; }
+      updates.description = description?.trim()?.slice(0, 500) || null;
     }
     if (receiveCoin !== undefined) {
       if (!VALID_COINS.has(receiveCoin)) { res.status(400).json({ error: "Invalid receiveCoin" }); return; }
@@ -392,24 +409,28 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
 /** GET /api/merchant/me — get merchant profile */
 paymentRouter.get("/merchant/me", requireApiKey as any, async (req: any, res) => {
   const m = req.merchant;
-  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, createdAt: m.createdAt, updatedAt: m.updatedAt });
+  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, description: (m as any).description, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, createdAt: m.createdAt, updatedAt: m.updatedAt });
 });
 
 /** GET /api/merchant/profile — alias for /merchant/me (used by dashboard) */
 paymentRouter.get("/merchant/profile", requireApiKey as any, async (req: any, res) => {
   const m = req.merchant;
-  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, createdAt: m.createdAt, updatedAt: m.updatedAt });
+  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, description: (m as any).description, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, createdAt: m.createdAt, updatedAt: m.updatedAt });
 });
 
 /** PUT /api/merchant/profile — update profile (used by dashboard Settings page) */
 paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, res) => {
   try {
     const merchant = req.merchant;
-    const { name, receiveCoin, logoData, webhookUrl, storeAddress, qrFgColor, qrBgColor, qrStyle } = req.body;
+    const { name, description, receiveCoin, logoData, webhookUrl, storeAddress, qrFgColor, qrBgColor, qrStyle } = req.body;
     const updates: Record<string, any> = {};
     if (name !== undefined) {
       if (typeof name !== "string" || name.trim().length < 1 || name.length > 120) { res.status(400).json({ error: "Invalid name" }); return; }
       updates.name = name.trim();
+    }
+    if (description !== undefined) {
+      if (description !== null && typeof description !== "string") { res.status(400).json({ error: "Invalid description" }); return; }
+      updates.description = description?.trim()?.slice(0, 500) || null;
     }
     if (receiveCoin !== undefined) {
       if (receiveCoin !== null && (typeof receiveCoin !== "string" || !VALID_COINS.has(receiveCoin))) {
@@ -557,9 +578,13 @@ paymentRouter.get("/merchant/webhook/logs", requireApiKey as any, async (req: an
 /** GET /api/merchant/stats — aggregate stats for dashboard */
 paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res) => {
   try {
+    const requestedChainId = Number(req.query.chainId ?? req.query.chain_id);
     let txs = await getMerchantTransactions(req.merchant.id, 1000);
     const canceled = await cancelStaleMerchantTransactions(req.merchant.id, txs);
     if (canceled > 0) txs = await getMerchantTransactions(req.merchant.id, 1000);
+    if (Number.isInteger(requestedChainId) && requestedChainId > 0) {
+      txs = txs.filter((tx) => Number(tx.chainId ?? 11155111) === requestedChainId);
+    }
     const totalCount = txs.length;
     const confirmedCount = txs.filter(t => t.status === "confirmed").length;
     const pendingCount = txs.filter(t => t.status === "pending" || t.status === "confirming").length;
@@ -719,10 +744,14 @@ paymentRouter.get("/merchant/transactions", requireApiKey as any, async (req: an
   try {
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
     const offset = parseInt(req.query.offset as string) || 0;
+    const requestedChainId = Number(req.query.chainId ?? req.query.chain_id);
     let txs = await getMerchantTransactions(req.merchant.id, limit, offset);
     const canceled = await cancelStaleMerchantTransactions(req.merchant.id, txs);
     if (canceled > 0) txs = await getMerchantTransactions(req.merchant.id, limit, offset);
-    res.json({ transactions: txs, pagination: { limit, offset } });
+    if (Number.isInteger(requestedChainId) && requestedChainId > 0) {
+      txs = txs.filter((tx) => Number(tx.chainId ?? 11155111) === requestedChainId);
+    }
+    res.json({ transactions: txs.map(transactionToJson), pagination: { limit, offset } });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
 });
 
@@ -913,11 +942,31 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
   return canceled;
 }
 
+async function cancelAllStalePendingTransactions() {
+  try {
+    const pending = await getPendingTransactions();
+    const byMerchant = new Map<string, Transaction[]>();
+    for (const tx of pending) {
+      const list = byMerchant.get(tx.merchantId) ?? [];
+      list.push(tx);
+      byMerchant.set(tx.merchantId, list);
+    }
+    for (const [merchantId, txs] of byMerchant) {
+      await cancelStaleMerchantTransactions(merchantId, txs);
+    }
+  } catch (error) {
+    console.error("[payments] Failed to auto-cancel stale pending transactions", error);
+  }
+}
+
+setInterval(() => { void cancelAllStalePendingTransactions(); }, 60_000);
+
 /** POST /api/payment/create — create a pending payment request */
 paymentRouter.post("/payment/create", async (req, res) => {
   try {
     const { merchantAddress, coin, amount, chainId } = req.body;
     const orderId = typeof req.body.orderId === "string" ? req.body.orderId : null;
+    const paymentUrl = typeof req.body.paymentUrl === "string" && req.body.paymentUrl.length <= 4096 ? req.body.paymentUrl : null;
     if (!merchantAddress || !/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     if (!coin || !VALID_COINS.has(coin)) { res.status(400).json({ error: "Invalid coin" }); return; }
     const parsedAmount = parseFloat(amount);
@@ -951,7 +1000,7 @@ paymentRouter.post("/payment/create", async (req, res) => {
       chainId: resolvedChainId,
       status: "pending",
       verified: 0,
-      notes: orderId ? JSON.stringify({ orderId, source: "public_menu" }) : null,
+      notes: orderId || paymentUrl ? JSON.stringify({ ...(orderId ? { orderId, source: "public_menu" } : {}), ...(paymentUrl ? { paymentUrl } : {}) }) : null,
     });
     if (orderId) {
       await updateMenuOrderPayment(orderId, merchant.id, { paymentId: id, transactionId: id, status: "payment_pending" }).catch(() => undefined);
@@ -1257,7 +1306,22 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
     const canceled = await cancelStaleMerchantTransactions(tx.merchantId, [tx]);
     if (canceled > 0) tx = await getTransactionById(req.params.txId);
     if (!tx) { res.status(404).json({ error: "Not found" }); return; }
-    res.json({ txId: tx.id, status: tx.status, verified: tx.verified === 1, txHash: tx.txHash, coin: tx.coin, amount: tx.amount, toAddress: tx.toAddress, fromAddress: tx.fromAddress, createdAt: tx.createdAt, chainId: tx.chainId ?? 11155111 });
+    const merchant = await getMerchantById(tx.merchantId);
+    res.json({
+      txId: tx.id,
+      status: tx.status,
+      verified: tx.verified === 1,
+      txHash: tx.txHash,
+      coin: tx.coin,
+      amount: tx.amount,
+      toAddress: tx.toAddress,
+      fromAddress: tx.fromAddress,
+      createdAt: tx.createdAt,
+      chainId: tx.chainId ?? 11155111,
+      merchantName: merchant?.name || null,
+      merchantLogo: merchant?.logoData || null,
+      merchantDescription: (merchant as any)?.description || null,
+    });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
 });
 

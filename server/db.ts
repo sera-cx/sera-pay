@@ -103,6 +103,7 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "id" varchar(36) PRIMARY KEY,
       "walletAddress" varchar(42) NOT NULL UNIQUE,
       "name" varchar(120) NOT NULL,
+      "description" varchar(500),
       "apiKey" varchar(80) NOT NULL UNIQUE,
       "receiveCoin" varchar(20) DEFAULT 'USDC',
       "logoData" text,
@@ -115,6 +116,7 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "createdAt" timestamptz NOT NULL DEFAULT now(),
       "updatedAt" timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE "merchants" ADD COLUMN IF NOT EXISTS "description" varchar(500);
     CREATE INDEX IF NOT EXISTS "idx_merchants_wallet" ON "merchants" ("walletAddress");
 
     CREATE TABLE IF NOT EXISTS "transactions" (
@@ -201,6 +203,36 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "createdAt" timestamptz NOT NULL DEFAULT now(),
       "updatedAt" timestamptz NOT NULL DEFAULT now()
     );
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'menu_orders' AND column_name = 'orders'
+      ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'menu_orders' AND column_name = 'items'
+      ) THEN
+        ALTER TABLE "menu_orders" RENAME COLUMN "orders" TO "items";
+      END IF;
+    END $$;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "paymentId" varchar(36);
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "paymentIntentId" varchar(36);
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "transactionId" varchar(36);
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "status" varchar(24) NOT NULL DEFAULT 'created';
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "pax" integer NOT NULL DEFAULT 1;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "businessCategory" varchar(80);
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "category_1" text;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "category_2" text;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "category_3" text;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "category_4" text;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "category_5" text;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "category_6" text;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "items" text NOT NULL DEFAULT '[]';
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "amount" numeric(20, 6) NOT NULL DEFAULT 0;
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "coin" varchar(20) NOT NULL DEFAULT 'USDC';
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "customerName" varchar(120);
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "orderedAt" timestamptz NOT NULL DEFAULT now();
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "createdAt" timestamptz NOT NULL DEFAULT now();
+    ALTER TABLE "menu_orders" ADD COLUMN IF NOT EXISTS "updatedAt" timestamptz NOT NULL DEFAULT now();
     CREATE INDEX IF NOT EXISTS "idx_menu_orders_merchant_created" ON "menu_orders" ("merchantId", "createdAt");
     CREATE INDEX IF NOT EXISTS "idx_menu_orders_menu_created" ON "menu_orders" ("menuId", "createdAt");
     CREATE INDEX IF NOT EXISTS "idx_menu_orders_payment" ON "menu_orders" ("paymentId");
@@ -755,9 +787,24 @@ export async function updatePaymentIntent(id: string, data: Partial<InsertPaymen
   await db.update(paymentIntents).set(data).where(eq(paymentIntents.id, id));
 }
 
+function toPgMenuOrderColumns(data: InsertMenuOrder): Record<string, unknown> {
+  const raw = data as Record<string, unknown>;
+  const mapped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (key === "category1") mapped.category_1 = value;
+    else if (key === "category2") mapped.category_2 = value;
+    else if (key === "category3") mapped.category_3 = value;
+    else if (key === "category4") mapped.category_4 = value;
+    else if (key === "category5") mapped.category_5 = value;
+    else if (key === "category6") mapped.category_6 = value;
+    else mapped[key] = value;
+  }
+  return mapped;
+}
+
 export async function createMenuOrder(data: InsertMenuOrder): Promise<void> {
   const pgPool = await getPostgresPool();
-  if (pgPool) { await pgInsert(pgPool, "menu_orders", data); return; }
+  if (pgPool) { await pgInsert(pgPool, "menu_orders", toPgMenuOrderColumns(data)); return; }
   const db = await getDb();
   if (!db) { memory.menuOrders.set(data.id, withTimestamps(data) as MenuOrder); return; }
   await db.insert(menuOrders).values(data);

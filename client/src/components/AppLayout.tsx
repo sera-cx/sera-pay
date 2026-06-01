@@ -53,7 +53,7 @@ function WalletDropdown({ address, onLogout }: { address: string; onLogout: () =
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border bg-muted hover:bg-accent transition-colors text-xs font-mono text-foreground"
+        className="flex h-9 items-center gap-1.5 rounded-full border border-border bg-muted px-3 text-xs font-mono text-foreground shadow-[0_1px_0_rgba(255,255,255,0.8)_inset] transition-colors hover:border-[#00D1A0]/35 hover:bg-white"
       >
         <span className="w-1.5 h-1.5 rounded-full bg-[#00D1A0] shrink-0" />
         <span>{shortenAddress(address)}</span>
@@ -67,16 +67,16 @@ function WalletDropdown({ address, onLogout }: { address: string; onLogout: () =
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 6, scale: 0.97 }}
             transition={{ duration: 0.12 }}
-            className="absolute right-0 top-10 z-50 w-64 bg-popover border border-border rounded-2xl shadow-xl overflow-hidden"
+            className="absolute right-0 top-11 z-50 w-[min(270px,calc(100vw-24px))] overflow-hidden rounded-[18px] border border-border bg-white shadow-[0_18px_48px_rgba(10,31,26,0.16)]"
           >
             {/* Connected wallet section */}
-            <div className="px-4 pt-4 pb-3 border-b border-border">
-              <p className="text-[10px] font-semibold text-muted-foreground tracking-widest uppercase mb-1.5">Connected Wallet</p>
+            <div className="border-b border-border px-4 py-3.5">
+              <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.06em] text-muted-foreground">Connected Wallet</p>
               <div className="flex items-start gap-2">
-                <p className="text-xs font-mono text-foreground break-all flex-1 leading-relaxed">{address}</p>
+                <p className="flex-1 break-all font-mono text-xs leading-relaxed text-[#14342B]">{address}</p>
                 <button
                   onClick={copyAddress}
-                  className="shrink-0 mt-0.5 text-muted-foreground hover:text-foreground transition-colors"
+                  className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-muted text-muted-foreground transition-colors hover:text-foreground"
                   title="Copy address"
                 >
                   {copied ? <Check className="w-3.5 h-3.5 text-[#00D1A0]" /> : <Copy className="w-3.5 h-3.5" />}
@@ -85,18 +85,18 @@ function WalletDropdown({ address, onLogout }: { address: string; onLogout: () =
             </div>
 
             {/* Actions */}
-            <div className="p-2">
+            <div>
               <Link
                 href="/"
                 onClick={() => setOpen(false)}
-                className="flex items-center justify-center gap-2.5 px-3 py-2.5 rounded-xl text-sm text-foreground hover:bg-accent transition-colors w-full"
+                className="flex min-h-[52px] w-full items-center justify-center gap-2.5 border-b border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-[#F4FFFA]"
               >
                 <QrCode className="w-4 h-4 text-muted-foreground" />
                 Generate Payment QR
               </Link>
               <button
                 onClick={() => { setOpen(false); onLogout(); }}
-                className="flex items-center justify-center gap-2.5 px-3 py-2.5 rounded-xl text-sm text-red-600 hover:bg-red-50 transition-colors w-full"
+                className="flex min-h-[52px] w-full items-center justify-center gap-2.5 px-4 text-sm font-bold text-red-600 transition-colors hover:bg-red-50"
               >
                 <LogOut className="w-4 h-4" />
                 Disconnect
@@ -127,7 +127,12 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
   if (isLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="h-8 w-8 rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0] animate-spin" />
+        <div className="relative flex h-16 w-16 items-center justify-center">
+          <div className="absolute inset-0 rounded-full border-[3px] border-[#00D1A0]/15 border-t-[#00D1A0] animate-spin" />
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white shadow-[0_10px_30px_rgba(0,209,160,0.16)]">
+            <SeraLogo size={36} />
+          </div>
+        </div>
       </div>
     );
   }
@@ -143,7 +148,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
           {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
           <button
             onClick={() => void login()}
-            className="mt-5 w-full rounded-xl bg-gradient-to-r from-[#00A855] to-[#007A30] px-4 py-2.5 text-sm font-semibold text-white shadow-none transition-all duration-200 hover:shadow-[0_12px_28px_rgba(0,122,48,0.24)]"
+            className="serapay-green-button mt-5 w-full rounded-xl bg-gradient-to-r from-[#00D1A0] to-[#00B88A] px-4 py-2.5 text-sm font-semibold text-white shadow-none transition-all duration-200"
           >
             Connect wallet
           </button>
@@ -159,7 +164,14 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
           <div className="flex justify-center">
             <SeraLogo size={34} />
           </div>
-          {error ? null : <div className="mx-auto mt-6 h-8 w-8 rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0] animate-spin" />}
+          {error ? null : (
+            <div className="relative mx-auto mt-6 flex h-14 w-14 items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-[3px] border-[#00D1A0]/15 border-t-[#00D1A0] animate-spin" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white shadow-[0_10px_30px_rgba(0,209,160,0.16)]">
+                <SeraLogo size={30} />
+              </div>
+            </div>
+          )}
           <h1 className="mt-5 text-lg font-semibold text-foreground">{error ? "Dashboard setup needs attention" : "Opening dashboard"}</h1>
           <p className="mt-2 text-sm text-muted-foreground leading-relaxed [overflow-wrap:anywhere]">
             {error || "We will continue automatically when your workspace is ready."}
@@ -168,7 +180,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
           {error ? (
             <button
               onClick={retry}
-              className="mt-5 w-full rounded-xl bg-gradient-to-r from-[#00A855] to-[#007A30] px-4 py-2.5 text-sm font-semibold text-white transition-colors"
+              className="serapay-green-button mt-5 w-full rounded-xl bg-gradient-to-r from-[#00D1A0] to-[#00B88A] px-4 py-2.5 text-sm font-semibold text-white transition-colors"
             >
               Retry account setup
             </button>
@@ -197,7 +209,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
   const mainPl = collapsed ? "md:pl-[60px]" : "md:pl-60";
 
   return (
-    <div className="h-screen overflow-hidden bg-background flex w-full">
+    <div className="h-dvh overflow-hidden bg-background flex w-full">
       {/* Desktop sidebar */}
       <aside className={cn("hidden md:flex flex-col border-r border-border bg-card fixed inset-y-0 z-10 transition-all duration-200", sidebarW)}>
         {/* Logo / header — clicking navigates to QR generator */}
@@ -229,7 +241,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
             className={cn(
               "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-semibold transition-colors overflow-hidden mb-1",
               collapsed ? "justify-center px-2" : "",
-              "bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white shadow-sm hover:opacity-90"
+              "serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white shadow-sm"
             )}
             title={collapsed ? "New Payment" : undefined}
           >
@@ -342,7 +354,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
                 <Link
                   href="/"
                   onClick={() => setIsMobileMenuOpen(false)}
-                  className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-semibold bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white mb-1"
+                  className="serapay-green-button flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-semibold bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white mb-1"
                 >
                   <QrCode className="w-4 h-4" />
                   New Payment

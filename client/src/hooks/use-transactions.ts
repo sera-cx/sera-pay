@@ -18,6 +18,7 @@ export interface Transaction {
   status: "pending" | "confirming" | "confirmed" | "failed" | "canceled" | "unverified";
   verified: boolean | number;
   chainId?: number;
+  paymentUrl?: string | null;
   merchantId?: string;
   webhookSent?: boolean;
   webhookSentAt?: string | null;
@@ -30,11 +31,13 @@ interface TransactionsResponse {
   pagination: { limit: number; offset: number };
 }
 
-export function useTransactions(limit = 50, offset = 0) {
+export function useTransactions(limit = 50, offset = 0, chainId?: number) {
   const { apiKey, isAuthenticated } = useAuth();
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (chainId) params.set("chainId", String(chainId));
   return useQuery<TransactionsResponse>({
-    queryKey: ["/merchant/transactions", limit, offset, apiKey || ""],
-    queryFn: () => fetchApi(`/merchant/transactions?limit=${limit}&offset=${offset}`),
+    queryKey: ["/merchant/transactions", limit, offset, chainId || "all", apiKey || ""],
+    queryFn: () => fetchApi(`/merchant/transactions?${params.toString()}`),
     enabled: isAuthenticated && !!apiKey,
     retry: false,
     refetchInterval: isAuthenticated && apiKey ? 15000 : false, // Background polling as fallback to SSE

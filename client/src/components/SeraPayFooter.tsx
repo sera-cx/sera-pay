@@ -9,7 +9,7 @@ type FooterSection = {
 export function SeraPayFooter({ sections = [], compact = false }: { sections?: FooterSection[]; compact?: boolean }) {
   return (
     <footer className="border-t border-[#4ECE9A]/20 bg-[#EAF7F0] px-6 py-8 text-[#3D5A4F]">
-      <div className="mx-auto w-full max-w-[900px]">
+      <div className="mx-auto w-full max-w-[1240px]">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <Link href="/" className="inline-flex w-fit items-center no-underline">
             <SeraLogo size={compact ? 24 : 30} />

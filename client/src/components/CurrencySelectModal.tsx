@@ -78,7 +78,7 @@ export function CurrencySelectModal({
         {onConfirm ? (
           <div className="grid grid-cols-2 gap-3 border-t border-gray-100 bg-white px-5 py-4">
             <Button variant="outline" onClick={onClose} className="h-11 bg-white">Cancel</Button>
-            <Button onClick={onConfirm} disabled={confirming} className="h-11 gap-2 bg-[#00C853] text-white hover:bg-[#00B847]">
+            <Button onClick={onConfirm} disabled={confirming} className="serapay-green-button h-11 gap-2 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white">
               {confirming ? <span className="h-4 w-4 rounded-full border-2 border-white border-t-transparent animate-spin" /> : <Check className="h-4 w-4" />}
               <span className="truncate">{confirmLabel || `Use ${selectedSymbol}`}</span>
             </Button>

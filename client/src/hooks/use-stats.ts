@@ -11,11 +11,12 @@ export interface MerchantStats {
   dailyVolume: { date: string; volume: string }[];
 }
 
-export function useMerchantStats() {
+export function useMerchantStats(chainId?: number) {
   const { apiKey, isAuthenticated } = useAuth();
+  const suffix = chainId ? `?chainId=${chainId}` : "";
   return useQuery<MerchantStats>({
-    queryKey: ["/merchant/stats", apiKey || ""],
-    queryFn: () => fetchApi("/merchant/stats"),
+    queryKey: ["/merchant/stats", chainId || "all", apiKey || ""],
+    queryFn: () => fetchApi(`/merchant/stats${suffix}`),
     enabled: isAuthenticated && !!apiKey,
     retry: false,
     refetchInterval: isAuthenticated && apiKey ? 15000 : false,

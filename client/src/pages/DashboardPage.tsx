@@ -9,15 +9,22 @@ import { ArrowDownRight, Activity, Clock, CheckCircle2, TrendingUp, QrCode, Aler
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { format, parseISO, subDays, startOfDay } from "date-fns";
 
+function openPendingPayment(tx: any) {
+  if ((tx.status === "pending" || tx.status === "confirming") && tx.paymentUrl) {
+    window.location.href = tx.paymentUrl;
+  }
+}
+
 type ChartRange = "7d" | "30d" | "90d";
 
 export function Dashboard() {
-  const { data: txData, isLoading: txLoading } = useTransactions(10, 0);
-  const { data: stats, isLoading: statsLoading } = useMerchantStats();
+  const { activeMode } = useActiveNetworkMode();
+  const activeChainId = activeMode === "live" ? 1 : 11155111;
+  const { data: txData, isLoading: txLoading } = useTransactions(10, 0, activeChainId);
+  const { data: stats, isLoading: statsLoading } = useMerchantStats(activeChainId);
   const [chartRange, setChartRange] = useState<ChartRange>("7d");
   const [showNetworkModal, setShowNetworkModal] = useState(false);
 
-  const { activeMode } = useActiveNetworkMode();
   const isTestnet = activeMode === "test";
 
   const isLoading = txLoading || statsLoading;
@@ -204,7 +211,11 @@ export function Dashboard() {
                     const isPending = tx.status === "pending" || tx.status === "confirming";
                     const fromAddress = tx.fromAddress ?? tx.from ?? "";
                     return (
-                      <div key={tx.id} className="flex items-center justify-between p-3 rounded-lg border border-border hover:bg-accent/50 transition-colors">
+                      <div
+                        key={tx.id}
+                        onClick={() => openPendingPayment(tx)}
+                        className={`flex items-center justify-between p-3 rounded-lg border border-border transition-all duration-200 ease-in-out hover:border-[#00C853]/60 hover:bg-accent/50 hover:shadow-sm ${isPending && tx.paymentUrl ? "cursor-pointer" : ""}`}
+                      >
                         <div className="flex items-center gap-2.5 min-w-0">
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isConfirmed ? 'bg-[#E6FAF5] text-[#00D1A0]' : isPending ? 'bg-amber-50 text-amber-600' : tx.status === 'canceled' ? 'bg-gray-100 text-gray-500' : 'bg-red-50 text-red-600'}`}>
                             {isConfirmed ? <ArrowDownRight className="w-4 h-4" /> : <Clock className="w-4 h-4" />}

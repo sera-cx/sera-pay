@@ -23,7 +23,7 @@ import { STABLECOINS } from "@/lib/stablecoins";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { CurrencySelectModal } from "@/components/CurrencySelectModal";
 import { QRStyled, buildQrOptions, type QrStyle } from "@/components/QRStyled";
-import { prepareImageForUpload } from "@/lib/imageUpload";
+import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 
 // Build a name→category lookup from all templates for backfill
 const TEMPLATE_CATEGORY_MAP: Record<string, string> = {};
@@ -67,6 +67,101 @@ interface MenuItem {
 interface CartEntry {
   item: MenuItem;
   qty: number;
+}
+
+function DeleteConfirmDialog({
+  title,
+  description,
+  confirming,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  description: string;
+  confirming?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <>
+      <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 z-[71] flex items-center justify-center p-4">
+        <div className="w-full max-w-sm rounded-2xl border border-gray-100 bg-white p-5 shadow-[0_24px_70px_rgba(10,31,26,0.18)]">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-500">
+              <Trash2 className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-base font-semibold text-gray-950">{title}</h3>
+              <p className="mt-1 text-sm leading-relaxed text-gray-500">{description}</p>
+            </div>
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <Button type="button" variant="outline" onClick={onCancel} disabled={confirming} className="bg-white">
+              Cancel
+            </Button>
+            <Button type="button" variant="destructive" onClick={onConfirm} disabled={confirming} className="bg-red-500 text-white hover:bg-red-600">
+              {confirming ? "Deleting..." : "Delete"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function RenameMenuDialog({
+  name,
+  saving,
+  onNameChange,
+  onCancel,
+  onConfirm,
+}: {
+  name: string;
+  saving?: boolean;
+  onNameChange: (name: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <>
+      <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 z-[71] flex items-center justify-center p-4">
+        <form
+          onSubmit={(event) => { event.preventDefault(); onConfirm(); }}
+          className="w-full max-w-sm rounded-2xl border border-gray-100 bg-white p-5 shadow-[0_24px_70px_rgba(10,31,26,0.18)]"
+        >
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#E6FAF5] text-[#00A87A]">
+              <Edit2 className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-base font-semibold text-gray-950">Rename menu</h3>
+              <p className="mt-1 text-sm leading-relaxed text-gray-500">Update the display name shown in your menu selector.</p>
+            </div>
+          </div>
+          <div className="mt-5">
+            <label className="mb-2 block text-xs font-bold uppercase tracking-[0.08em] text-gray-400">Menu name</label>
+            <Input
+              autoFocus
+              value={name}
+              onChange={(event) => onNameChange(event.target.value)}
+              maxLength={80}
+              className="h-12 rounded-2xl border-gray-200 bg-white text-base font-semibold focus-visible:border-[#00A87A] focus-visible:ring-[#00A87A]/20"
+            />
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <Button type="button" variant="outline" onClick={onCancel} disabled={saving} className="bg-white">
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saving || !name.trim()} className="serapay-green-button bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white">
+              {saving ? "Saving..." : "Save"}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </>
+  );
 }
 
 const CART_STORAGE_KEY = "serapay_pos_cart";
@@ -127,6 +222,134 @@ function isItemSoldOutToday(item: { soldOutUntil?: string | null }) {
   return Number.isFinite(until) && until > Date.now();
 }
 
+type CropSource = {
+  dataUrl: string;
+  width: number;
+  height: number;
+  fileName: string;
+};
+
+function validateItemForm(data: { name: string; price: string; coin: string; category?: string }) {
+  if (!data.name.trim()) return "Item name is required";
+  if (!data.category?.trim()) return "Category is required";
+  const price = Number(data.price);
+  if (!data.price.trim() || !Number.isFinite(price) || price <= 0) return "Price must be greater than 0";
+  if (!data.coin.trim()) return "Coin is required";
+  return "";
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function PhotoCropModal({
+  source,
+  uploading,
+  onCancel,
+  onConfirm,
+}: {
+  source: CropSource;
+  uploading: boolean;
+  onCancel: () => void;
+  onConfirm: (prepared: { dataUrl: string }) => void;
+}) {
+  const frameW = 320;
+  const frameH = 240;
+  const baseScale = Math.max(frameW / source.width, frameH / source.height);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
+  const displayW = source.width * baseScale * zoom;
+  const displayH = source.height * baseScale * zoom;
+  const maxOffsetX = Math.max(0, (displayW - frameW) / 2);
+  const maxOffsetY = Math.max(0, (displayH - frameH) / 2);
+  const safeOffset = { x: clamp(offset.x, -maxOffsetX, maxOffsetX), y: clamp(offset.y, -maxOffsetY, maxOffsetY) };
+
+  useEffect(() => {
+    setOffset((current) => ({
+      x: clamp(current.x, -maxOffsetX, maxOffsetX),
+      y: clamp(current.y, -maxOffsetY, maxOffsetY),
+    }));
+  }, [maxOffsetX, maxOffsetY]);
+
+  const handleConfirm = async () => {
+    const scale = baseScale * zoom;
+    const drawnX = (frameW - displayW) / 2 + safeOffset.x;
+    const drawnY = (frameH - displayH) / 2 + safeOffset.y;
+    const prepared = await renderCroppedImageForUpload({
+      source: source.dataUrl,
+      crop: {
+        x: clamp(-drawnX / scale, 0, source.width),
+        y: clamp(-drawnY / scale, 0, source.height),
+        width: Math.min(frameW / scale, source.width),
+        height: Math.min(frameH / scale, source.height),
+      },
+      outputWidth: 1600,
+      outputHeight: 1200,
+      quality: 0.88,
+    });
+    onConfirm({ dataUrl: prepared.dataUrl });
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[60] bg-black/45 backdrop-blur-sm" />
+      <div className="fixed inset-0 z-[61] flex items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-base font-semibold text-gray-900">Crop Photo</h3>
+              <p className="mt-1 text-sm text-gray-500">Drag to reposition, then adjust the scale.</p>
+            </div>
+            <button onClick={onCancel} className="flex h-10 w-10 items-center justify-center rounded-full text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700" aria-label="Cancel crop">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div
+            className="relative mx-auto aspect-[4/3] w-full max-w-[320px] touch-none overflow-hidden rounded-2xl border-2 border-[#00D1A0] bg-[#E6FAF5] shadow-inner"
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, startX: safeOffset.x, startY: safeOffset.y };
+            }}
+            onPointerMove={(event) => {
+              const drag = dragRef.current;
+              if (!drag || drag.pointerId !== event.pointerId) return;
+              setOffset({
+                x: clamp(drag.startX + event.clientX - drag.x, -maxOffsetX, maxOffsetX),
+                y: clamp(drag.startY + event.clientY - drag.y, -maxOffsetY, maxOffsetY),
+              });
+            }}
+            onPointerUp={() => { dragRef.current = null; }}
+            onPointerCancel={() => { dragRef.current = null; }}
+          >
+            <img
+              src={source.dataUrl}
+              alt=""
+              draggable={false}
+              className="absolute left-1/2 top-1/2 max-w-none select-none"
+              style={{ width: displayW, height: displayH, transform: `translate(calc(-50% + ${safeOffset.x}px), calc(-50% + ${safeOffset.y}px))` }}
+            />
+            <div className="pointer-events-none absolute inset-0 rounded-2xl ring-1 ring-inset ring-white/70" />
+          </div>
+          <div className="mt-5">
+            <div className="mb-2 flex items-center justify-between text-xs font-semibold text-gray-500">
+              <span>Scale</span>
+              <span>{Math.round(zoom * 100)}%</span>
+            </div>
+            <input type="range" min="1" max="3" step="0.01" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} className="w-full accent-[#00C853]" />
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onCancel} disabled={uploading}>Cancel</Button>
+            <Button type="button" onClick={() => void handleConfirm()} disabled={uploading} className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white">
+              {uploading ? "Uploading..." : "Confirm"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── Item Edit Dialog ──────────────────────────────────────────────────────────
 
 function ItemEditDialog({
@@ -150,26 +373,68 @@ function ItemEditDialog({
   const [imageUrl, setImageUrl] = useState(item.imageUrl || "");
   const [soldOutToday, setSoldOutToday] = useState(isItemSoldOutToday(item));
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [cropSource, setCropSource] = useState<CropSource | null>(null);
+  const [error, setError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = "";
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      toast.error("Use a JPEG, PNG, or WebP image");
+      return;
+    }
+    if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+      toast.error("Image must be 10 MB or smaller");
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const image = await loadImage(dataUrl);
+      setCropSource({
+        dataUrl,
+        width: image.naturalWidth || image.width,
+        height: image.naturalHeight || image.height,
+        fileName: file.name,
+      });
+    } catch (err: any) {
+      toast.error(err.message || "Unable to open image");
+    }
+  };
+
+  const uploadPreparedImage = async (prepared: { dataUrl: string }) => {
     setUploadingImage(true);
     try {
-      const prepared = await prepareImageForUpload(file, { maxDimension: 1600, quality: 0.86 });
       const result = await fetchApi<{ imageUrl: string }>(`/menus/${menuId}/items/${item.id}/image`, {
         method: "POST",
         body: JSON.stringify({ imageData: prepared.dataUrl }),
       });
       setImageUrl(result.imageUrl);
+      setCropSource(null);
       toast.success("Photo uploaded");
     } catch (err: any) {
       toast.error(err.message || "Upload failed");
     } finally {
       setUploadingImage(false);
-      e.target.value = "";
     }
+  };
+
+  const handleSubmit = () => {
+    const validation = validateItemForm({ name, price, coin, category });
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    onSave({
+      name: name.trim(),
+      description: description.trim(),
+      price: price.trim(),
+      coin,
+      imageUrl: imageUrl || undefined,
+      category: category.trim(),
+      soldOutUntil: soldOutToday ? nextLocalMidnightIso() : null,
+    });
   };
 
   return (
@@ -188,7 +453,7 @@ function ItemEditDialog({
             <div className="flex items-center gap-3">
               <div
                 onClick={() => fileInputRef.current?.click()}
-                className="w-16 h-16 rounded-xl overflow-hidden border-2 border-dashed border-gray-200 flex items-center justify-center cursor-pointer hover:border-[#00C853] transition-colors shrink-0 relative"
+                className="w-16 h-16 rounded-xl overflow-hidden border-2 border-dashed border-[#00D1A0]/55 bg-[#F0FAF6] flex items-center justify-center cursor-pointer hover:border-[#00C853] transition-colors shrink-0 relative"
               >
                 {imageUrl ? (
                   <img src={imageUrl} alt={name} className="w-full h-full object-cover" />
@@ -210,7 +475,7 @@ function ItemEditDialog({
 
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Item Name</label>
-            <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Kopi O" />
+            <Input value={name} onChange={e => { setName(e.target.value); setError(""); }} placeholder="e.g. Kopi O" />
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Description (optional)</label>
@@ -218,16 +483,16 @@ function ItemEditDialog({
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Category</label>
-            <Input value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. Mains, Drinks, Services" maxLength={60} />
+            <Input value={category} onChange={e => { setCategory(e.target.value); setError(""); }} placeholder="e.g. Mains, Drinks, Services" maxLength={60} />
           </div>
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
-              <Input value={price} onChange={e => setPrice(e.target.value)} placeholder="0.00" type="number" min="0" step="0.01" />
+              <Input value={price} onChange={e => { setPrice(e.target.value); setError(""); }} placeholder="0.00" type="number" min="0.01" step="0.01" />
             </div>
             <div className="w-32">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
-              <Select value={coin} onValueChange={setCoin}>
+              <Select value={coin} onValueChange={(value) => { setCoin(value); setError(""); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
               </Select>
@@ -245,11 +510,12 @@ function ItemEditDialog({
               <span className="block text-xs text-gray-500">Resets automatically at 00:00.</span>
             </span>
           </label>
+          {error ? <p className="text-sm font-medium text-red-500">{error}</p> : null}
           <div className="flex gap-2 pt-1">
             <Button
-              className="flex-1 bg-[#00C853] hover:bg-[#00B847] text-white"
-              onClick={() => onSave({ name, description, price, coin, imageUrl: imageUrl || undefined, category, soldOutUntil: soldOutToday ? nextLocalMidnightIso() : null })}
-              disabled={loading || !name.trim() || !price}
+              className="serapay-green-button flex-1 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white"
+              onClick={handleSubmit}
+              disabled={loading}
             >
               {loading ? "Saving…" : "Save Item"}
             </Button>
@@ -257,6 +523,14 @@ function ItemEditDialog({
           </div>
         </div>
       </div>
+      {cropSource && (
+        <PhotoCropModal
+          source={cropSource}
+          uploading={uploadingImage}
+          onCancel={() => setCropSource(null)}
+          onConfirm={(prepared) => void uploadPreparedImage(prepared)}
+        />
+      )}
     </>
   );
 }
@@ -279,6 +553,16 @@ function AddItemDialog({
   const [price, setPrice] = useState("");
   const [coin, setCoin] = useState("USDC");
   const [category, setCategory] = useState("");
+  const [error, setError] = useState("");
+
+  const handleSubmit = () => {
+    const validation = validateItemForm({ name, price, coin, category });
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    onSave({ name: name.trim(), description: description.trim(), price: price.trim(), coin, category: category.trim() });
+  };
 
   return (
     <>
@@ -291,7 +575,7 @@ function AddItemDialog({
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Item Name</label>
-            <Input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Kopi O" autoFocus />
+            <Input value={name} onChange={e => { setName(e.target.value); setError(""); }} placeholder="e.g. Kopi O" autoFocus />
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Description (optional)</label>
@@ -299,26 +583,27 @@ function AddItemDialog({
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Category</label>
-            <Input value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. Drinks, Mains, Add-ons" maxLength={60} />
+            <Input value={category} onChange={e => { setCategory(e.target.value); setError(""); }} placeholder="e.g. Drinks, Mains, Add-ons" maxLength={60} />
           </div>
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
-              <Input value={price} onChange={e => setPrice(e.target.value)} placeholder="0.00" type="number" min="0" step="0.01" />
+              <Input value={price} onChange={e => { setPrice(e.target.value); setError(""); }} placeholder="0.00" type="number" min="0.01" step="0.01" />
             </div>
             <div className="w-32">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
-              <Select value={coin} onValueChange={setCoin}>
+              <Select value={coin} onValueChange={(value) => { setCoin(value); setError(""); }}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
               </Select>
             </div>
           </div>
+          {error ? <p className="text-sm font-medium text-red-500">{error}</p> : null}
           <div className="flex gap-2 pt-1">
             <Button
-              className="flex-1 bg-[#00C853] hover:bg-[#00B847] text-white"
-              onClick={() => onSave({ name, description, price, coin, category })}
-              disabled={loading || !name.trim() || !price}
+              className="serapay-green-button flex-1 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white"
+              onClick={handleSubmit}
+              disabled={loading}
             >
               {loading ? "Adding…" : "Add Item"}
             </Button>
@@ -375,7 +660,7 @@ function QRSaveModal({ url, menuName, merchantProfile, onClose }: { url: string;
           </div>
           <p className="mb-4 rounded-lg bg-gray-50 px-3 py-2 text-[11px] font-mono text-gray-500 break-all">{code}</p>
           <div className="flex gap-2">
-            <Button onClick={handleDownload} className="flex-1 gap-1.5 bg-[#00C853] hover:bg-[#00B847] text-white">
+            <Button onClick={handleDownload} className="serapay-green-button flex-1 gap-1.5 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white">
               <Download className="w-4 h-4" /> Save QR
             </Button>
             <Button variant="outline" onClick={onClose}>Close</Button>
@@ -662,7 +947,7 @@ function CartSidebar({
         <Button
           onClick={handleGenerateQR}
           disabled={cart.length === 0}
-          className="w-full gap-2 bg-[#00C853] hover:bg-[#00B847] text-white font-semibold h-11"
+          className="serapay-green-button w-full gap-2 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white font-semibold h-11"
         >
           <QrCode className="w-4 h-4" /> Generate Payment QR
         </Button>
@@ -674,7 +959,7 @@ function CartSidebar({
             <p className="mt-1 text-sm text-gray-500">This removes every item from the current cart.</p>
             <div className="mt-5 grid grid-cols-2 gap-2">
               <Button variant="outline" onClick={() => setConfirmClear(false)} className="bg-white">Cancel</Button>
-              <Button onClick={() => { onClear(); setConfirmClear(false); }} className="bg-red-500 text-white hover:bg-red-600">Clear</Button>
+              <Button onClick={() => { onClear(); setConfirmClear(false); }} variant="destructive" className="bg-red-500 text-white hover:bg-red-600">Clear</Button>
             </div>
           </div>
         </div>
@@ -703,8 +988,8 @@ function ItemTile({
   const soldOut = isItemSoldOutToday(item);
   return (
     <div
-      className={`relative rounded-2xl overflow-hidden border-2 transition-all group
-        ${cartQty > 0 ? "border-[#00C853] shadow-md" : "border-gray-100 hover:border-gray-200 shadow-sm"}
+      className={`relative rounded-2xl overflow-hidden border-2 transition-all duration-200 ease-in-out group
+        ${cartQty > 0 ? "border-[#00C853] shadow-sm" : "border-gray-100 shadow-sm hover:border-[#00C853]/70 hover:shadow-sm"}
         ${soldOut ? "cursor-not-allowed" : "cursor-pointer"}`}
       onClick={soldOut ? undefined : onAdd}
       aria-disabled={soldOut}
@@ -830,6 +1115,8 @@ function POSView({
   const [bulkCoinOpen, setBulkCoinOpen] = useState(false);
   const [bulkCoin, setBulkCoin] = useState<string>("USDC");
   const [bulkCoinSaving, setBulkCoinSaving] = useState(false);
+  const [deleteItemTarget, setDeleteItemTarget] = useState<MenuItem | null>(null);
+  const [deletingItem, setDeletingItem] = useState(false);
   const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
   const walletChainId = useChainId();
   const { data: seraConfig } = useSeraApiConfig();
@@ -894,6 +1181,11 @@ function POSView({
   }, [items]);
 
   const handleAddItem = async (data: { name: string; description: string; price: string; coin: string; category?: string }) => {
+    const validation = validateItemForm(data);
+    if (validation) {
+      toast.error(validation);
+      return;
+    }
     setSavingItem(true);
     try {
       const created = await fetchApi<MenuItem>(`/menus/${menu.id}/items`, {
@@ -911,6 +1203,11 @@ function POSView({
   };
 
   const handleUpdateItem = async (item: MenuItem, data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => {
+    const validation = validateItemForm(data);
+    if (validation) {
+      toast.error(validation);
+      return;
+    }
     setSavingItem(true);
     try {
       const updated = await fetchApi<MenuItem>(`/menus/${menu.id}/items/${item.id}`, {
@@ -928,14 +1225,23 @@ function POSView({
     }
   };
 
-  const handleDeleteItem = async (itemId: string) => {
-    if (!confirm("Remove this item?")) return;
+  const handleDeleteItem = async (item: MenuItem) => {
+    setDeleteItemTarget(item);
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!deleteItemTarget) return;
+    setDeletingItem(true);
     try {
-      await fetchApi(`/menus/${menu.id}/items/${itemId}`, { method: "DELETE" });
-      setItems(prev => prev.filter(i => i.id !== itemId));
+      await fetchApi(`/menus/${menu.id}/items/${deleteItemTarget.id}`, { method: "DELETE" });
+      setItems(prev => prev.filter(i => i.id !== deleteItemTarget.id));
+      onDropFromCart(deleteItemTarget.id);
+      setDeleteItemTarget(null);
       toast.success("Item removed");
     } catch (e: any) {
       toast.error(e.message || "Failed to delete item");
+    } finally {
+      setDeletingItem(false);
     }
   };
 
@@ -1057,7 +1363,7 @@ function POSView({
             <Button
               onClick={() => setAddingItem(true)}
               size="sm"
-              className="bg-[#00C853] hover:bg-[#00B847] text-white gap-1.5 shrink-0"
+              className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white gap-1.5 shrink-0"
             >
               <Plus className="w-3.5 h-3.5" /> Add Item
             </Button>
@@ -1124,7 +1430,7 @@ function POSView({
                   <UtensilsCrossed className="w-10 h-10 text-gray-200 mb-3" />
                   <p className="font-medium text-gray-500">No items yet</p>
                   <p className="text-sm text-gray-400 mt-1 mb-4">Add your first item to start taking orders</p>
-                  <Button onClick={() => setAddingItem(true)} className="bg-[#00C853] hover:bg-[#00B847] text-white gap-1.5">
+                  <Button onClick={() => setAddingItem(true)} className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white gap-1.5">
                     <Plus className="w-4 h-4" /> Add Item
                   </Button>
                 </>
@@ -1142,7 +1448,7 @@ function POSView({
                     onAdd={() => onAddToCart(item)}
                     onRemove={() => onRemoveFromCart(item.id)}
                     onEdit={() => setEditingItem(item)}
-                    onDelete={() => handleDeleteItem(item.id)}
+                    onDelete={() => handleDeleteItem(item)}
                   />
                 );
               })}
@@ -1164,7 +1470,7 @@ function POSView({
         <div className="fixed bottom-0 left-0 right-0 z-30 lg:hidden px-4 pb-4 pt-2 bg-gradient-to-t from-[#F5F7FA] to-transparent">
           <button
             onClick={() => setMobileCartOpen(true)}
-            className="mx-auto flex w-full max-w-lg items-center justify-between rounded-2xl bg-[#00C853] px-5 py-3.5 text-sm font-semibold text-white shadow-lg"
+            className="serapay-green-button mx-auto flex w-full max-w-lg items-center justify-between rounded-2xl bg-gradient-to-r from-[#00D1A0] to-[#00B88A] px-5 py-3.5 text-sm font-semibold text-white shadow-lg"
           >
             <span className="flex items-center gap-2"><ShoppingCart className="w-4 h-4" /> {mobileCartQty} item{mobileCartQty === 1 ? "" : "s"}</span>
             <span>{mobileCartTotal.toFixed(2)} {mobileCartCoin}</span>
@@ -1208,6 +1514,15 @@ function POSView({
         />
       )}
       {showQR && <QRSaveModal url={publicUrl} menuName={menu.name} merchantProfile={merchantProfile} onClose={() => setShowQR(false)} />}
+      {deleteItemTarget && (
+        <DeleteConfirmDialog
+          title="Delete menu item?"
+          description={`"${deleteItemTarget.name}" will be removed from this menu and any active cart.`}
+          confirming={deletingItem}
+          onCancel={() => setDeleteItemTarget(null)}
+          onConfirm={confirmDeleteItem}
+        />
+      )}
     </div>
   );
 }
@@ -1218,6 +1533,11 @@ export function MenuManager() {
   const [menus, setMenus] = useState<Menu[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+  const [deleteMenuTarget, setDeleteMenuTarget] = useState<Menu | null>(null);
+  const [deletingMenu, setDeletingMenu] = useState(false);
+  const [renameMenuTarget, setRenameMenuTarget] = useState<Menu | null>(null);
+  const [renameMenuName, setRenameMenuName] = useState("");
+  const [renamingMenu, setRenamingMenu] = useState(false);
   const [cart, setCart] = useState<CartEntry[]>([]);
   const { apiKey: dashboardApiKey, isAuthenticated } = useAuth();
   const { data: merchantProfile } = useMerchantProfile(dashboardApiKey || undefined);
@@ -1296,34 +1616,57 @@ export function MenuManager() {
     persistCart((prev: CartEntry[]) => prev.filter((e: CartEntry) => e.item.id !== itemId));
   }, [persistCart]);
 
-  const handleDeleteMenu = async (menuId: string, menuName: string) => {
-    if (!confirm(`Delete "${menuName}"? This will remove all items and cannot be undone.`)) return;
+  const handleDeleteMenu = async (menuId: string) => {
+    const target = menus.find(m => m.id === menuId);
+    if (target) setDeleteMenuTarget(target);
+  };
+
+  const confirmDeleteMenu = async () => {
+    if (!deleteMenuTarget) return;
+    setDeletingMenu(true);
     try {
-      await fetchApi(`/menus/${menuId}`, { method: "DELETE" });
-      const updated = menus.filter(m => m.id !== menuId);
+      await fetchApi(`/menus/${deleteMenuTarget.id}`, { method: "DELETE" });
+      const updated = menus.filter(m => m.id !== deleteMenuTarget.id);
       setMenus(updated);
-      if (activeMenuId === menuId) {
+      if (activeMenuId === deleteMenuTarget.id) {
         if (updated.length > 0) setActiveMenuId(updated[0].id);
         else navigate("/menu-manager/new");
       }
-      toast.success(`"${menuName}" deleted`);
+      toast.success(`"${deleteMenuTarget.name}" deleted`);
+      setDeleteMenuTarget(null);
     } catch (e: any) {
       toast.error(e.message || "Failed to delete menu");
+    } finally {
+      setDeletingMenu(false);
     }
   };
 
   const handleRenameMenu = async (menuId: string, menuName: string) => {
-    const nextName = window.prompt("Rename menu", menuName)?.trim();
-    if (!nextName || nextName === menuName) return;
+    const target = menus.find(m => m.id === menuId) || null;
+    setRenameMenuTarget(target || { id: menuId, name: menuName, description: null, slug: "", isActive: 1, createdAt: "" });
+    setRenameMenuName(menuName);
+  };
+
+  const confirmRenameMenu = async () => {
+    if (!renameMenuTarget) return;
+    const nextName = renameMenuName.trim();
+    if (!nextName || nextName === renameMenuTarget.name) {
+      setRenameMenuTarget(null);
+      return;
+    }
+    setRenamingMenu(true);
     try {
-      const updated = await fetchApi<Menu>(`/menus/${menuId}`, {
+      const updated = await fetchApi<Menu>(`/menus/${renameMenuTarget.id}`, {
         method: "PUT",
         body: JSON.stringify({ name: nextName }),
       });
-      setMenus(prev => prev.map(m => m.id === menuId ? { ...m, ...updated } : m));
+      setMenus(prev => prev.map(m => m.id === renameMenuTarget.id ? { ...m, ...updated } : m));
       toast.success(`Renamed to "${nextName}"`);
     } catch (e: any) {
       toast.error(e.message || "Failed to rename menu");
+    } finally {
+      setRenamingMenu(false);
+      setRenameMenuTarget(null);
     }
   };
 
@@ -1357,6 +1700,24 @@ export function MenuManager() {
           onDeleteMenu={handleDeleteMenu}
         />
       ) : null}
+      {deleteMenuTarget && (
+        <DeleteConfirmDialog
+          title="Delete menu?"
+          description={`"${deleteMenuTarget.name}" and all items inside it will be removed permanently.`}
+          confirming={deletingMenu}
+          onCancel={() => setDeleteMenuTarget(null)}
+          onConfirm={confirmDeleteMenu}
+        />
+      )}
+      {renameMenuTarget && (
+        <RenameMenuDialog
+          name={renameMenuName}
+          saving={renamingMenu}
+          onNameChange={setRenameMenuName}
+          onCancel={() => setRenameMenuTarget(null)}
+          onConfirm={confirmRenameMenu}
+        />
+      )}
     </AppLayout>
   );
 }

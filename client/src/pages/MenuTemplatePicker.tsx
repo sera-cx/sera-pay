@@ -10,7 +10,7 @@ import { convertAmount, getCurrencyRate, groupCurrenciesByRegion, loadSeraCurren
 import { resolvePaymentChainId } from "@/lib/payment";
 import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { AdvancedSelect } from "@/components/AdvancedSelect";
-import { BUSINESS_CATEGORY_GROUPS, businessCategoryLabel } from "@/lib/businessCategories";
+import { BUSINESS_CATEGORY_GROUPS } from "@/lib/businessCategories";
 
 type Step = "template" | "details" | "currency";
 
@@ -37,7 +37,7 @@ export default function MenuTemplatePicker() {
   const [step, setStep] = useState<Step>("template");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [scratchMenuName, setScratchMenuName] = useState("");
-  const [businessCategory, setBusinessCategory] = useState("Restaurant");
+  const [businessCategory, setBusinessCategory] = useState("");
   const [businessCategoryOther, setBusinessCategoryOther] = useState("");
   const [selectedCoin, setSelectedCoin] = useState<string>(() => {
     // Default to merchant's saved receive coin
@@ -75,12 +75,25 @@ export default function MenuTemplatePicker() {
     if (creating) return;
     const template = templateId === "scratch" ? SCRATCH_TEMPLATE : MENU_TEMPLATES.find(t => t.id === templateId);
     if (!template) return;
+    if (templateId === "scratch") {
+      if (!scratchMenuName.trim()) {
+        toast.error("Menu name is required");
+        return;
+      }
+      if (!businessCategory.trim()) {
+        toast.error("Business category is required");
+        return;
+      }
+      if (businessCategory === "Others" && !businessCategoryOther.trim()) {
+        toast.error("Other category is required");
+        return;
+      }
+    }
 
     setCreating(true);
     try {
       const customCategory = businessCategory === "Others" ? businessCategoryOther.trim() : "";
-      const fallbackName = customCategory || businessCategoryLabel(businessCategory) || "Menu";
-      const menuName = templateId === "scratch" ? scratchMenuName.trim() || fallbackName : template.defaultMenuName;
+      const menuName = templateId === "scratch" ? scratchMenuName.trim() : template.defaultMenuName;
       const resolvedCategory = businessCategory === "Others" ? "Others" : businessCategory;
       const menu = await fetchApi<{ id: string; name: string }>("/menus", {
         method: "POST",
@@ -190,7 +203,7 @@ export default function MenuTemplatePicker() {
               <button
                 onClick={handleConfirmCurrency}
                 disabled={creating}
-                className="w-full sm:w-auto justify-center flex items-center gap-2 px-5 py-2 rounded-xl bg-[#00C853] text-white text-sm font-semibold hover:bg-[#00A844] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="serapay-green-button w-full sm:w-auto justify-center flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {creating ? (
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -203,8 +216,8 @@ export default function MenuTemplatePicker() {
             {step === "details" && (
               <button
                 onClick={() => createMenu("scratch", selectedCoin)}
-                disabled={creating || (businessCategory === "Others" && !businessCategoryOther.trim())}
-                className="w-full sm:w-auto justify-center flex items-center gap-2 px-5 py-2 rounded-xl bg-[#00C853] text-white text-sm font-semibold hover:bg-[#00A844] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={creating || !scratchMenuName.trim() || !businessCategory.trim() || (businessCategory === "Others" && !businessCategoryOther.trim())}
+                className="serapay-green-button w-full sm:w-auto justify-center flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {creating ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Check className="w-4 h-4" />}
                 Create
@@ -265,7 +278,8 @@ export default function MenuTemplatePicker() {
                 <input
                   value={scratchMenuName}
                   onChange={e => setScratchMenuName(e.target.value)}
-                  placeholder="Leave blank to use the business category"
+                  placeholder="e.g. M Banana"
+                  required
                   maxLength={120}
                   className="w-full h-11 rounded-xl border border-gray-200 px-3 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#00C853]/30 focus:border-[#00C853]"
                 />

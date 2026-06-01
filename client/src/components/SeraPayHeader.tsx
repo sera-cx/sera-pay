@@ -266,6 +266,7 @@ export function SeraPayHeader({
         ) : primaryAction ? (
           <button
             onClick={primaryAction.onClick}
+            className="serapay-green-button"
             style={{
               height: homeHeader ? 32 : 38,
               display: "flex",
@@ -275,7 +276,7 @@ export function SeraPayHeader({
               border: "none",
               borderRadius: 999,
               padding: homeHeader ? "0 13px" : "0 16px",
-              background: "linear-gradient(135deg, #00A855, #007A30)",
+              background: "linear-gradient(135deg, #00C896, #00A87A, #008A64)",
               color: "#fff",
               fontSize: homeHeader ? 12 : 13,
               fontWeight: 750,

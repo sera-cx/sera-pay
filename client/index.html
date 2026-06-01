@@ -110,18 +110,37 @@
       }
 
       .app-boot-loader__logo {
-        width: 48px;
-        height: 48px;
+        width: 36px;
+        height: 36px;
         display: block;
         object-fit: contain;
       }
 
-      .app-boot-loader__spinner {
-        width: 32px;
-        height: 32px;
-        margin-top: 20px;
+      .app-boot-loader__mark {
+        position: relative;
+        width: 64px;
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .app-boot-loader__logo-shell {
+        width: 48px;
+        height: 48px;
         border-radius: 999px;
-        border: 2px solid rgba(0, 209, 160, 0.2);
+        background: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 10px 30px rgba(0, 209, 160, 0.16);
+      }
+
+      .app-boot-loader__spinner {
+        position: absolute;
+        inset: 0;
+        border-radius: 999px;
+        border: 3px solid rgba(0, 209, 160, 0.15);
         border-top-color: #00d1a0;
         animation: app-boot-spin 0.8s linear infinite;
       }
@@ -144,8 +163,12 @@
     <div id="root">
       <div class="app-boot-loader">
         <div class="app-boot-loader__inner">
-          <img class="app-boot-loader__logo" src="/icon-512.png" alt="SeraPay" />
-          <div class="app-boot-loader__spinner"></div>
+          <div class="app-boot-loader__mark">
+            <div class="app-boot-loader__spinner"></div>
+            <div class="app-boot-loader__logo-shell">
+              <img class="app-boot-loader__logo" src="/icon-512.png" alt="SeraPay" />
+            </div>
+          </div>
           <div class="app-boot-loader__text">Opening SeraPay</div>
         </div>
       </div>

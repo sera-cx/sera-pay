@@ -54,6 +54,25 @@ function normalizeSoldOutUntil(value: unknown) {
   return date.getTime() > Date.now() ? date : null;
 }
 
+function validateMenuItemInput(input: any, { partial = false } = {}) {
+  const errors: string[] = [];
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(input, key);
+  if (!partial || has("name")) {
+    if (typeof input.name !== "string" || !input.name.trim()) errors.push("item name");
+  }
+  if (!partial || has("category")) {
+    if (typeof input.category !== "string" || !input.category.trim()) errors.push("category");
+  }
+  if (!partial || has("coin")) {
+    if (typeof input.coin !== "string" || !input.coin.trim()) errors.push("coin");
+  }
+  if (!partial || has("price")) {
+    const price = Number(input.price);
+    if (!String(input.price ?? "").trim() || !Number.isFinite(price) || price <= 0) errors.push("price greater than 0");
+  }
+  return errors;
+}
+
 async function clearExpiredSoldOutItems(db: any, menuId?: string) {
   const expired = lte(menuItems.soldOutUntil, new Date());
   await db.update(menuItems)
@@ -175,9 +194,9 @@ menuRouter.post("/menus/:menuId/items", requireApiKey as any, async (req: any, r
     const [menu] = await db.select().from(menus).where(and(eq(menus.id, menuId), eq(menus.merchantId, merchant.id)));
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
     const { name, description, price, coin, imageUrl, sortOrder, category } = req.body;
-    if (!name || typeof name !== "string" || name.trim().length < 1) { res.status(400).json({ error: "Item name is required" }); return; }
-    const priceNum = parseFloat(price);
-    if (isNaN(priceNum) || priceNum < 0) { res.status(400).json({ error: "Invalid price" }); return; }
+    const missing = validateMenuItemInput(req.body);
+    if (missing.length) { res.status(400).json({ error: `Required fields: ${missing.join(", ")}` }); return; }
+    const priceNum = Number(price);
     const id = uuidv4();
     await db.insert(menuItems).values({
       id,
@@ -185,9 +204,9 @@ menuRouter.post("/menus/:menuId/items", requireApiKey as any, async (req: any, r
       name: name.trim(),
       description: description?.trim()?.slice(0, 500) || null,
       price: priceNum.toString(),
-      coin: coin?.slice(0, 20) || "USDC",
+      coin: coin.trim().slice(0, 20).toUpperCase(),
       imageUrl: imageUrl?.slice(0, 512) || null,
-      category: category?.trim()?.slice(0, 60) || null,
+      category: category.trim().slice(0, 60),
       sortOrder: typeof sortOrder === "number" ? sortOrder : 0,
       isActive: 1,
       soldOutUntil: null,
@@ -210,16 +229,17 @@ menuRouter.put("/menus/:menuId/items/:itemId", requireApiKey as any, async (req:
     if (!item) { res.status(404).json({ error: "Item not found" }); return; }
     const { name, description, price, coin, imageUrl, sortOrder, isActive, category, soldOutUntil } = req.body;
     const updates: Record<string, any> = {};
+    const missing = validateMenuItemInput(req.body, { partial: true });
+    if (missing.length) { res.status(400).json({ error: `Required fields: ${missing.join(", ")}` }); return; }
     if (name !== undefined) updates.name = name.trim().slice(0, 120);
     if (description !== undefined) updates.description = description?.trim()?.slice(0, 500) || null;
     if (price !== undefined) {
-      const p = parseFloat(price);
-      if (isNaN(p) || p < 0) { res.status(400).json({ error: "Invalid price" }); return; }
+      const p = Number(price);
       updates.price = p.toString();
     }
-    if (coin !== undefined) updates.coin = coin?.slice(0, 20) || "USDC";
+    if (coin !== undefined) updates.coin = coin.trim().slice(0, 20).toUpperCase();
     if (imageUrl !== undefined) updates.imageUrl = imageUrl?.slice(0, 512) || null;
-    if (category !== undefined) updates.category = category?.trim()?.slice(0, 60) || null;
+    if (category !== undefined) updates.category = category.trim().slice(0, 60);
     if (sortOrder !== undefined) updates.sortOrder = typeof sortOrder === "number" ? sortOrder : 0;
     if (isActive !== undefined) updates.isActive = isActive ? 1 : 0;
     if (soldOutUntil !== undefined) updates.soldOutUntil = normalizeSoldOutUntil(soldOutUntil);
@@ -281,15 +301,21 @@ menuRouter.post("/menus/:menuId/items/batch", requireApiKey as any, async (req: 
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
     const { items } = req.body;
     if (!Array.isArray(items) || items.length === 0) { res.status(400).json({ error: "items array required" }); return; }
+    const invalidIndex = items.slice(0, 50).findIndex((item: any) => validateMenuItemInput(item).length > 0);
+    if (invalidIndex >= 0) {
+      const missing = validateMenuItemInput(items[invalidIndex]);
+      res.status(400).json({ error: `Item ${invalidIndex + 1} required fields: ${missing.join(", ")}` });
+      return;
+    }
     const rows = items.slice(0, 50).map((item: any, idx: number) => ({
       id: uuidv4(),
       menuId,
       name: String(item.name || "").trim().slice(0, 200),
       description: item.description ? String(item.description).trim().slice(0, 500) : null,
-      price: String(parseFloat(item.price) || 0),
-      coin: String(item.coin || "USDC").slice(0, 20),
+      price: String(Number(item.price)),
+      coin: String(item.coin).trim().slice(0, 20).toUpperCase(),
       imageUrl: null as string | null,
-      category: item.category ? String(item.category).trim().slice(0, 60) : null,
+      category: String(item.category).trim().slice(0, 60),
       sortOrder: idx,
       isActive: 1 as const,
       soldOutUntil: null,
@@ -343,6 +369,7 @@ menuRouter.get("/public/menu/:slug", async (req, res) => {
     await clearExpiredSoldOutItems(db, menu.id);
     const [merchant] = await db.select({
       name: merchants.name,
+      description: merchants.description,
       logoData: merchants.logoData,
       walletAddress: merchants.walletAddress,
       storeAddress: merchants.storeAddress,

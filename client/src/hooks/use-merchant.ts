@@ -6,6 +6,7 @@ export interface MerchantProfile {
   id: string;
   walletAddress: string;
   name: string | null;
+  description: string | null;
   webhookUrl: string | null;
   logoData: string | null;
   qrFgColor: string | null;
@@ -48,6 +49,7 @@ export function useUpdateProfile() {
   return useMutation({
     mutationFn: (data: {
       name?: string;
+      description?: string | null;
       webhookUrl?: string;
       logoData?: string | null;
       qrFgColor?: string | null;

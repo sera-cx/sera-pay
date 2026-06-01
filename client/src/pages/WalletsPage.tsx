@@ -48,12 +48,31 @@ export function Wallets() {
 
   const handleCreate = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!EVM_ADDRESS.test(address)) {
+    const trimmedLabel = label.trim();
+    const trimmedAddress = address.trim();
+    const trimmedCoin = receiveCoin.trim().toUpperCase();
+    if (!trimmedLabel) {
+      toast({ title: "Label is required", description: "Add a clear name for this wallet.", type: "error" });
+      return;
+    }
+    if (!trimmedAddress) {
+      toast({ title: "Address is required", description: "Enter the wallet address you control.", type: "error" });
+      return;
+    }
+    if (!EVM_ADDRESS.test(trimmedAddress)) {
       toast({ title: "Invalid address", description: "Enter a controlled EVM address.", type: "error" });
       return;
     }
+    if (!trimmedCoin) {
+      toast({ title: "Coin is required", description: "Choose the receive coin for this wallet.", type: "error" });
+      return;
+    }
+    if (!Number.isInteger(chainId) || chainId <= 0) {
+      toast({ title: "Chain ID is required", description: "Enter a valid positive chain ID.", type: "error" });
+      return;
+    }
     createSubWallet.mutate(
-      { label, address, receiveCoin, chainId },
+      { label: trimmedLabel, address: trimmedAddress, receiveCoin: trimmedCoin, chainId },
       {
         onSuccess: () => {
           setLabel("");
@@ -279,7 +298,7 @@ export function Wallets() {
             <form className="space-y-3 p-5" onSubmit={handleCreate}>
               <div className="space-y-1.5">
                 <Label>Label</Label>
-                <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Storefront A" required />
+                <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Storefront A" required maxLength={120} />
               </div>
               <div className="space-y-1.5">
                 <Label>Address</Label>
@@ -299,7 +318,7 @@ export function Wallets() {
                 </div>
                 <div className="space-y-1.5">
                   <Label>Chain ID</Label>
-                  <Input type="number" value={chainId} onChange={(e) => setChainId(Number(e.target.value))} />
+                  <Input type="number" value={chainId} min={1} step={1} required onChange={(e) => setChainId(Number(e.target.value))} />
                 </div>
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
@@ -341,7 +360,7 @@ export function Wallets() {
             <p className="mt-1 text-sm text-muted-foreground">{deleteTarget.label} will be removed from checkout routing.</p>
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" variant="outline" size="sm" onClick={() => setDeleteTarget(null)} className="bg-white">Cancel</Button>
-              <Button type="button" size="sm" disabled={deleteSubWallet.isPending} onClick={handleDelete} className="bg-red-600 text-white hover:bg-red-700">
+              <Button type="button" size="sm" variant="destructive" disabled={deleteSubWallet.isPending} onClick={handleDelete} className="bg-red-600 text-white hover:bg-red-700">
                 {deleteSubWallet.isPending ? "Deleting..." : "Delete"}
               </Button>
             </div>

@@ -239,6 +239,7 @@ export function Settings() {
   const { toast } = useToast();
 
   const [storeName, setStoreName] = useState("");
+  const [storeDescription, setStoreDescription] = useState("");
   const [storeAddress, setStoreAddress] = useState("");
   const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem(LS_LOGO) || "");
   const [qrStyle, setQrStyle] = useState<QrStyle>("classic");
@@ -277,12 +278,14 @@ export function Settings() {
   useEffect(() => {
     if (profile) {
       setStoreName(profile.name || "");
+      setStoreDescription((profile as any).description || "");
       if ((profile as any).qrStyle) setQrStyle((profile as any).qrStyle as QrStyle);
       if ((profile as any).qrFgColor) setQrFgColor((profile as any).qrFgColor);
       if ((profile as any).qrBgColor) setQrBgColor((profile as any).qrBgColor);
-      if ((profile as any).logoData && !logoUrl) {
-        setLogoUrl((profile as any).logoData);
-        try { localStorage.setItem(LS_LOGO, (profile as any).logoData); } catch {}
+      const profileLogo = typeof (profile as any).logoData === "string" ? (profile as any).logoData : "";
+      if (profileLogo) {
+        setLogoUrl(profileLogo);
+        try { localStorage.setItem(LS_LOGO, profileLogo); } catch {}
       }
       if ((profile as any).receiveCoin) setReceiveCoin((profile as any).receiveCoin);
       if ((profile as any).storeAddress) setStoreAddress((profile as any).storeAddress);
@@ -306,7 +309,13 @@ export function Settings() {
 
   const handleSaveStoreInfo = (e: React.FormEvent) => {
     e.preventDefault();
-    updateProfile.mutate({ name: storeName, storeAddress } as any, {
+    const nextName = storeName.trim();
+    const nextAddress = storeAddress.trim();
+    if (!nextName) {
+      toast({ title: "Store name is required", description: "Enter the name shown to customers.", type: "error" });
+      return;
+    }
+    updateProfile.mutate({ name: nextName, description: storeDescription.trim(), storeAddress: nextAddress } as any, {
       onSuccess: () => toast({ title: "Store info updated", type: "success" }),
       onError: (err: any) => toast({ title: "Update failed", description: err.message, type: "error" }),
     });
@@ -353,8 +362,9 @@ export function Settings() {
   const selectedCoinInfo = currencies.find(c => c.symbol === receiveCoin);
 
   return (
-    <AppLayout>
+    <AppLayout noPadding>
       {/* Two-column layout: left = form cards, right = live preview */}
+      <div className="h-full min-h-0 overflow-y-auto overscroll-contain p-4 md:p-6">
       <div className="flex w-full max-w-5xl mx-auto flex-col lg:flex-row gap-6 items-start">
 
         {/* ── Left column: form cards ── */}
@@ -407,6 +417,8 @@ export function Settings() {
                           value={storeName}
                           onChange={e => setStoreName(e.target.value)}
                           placeholder="My Awesome Store"
+                          required
+                          maxLength={120}
                         />
                       </div>
                       <div className="space-y-1">
@@ -415,6 +427,16 @@ export function Settings() {
                           value={storeAddress}
                           onChange={e => setStoreAddress(e.target.value)}
                           placeholder="123 Main St, City, Country"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Merchant Description</Label>
+                        <textarea
+                          value={storeDescription}
+                          onChange={e => setStoreDescription(e.target.value.slice(0, 500))}
+                          placeholder="Short intro shown before customers start ordering"
+                          rows={3}
+                          className="min-h-[76px] w-full resize-none rounded-xl border border-border bg-background px-3 py-2 text-sm transition-all duration-200 ease-in-out placeholder:text-muted-foreground focus-visible:border-[#00C853] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00C853]/20"
                         />
                       </div>
                     </div>
@@ -602,7 +624,7 @@ export function Settings() {
         </div>
 
         {/* ── Right column: sticky live preview ── */}
-        <div className="w-full lg:w-72 lg:shrink-0 lg:sticky lg:top-6 lg:max-h-[calc(100vh-6rem)]">
+        <div className="w-full lg:w-72 lg:shrink-0 lg:sticky lg:top-6 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:pr-1">
           <div className="space-y-3">
             <div>
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Live Preview</p>
@@ -691,6 +713,7 @@ export function Settings() {
           </div>
         </div>
 
+      </div>
       </div>
     </AppLayout>
   );

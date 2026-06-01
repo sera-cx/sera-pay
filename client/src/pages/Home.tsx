@@ -96,7 +96,14 @@ function AccountSetupScreen({
 }
 
 function isSupportedLogoValue(value: unknown): value is string {
-  return typeof value === "string" && (/^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,/i.test(value) || /^https:\/\//i.test(value));
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return (
+    /^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,/i.test(trimmed) ||
+    /^https?:\/\//i.test(trimmed) ||
+    trimmed.startsWith("/")
+  );
 }
 
 // ── Token Icon ─────────────────────────────────────────────────────────────
@@ -634,6 +641,26 @@ function SettingsModal({
   const logoInputRef = useRef<HTMLInputElement>(null);
   const accountReady = Boolean(apiKey);
 
+  useEffect(() => {
+    setName(initialName);
+  }, [initialName]);
+
+  useEffect(() => {
+    setLogoPreview(isSupportedLogoValue(initialLogo) ? initialLogo : "");
+  }, [initialLogo]);
+
+  useEffect(() => {
+    setDotColor(qrFgColor || "#000000");
+  }, [qrFgColor]);
+
+  useEffect(() => {
+    setBgColor(qrBgColor || "#ffffff");
+  }, [qrBgColor]);
+
+  useEffect(() => {
+    setSelectedStyle((qrStyle as QrStyle) || "rounded");
+  }, [qrStyle]);
+
   const handleLogoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -912,7 +939,7 @@ function PaymentToast({ amount, coin, onDismiss }: { amount: string; coin: strin
 }
 
 // ── Transaction History Panel ──────────────────────────────────────────────
-function TransactionHistory({ apiKey }: { apiKey: string }) {
+function TransactionHistory({ apiKey, chainId }: { apiKey: string; chainId: number }) {
   const [txs, setTxs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -937,7 +964,7 @@ function TransactionHistory({ apiKey }: { apiKey: string }) {
   const fetchTxs = useCallback(async () => {
     if (!apiKey) return;
     try {
-      const res = await fetch("/api/merchant/transactions", {
+      const res = await fetch(`/api/merchant/transactions?chainId=${chainId}`, {
         headers: { "X-Api-Key": apiKey },
       });
       if (!res.ok) { setError("Failed to load transactions"); return; }
@@ -965,7 +992,18 @@ function TransactionHistory({ apiKey }: { apiKey: string }) {
     } finally {
       setLoading(false);
     }
-  }, [apiKey, notifyPayment]);
+  }, [apiKey, chainId, notifyPayment]);
+
+  const openPendingPayment = (tx: any) => {
+    if (tx.status !== "pending" && tx.status !== "confirming") return;
+    const url = tx.paymentUrl || (tx.toAddress ? buildPaymentUrl({
+      receiverAddress: tx.toAddress,
+      receiveCoin: tx.coin,
+      amount: tx.amount,
+      chainId: tx.chainId || chainId,
+    }) : "");
+    if (url) window.location.href = url;
+  };
 
   useEffect(() => { fetchTxs(); }, [fetchTxs]);
 
@@ -1024,9 +1062,10 @@ function TransactionHistory({ apiKey }: { apiKey: string }) {
             const amountNum = parseFloat(tx.amount);
             const amountStr = isNaN(amountNum) ? tx.amount : amountNum.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
             return (
-              <div key={tx.id} style={{
+              <div key={tx.id} onClick={() => openPendingPayment(tx)} style={{
                 display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
                 borderTop: i > 0 ? "1px solid rgba(60,60,67,0.06)" : "none",
+                cursor: tx.status === "pending" || tx.status === "confirming" ? "pointer" : "default",
               }}>
                 <TokenIcon symbol={tx.coin} size={32} />
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -1211,10 +1250,7 @@ export default function Home() {
   }, [isConnected, walletAddress]);
   // Hydrate localLogoData from profile once it loads (so logo shows in QR after page refresh)
   useEffect(() => {
-    if (isSupportedLogoValue(merchantProfile?.logoData) && !localLogoData) {
-      setLocalLogoData(merchantProfile.logoData);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    setLocalLogoData(isSupportedLogoValue(merchantProfile?.logoData) ? merchantProfile.logoData : "");
   }, [merchantProfile?.logoData]);
 
   const getExpiresAt = useCallback((): number | undefined => {
@@ -1451,12 +1487,12 @@ export default function Home() {
           Accept USDC, USDT &amp; more via QR code — no bank account needed.
         </h2>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
-          <SeraLogo size={28} />
-          <div style={{
-            width: 24, height: 24, borderRadius: "50%",
-            border: "2.5px solid rgba(0,200,83,0.2)", borderTopColor: "#00C853",
-            animation: "spin 0.8s linear infinite",
-          }} />
+          <div style={{ position: "relative", width: 64, height: 64, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", border: "3px solid rgba(0,209,160,0.15)", borderTopColor: "#00D1A0", animation: "spin 0.8s linear infinite" }} />
+            <div style={{ width: 48, height: 48, borderRadius: "50%", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 10px 30px rgba(0,209,160,0.16)" }}>
+              <SeraLogo size={36} />
+            </div>
+          </div>
         </div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
@@ -1471,7 +1507,7 @@ export default function Home() {
         minHeight: "100dvh", background: "#F2FAF6", fontFamily: font,
         display: "flex", flexDirection: "column", overflow: "hidden",
       }}>
-        <SeraPayHeader maxWidth={440} homeHeader primaryAction={{ label: "Dashboard", onClick: handleConnectWallet }} />
+        <SeraPayHeader maxWidth={1240} homeHeader primaryAction={{ label: "Dashboard", onClick: handleConnectWallet }} />
         <main style={{
           flex: "1 1 auto",
           minHeight: 0,
@@ -1517,8 +1553,8 @@ export default function Home() {
                 ))}
               </div>
             </div>
-            <button onClick={handleConnectWallet} className="serapay-action-primary" style={{
-              width: "100%", background: "linear-gradient(135deg, #00A855, #007A30)",
+            <button onClick={handleConnectWallet} className="serapay-action-primary serapay-shine-button" style={{
+              width: "100%", background: "linear-gradient(135deg, #00C896, #00A87A, #008A64)",
               border: "none", borderRadius: 14, padding: "15px 20px",
               fontSize: 15, fontWeight: 700, color: "#fff", cursor: "pointer",
               display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
@@ -1614,7 +1650,7 @@ export default function Home() {
     return (
       <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
         <SeraPayHeader
-          maxWidth={520}
+          maxWidth={1240}
           compact
           walletAddress={walletAddress}
           dashboardAction={{ label: "Dashboard", onClick: () => setLocation("/dashboard") }}
@@ -1630,14 +1666,14 @@ export default function Home() {
               margin: "0 0 12px",
               border: "none",
               background: "transparent",
-              color: "#FF3B30",
-              fontSize: 13,
-              fontWeight: 750,
+              color: "rgba(60,60,67,0.48)",
+              fontSize: 12,
+              fontWeight: 650,
               cursor: "pointer",
               padding: "6px 4px",
             }}
           >
-            &lt;- Back to payment form
+            ← Back
           </button>
           {/* QR Card */}
           <div style={{
@@ -1802,15 +1838,15 @@ export default function Home() {
               marginTop: 10,
               borderRadius: 14,
               background: "transparent",
-              border: "1px solid rgba(255,59,48,0.32)",
-              color: "#FF3B30",
-              fontSize: 13,
+              border: "1px solid rgba(60,60,67,0.12)",
+              color: "rgba(60,60,67,0.48)",
+              fontSize: 12,
               fontWeight: 650,
               cursor: "pointer",
               transition: "background 0.16s, color 0.16s, border-color 0.16s, transform 0.16s",
             }}
           >
-            Back to payment form
+            Back
           </button>
         </div>
         {/* Edit Amount Modal */}
@@ -1940,7 +1976,7 @@ export default function Home() {
   return (
     <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
       <SeraPayHeader
-        maxWidth={520}
+        maxWidth={1240}
         walletAddress={walletAddress}
         afterLogoContent={<PaymentModeSwitch activeMode={paymentMode} />}
         dashboardAction={{ label: "Dashboard", onClick: () => setLocation("/dashboard") }}
@@ -1983,7 +2019,7 @@ export default function Home() {
         </p>
 
         {/* Receive coin card */}
-        <div style={{ background: "#fff", borderRadius: 20, marginBottom: 2, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.07)" }}>
+        <div className="serapay-payment-field" style={{ background: "#fff", borderRadius: 20, marginBottom: 2, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.07)" }}>
           <div style={{ display: "flex", alignItems: "center", height: 62 }}>
             <button onClick={() => setShowCoinSheet(true)} style={{
               display: "flex", alignItems: "center", gap: 8,
@@ -2078,7 +2114,7 @@ export default function Home() {
         </p>
 
         {/* Customer pays card */}
-        <div style={{ background: "#fff", borderRadius: 20, marginBottom: 20, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.07)" }}>
+        <div className="serapay-payment-field" style={{ background: "#fff", borderRadius: 20, marginBottom: 20, overflow: "hidden", boxShadow: "0 1px 8px rgba(0,0,0,0.07)" }}>
           <div style={{ display: "flex", alignItems: "center", height: 62 }}>
             <button onClick={() => setShowCustomerCoinSheet(true)} style={{
               display: "flex", alignItems: "center", gap: 8,
@@ -2215,7 +2251,7 @@ export default function Home() {
         <button
           onClick={handleGenerateQR}
           disabled={!selectedCoin || !receiverAddress}
-          className="serapay-action-primary"
+          className="serapay-action-primary serapay-shine-button"
           style={{
             width: "100%", height: 54, borderRadius: 16,
             background: selectedCoin && receiverAddress
@@ -2224,7 +2260,7 @@ export default function Home() {
             border: "none",
             color: selectedCoin && receiverAddress ? "#fff" : "rgba(60,60,67,0.3)",
             fontSize: 16, fontWeight: 700, cursor: selectedCoin && receiverAddress ? "pointer" : "not-allowed",
-            boxShadow: selectedCoin && receiverAddress ? "0 6px 20px rgba(78,206,154,0.28)" : "none",
+            boxShadow: selectedCoin && receiverAddress ? "0 4px 12px rgba(78,206,154,0.18)" : "none",
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             transition: "all 0.2s",
           }}
@@ -2249,7 +2285,7 @@ export default function Home() {
         </div>
 
         {/* Transaction History */}
-        {merchantApiKey && <TransactionHistory apiKey={merchantApiKey} />}
+        {merchantApiKey && <TransactionHistory apiKey={merchantApiKey} chainId={paymentChainId} />}
       </div>
 
       {/* Coin sheet */}

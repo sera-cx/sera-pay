@@ -12,6 +12,7 @@ import { AdvancedSelect } from "@/components/AdvancedSelect";
 interface EditableItem {
   name: string;
   description: string;
+  category: string;
   price: string;
   coin: string;
 }
@@ -30,13 +31,13 @@ export default function MenuCreatePage() {
   const [description, setDescription] = useState("");
   const [items, setItems] = useState<EditableItem[]>(
     template.id === "scratch"
-      ? [{ name: "", description: "", price: "", coin: "USDC" }]
-      : template.items.map(i => ({ name: i.name, description: i.description || "", price: i.price, coin: i.coin }))
+      ? [{ name: "", description: "", category: "", price: "", coin: "USDC" }]
+      : template.items.map(i => ({ name: i.name, description: i.description || "", category: i.category || "", price: i.price, coin: i.coin }))
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const addItem = () => setItems(prev => [...prev, { name: "", description: "", price: "", coin: "USDC" }]);
+  const addItem = () => setItems(prev => [...prev, { name: "", description: "", category: "", price: "", coin: "USDC" }]);
   const removeItem = (idx: number) => setItems(prev => prev.filter((_, i) => i !== idx));
   const updateItem = (idx: number, field: keyof EditableItem, value: string) => {
     setItems(prev => prev.map((item, i) => i === idx ? { ...item, [field]: value } : item));
@@ -44,8 +45,19 @@ export default function MenuCreatePage() {
 
   const handleCreate = async () => {
     if (!menuName.trim()) { setError("Menu name is required"); return; }
-    const validItems = items.filter(i => i.name.trim() && parseFloat(i.price) >= 0);
-    if (validItems.length === 0) { setError("Add at least one item with a name and price"); return; }
+    if (items.length === 0) { setError("Add at least one item"); return; }
+    const invalidIndex = items.findIndex(i => !i.name.trim() || !i.category.trim() || !i.coin.trim() || !i.price.trim() || !Number.isFinite(Number(i.price)) || Number(i.price) <= 0);
+    if (invalidIndex >= 0) {
+      setError(`Item ${invalidIndex + 1} needs a name, category, price greater than 0, and coin`);
+      return;
+    }
+    const validItems = items.map(i => ({
+      name: i.name.trim(),
+      description: i.description.trim(),
+      category: i.category.trim(),
+      price: i.price.trim(),
+      coin: i.coin.trim(),
+    }));
     setSaving(true);
     setError("");
     try {
@@ -90,7 +102,7 @@ export default function MenuCreatePage() {
             <Button
               onClick={handleCreate}
               disabled={saving}
-              className="bg-[#00C853] hover:bg-[#00B847] text-white font-semibold px-5"
+              className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white font-semibold px-5"
             >
               {saving ? "Creating…" : `Create Menu (${items.filter(i => i.name.trim()).length} items)`}
             </Button>
@@ -159,13 +171,20 @@ export default function MenuCreatePage() {
                       placeholder="Description (optional)"
                       className="text-sm text-gray-600"
                     />
+                    <Input
+                      value={item.category}
+                      onChange={e => updateItem(idx, "category", e.target.value)}
+                      placeholder="Category"
+                      className="text-sm"
+                      maxLength={60}
+                    />
                     <div className="flex gap-2">
                       <Input
                         value={item.price}
                         onChange={e => updateItem(idx, "price", e.target.value)}
                         placeholder="0.00"
                         type="number"
-                        min="0"
+                        min="0.01"
                         step="0.01"
                         className="w-28 font-mono"
                         inputMode="decimal"
@@ -205,7 +224,7 @@ export default function MenuCreatePage() {
               onClick={handleCreate}
               disabled={saving}
               size="lg"
-              className="bg-[#00C853] hover:bg-[#00B847] text-white font-semibold px-8"
+              className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white font-semibold px-8"
             >
               {saving ? "Creating…" : `Create Menu with ${items.filter(i => i.name.trim()).length} items`}
             </Button>

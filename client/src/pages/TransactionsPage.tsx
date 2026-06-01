@@ -8,6 +8,7 @@ import { formatAmount, getTransactionStatusLabel, shortenAddress } from "@/lib/d
 import { format, parseISO, startOfDay, endOfDay, startOfMonth, subDays } from "date-fns";
 import { Ban, ExternalLink, Search, X, QrCode, Download, Calendar, ChevronDown, FileText, ChevronRight } from "lucide-react";
 import { buildPaymentUrl } from "@/lib/payment";
+import { useActiveNetworkMode } from "@/components/NetworkSwitcher";
 import { QRStyled } from "@/components/QRStyled";
 import type { QrStyle } from "@/components/QRStyled";
 import { cn } from "@/lib/dashboard-utils";
@@ -43,6 +44,10 @@ const CHAIN_NAMES: Record<number, string> = {
   56: "BNB Chain",
   11155111: "Sepolia",
 };
+
+function networkModeLabel(chainId?: number) {
+  return chainId === 1 ? "Live" : "Test";
+}
 
 const PRESETS: { key: DatePreset; label: string }[] = [
   { key: "all", label: "All time" },
@@ -442,7 +447,9 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export function Transactions() {
-  const { data, isLoading } = useTransactions(500, 0);
+  const { activeMode } = useActiveNetworkMode();
+  const activeChainId = activeMode === "live" ? 1 : 11155111;
+  const { data, isLoading } = useTransactions(500, 0, activeChainId);
   const { data: profile } = useMerchantProfile();
   const [query, setQuery] = useState("");
   const [qrTx, setQrTx] = useState<{ amount: string; coin: string; url: string } | null>(null);
@@ -483,18 +490,35 @@ export function Transactions() {
 
   const pendingCount = useMemo(() => (data?.transactions ?? []).filter(t => t.status === "pending" || t.status === "confirming").length, [data?.transactions]);
 
-  const handleShowQR = (amount: string, coin: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const getPaymentUrl = (tx: Transaction) => {
+    if (tx.paymentUrl) return tx.paymentUrl;
     const receiverAddress = profile?.storeAddress || profile?.walletAddress;
-    if (!receiverAddress) return;
-    const url = buildPaymentUrl({
+    if (!receiverAddress) return "";
+    return buildPaymentUrl({
       receiverAddress,
-      receiveCoin: profile.receiveCoin || coin,
-      amount: amount && parseFloat(amount) > 0 ? amount : undefined,
-      payCoin: coin !== (profile.receiveCoin || coin) ? coin : undefined,
-      merchantName: profile.name || undefined,
+      receiveCoin: tx.coin,
+      amount: tx.amount && parseFloat(tx.amount) > 0 ? tx.amount : undefined,
+      chainId: tx.chainId,
+      merchantName: profile?.name || undefined,
     });
-    setQrTx({ amount, coin, url });
+  };
+
+  const handleShowQR = (tx: Transaction, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const url = getPaymentUrl(tx);
+    if (!url) return;
+    setQrTx({ amount: tx.amount, coin: tx.coin, url });
+  };
+
+  const handleOpenTransaction = (tx: Transaction) => {
+    if (tx.status === "pending" || tx.status === "confirming") {
+      const url = getPaymentUrl(tx);
+      if (url) {
+        window.location.href = url;
+        return;
+      }
+    }
+    setSelectedTx(getTxWithLocalNotes(tx));
   };
 
   const handleNotesUpdated = (id: string, notes: string) => {
@@ -584,7 +608,7 @@ export function Transactions() {
                   <TableRow
                     key={tx.id}
                     className="group cursor-pointer hover:bg-muted/40 transition-colors"
-                    onClick={() => setSelectedTx(getTxWithLocalNotes(tx))}
+                    onClick={() => handleOpenTransaction(tx)}
                   >
                     <TableCell>
                       <StatusBadge status={tx.status} />
@@ -593,6 +617,7 @@ export function Transactions() {
                       <span className="font-mono font-medium text-sm">
                         {tx.status === "confirmed" ? `+${formatAmount(tx.amount)} ${tx.coin}` : `${formatAmount(tx.amount)} ${tx.coin}`}
                       </span>
+                      <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{networkModeLabel(tx.chainId)}</span>
                     </TableCell>
                     <TableCell>
                       <span className="font-mono text-muted-foreground text-xs">
@@ -619,7 +644,7 @@ export function Transactions() {
                     <TableCell>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
-                          onClick={(e) => handleShowQR(tx.amount, tx.coin, e)}
+                          onClick={(e) => handleShowQR(tx, e)}
                           title="Show QR for this amount"
                           className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
                           aria-label="Show payment QR"
