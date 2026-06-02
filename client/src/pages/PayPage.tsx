@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "wouter";
 import { useLoginWithOAuth, usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
-import { ChevronRight, MoreHorizontal, Wallet } from "lucide-react";
+import { ArrowUpDown, ChevronRight, MoreHorizontal, Wallet } from "lucide-react";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
 import { decodePaymentRequest } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
@@ -568,7 +568,7 @@ function RateChangedModal({ oldAmount, newAmount, coin, onAccept, onCancel }: {
 }
 
 type Phase = "loading" | "connect" | "select-coin" | "paying" | "success" | "failed" | "invalid";
-type PaymentLoginMethod = "wallet" | "google" | "email" | "telegram";
+type PaymentLoginMethod = "wallet" | "google" | "email" | "twitter";
 
 export default function PayPage() {
   const { encoded } = useParams<{ encoded: string }>();
@@ -1000,7 +1000,7 @@ export default function PayPage() {
   const handleGoogleLogin = useCallback(() => {
     void initOAuth({ provider: "google" });
   }, [initOAuth]);
-  const handleOtherLogin = useCallback(() => openPrivyLogin(["email", "google", "telegram"]), [openPrivyLogin]);
+  const handleOtherLogin = useCallback(() => openPrivyLogin(["email", "google", "twitter"]), [openPrivyLogin]);
 
   const handlePay = useCallback(async () => {
     if (!req || !selectedCoin || !payAmount) return;
@@ -1477,9 +1477,9 @@ export default function PayPage() {
                         aria-label="Enter payment amount"
                         style={{ fontSize: 36, fontWeight: 800, color: amountError ? "#FF3B30" : "#0A1F1A", border: "none", borderBottom: `2px solid ${amountError ? "#FF3B30" : "rgba(0,209,160,0.4)"}`, outline: "none", background: "transparent", width: 160, textAlign: "right", fontFamily: font, letterSpacing: "-0.5px" }}
                       />
-                      <button onClick={() => phase === "select-coin" && setShowCoinSheet(true)} aria-label="Select payment coin" style={{ background: "none", border: "none", padding: 0, cursor: phase === "select-coin" ? "pointer" : "default", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={() => setShowCoinSheet(true)} aria-label="Select payment coin" style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin ?? "USDT"}
-                        {phase === "select-coin" && <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="#00D1A0" strokeWidth={2.5} style={{ verticalAlign: "middle", marginTop: -2 }}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>}
+                        <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                       </button>
                     </div>
                     {amountError && <p style={{ fontSize: 11, color: "#FF3B30", margin: "6px 0 0", fontWeight: 500 }}>{amountError}</p>}
@@ -1489,9 +1489,9 @@ export default function PayPage() {
                   <>
                     <p style={{ fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
                       {unifiedAmount}{" "}
-                      <button onClick={() => phase === "select-coin" && setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: phase === "select-coin" ? "pointer" : "default", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? unifiedCoin}
-                        {phase === "select-coin" && <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="#00D1A0" strokeWidth={2.5} style={{ verticalAlign: "middle", marginTop: -2 }}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>}
+                        <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                       </button>
                     </p>
                     {unifiedNote && (
@@ -1506,9 +1506,9 @@ export default function PayPage() {
                   <>
                     <p style={{ fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
                       {payAmount}{" "}
-                      <button onClick={() => phase === "select-coin" && setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: phase === "select-coin" ? "pointer" : "default", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin}
-                        {phase === "select-coin" && <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="#00D1A0" strokeWidth={2.5} style={{ verticalAlign: "middle", marginTop: -2 }}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>}
+                        <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                       </button>
                     </p>
                     {!isSameCoin && req.amount && req.receiveCoin && (
@@ -1524,9 +1524,9 @@ export default function PayPage() {
                   // Fixed-amount, no pay coin selected yet — show receive amount
                   <p style={{ fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: 0, letterSpacing: "-0.5px" }}>
                     {req.amount}{" "}
-                    <button onClick={() => phase === "select-coin" && setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: phase === "select-coin" ? "pointer" : "default", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                       {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin}
-                      {phase === "select-coin" && <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="#00D1A0" strokeWidth={2.5} style={{ verticalAlign: "middle", marginTop: -2 }}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>}
+                      <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                     </button>
                   </p>
                 ) : null}
@@ -1614,7 +1614,7 @@ export default function PayPage() {
                 <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F9F9FB", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><MoreHorizontal size={18} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Other socials</span>
-                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Email, Google and Telegram</span>
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Email, Google and X</span>
                 </span>
                 <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
               </button>

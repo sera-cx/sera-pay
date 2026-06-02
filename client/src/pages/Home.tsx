@@ -1251,7 +1251,7 @@ function SettingsModal({
 }
 
 // ── Payment Toast Banner ──────────────────────────────────────────────
-type HomeLoginMethod = "wallet" | "email" | "google" | "telegram";
+type HomeLoginMethod = "wallet" | "email" | "google" | "twitter";
 
 function WalletQrScannerModal({
   onClose,
@@ -1492,11 +1492,11 @@ function GuestReceiverModal({
                 <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>MetaMask, OKX, Trust Wallet and more</span>
               </span>
             </button>
-            <button type="button" onClick={() => onConnect(["email", "google", "telegram"])} style={optionStyle}>
+            <button type="button" onClick={() => onConnect(["email", "google", "twitter"])} style={optionStyle}>
               <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F4F5F8", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Mail size={17} /></span>
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>Other socials</span>
-                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Email, Google and Telegram</span>
+                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Email, Google and X</span>
               </span>
             </button>
           </div>
