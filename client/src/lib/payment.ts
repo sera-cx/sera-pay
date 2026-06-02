@@ -1,4 +1,5 @@
 import { buildClientAppUrl } from "@/lib/app-url";
+import { normalizeDecimalAmountText } from "@/lib/decimalInput";
 import type { SeraApiMode } from "@shared/gateway";
 
 export const LIVE_PAYMENT_CHAIN_ID = 1;
@@ -65,7 +66,16 @@ function base64ToUtf8(b64: string): string {
 }
 
 export function encodePaymentRequest(req: PaymentRequest): string {
-  const data = JSON.stringify(req);
+  const normalizedReq: PaymentRequest = {
+    ...req,
+    amount: req.amount ? normalizeDecimalAmountText(req.amount) || undefined : undefined,
+    payAmount: req.payAmount ? normalizeDecimalAmountText(req.payAmount) || undefined : undefined,
+    orderItems: req.orderItems?.map((item) => ({
+      ...item,
+      p: normalizeDecimalAmountText(item.p) || item.p,
+    })),
+  };
+  const data = JSON.stringify(normalizedReq);
   return toBase64Url(utf8ToBase64(data));
 }
 
@@ -80,7 +90,14 @@ export function decodePaymentRequest(encoded: string): PaymentRequest | null {
     }
     const parsed = JSON.parse(data);
     if (!parsed.receiverAddress || !parsed.receiveCoin) return null;
-    return parsed;
+    return {
+      ...parsed,
+      amount: parsed.amount ? normalizeDecimalAmountText(parsed.amount) || undefined : undefined,
+      payAmount: parsed.payAmount ? normalizeDecimalAmountText(parsed.payAmount) || undefined : undefined,
+      orderItems: Array.isArray(parsed.orderItems)
+        ? parsed.orderItems.map((item: OrderItem) => ({ ...item, p: normalizeDecimalAmountText(item.p) || item.p }))
+        : parsed.orderItems,
+    };
   } catch {
     return null;
   }

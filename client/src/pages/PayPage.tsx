@@ -7,6 +7,7 @@ import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stableco
 import { decodePaymentRequest } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { getCurrencyRate } from "@/lib/currencyCalculator";
+import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 import { SeraPayHeader } from "@/components/SeraPayHeader";
 import { detectLocale, getTranslations, RTL_LOCALES } from "@/lib/i18n";
 import jsPDF from "jspdf";
@@ -200,12 +201,132 @@ const CHAIN_NAMES: Record<number, string> = {
   1: "Ethereum", 137: "Polygon", 8453: "Base", 42161: "Arbitrum", 11155111: "Sepolia",
 };
 
+const CHAIN_METADATA: Record<number, {
+  chainId: string;
+  chainName: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
+  rpcUrls: string[];
+  blockExplorerUrls: string[];
+}> = {
+  11155111: {
+    chainId: "0xaa36a7",
+    chainName: "Sepolia",
+    nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
+    rpcUrls: [import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com"],
+    blockExplorerUrls: ["https://sepolia.etherscan.io"],
+  },
+};
+
 const RATE_TTL_SECONDS = 60; // 1 minute before rate expires
+const PAYMENT_ATTEMPT_MAX_MS = 5 * 60 * 1000;
+const MAX_SWAP_QUOTE_RETRIES = 5;
 
 function formatTokenAmount(value: number) {
   if (!Number.isFinite(value)) return "0.00";
-  if (value >= 1) return value.toFixed(2);
-  return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00");
+  return formatDecimalAmount(value) || "0.00";
+}
+
+class PaymentApiError extends Error {
+  errorCode?: string;
+  detail?: unknown;
+  status: number;
+
+  constructor(message: string, status: number, errorCode?: string, detail?: unknown) {
+    super(message);
+    this.name = "PaymentApiError";
+    this.status = status;
+    this.errorCode = errorCode;
+    this.detail = detail;
+  }
+}
+
+async function readPaymentApiJson<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const text = await response.text();
+  let data: any = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (!response.ok) throw new PaymentApiError(`${fallbackMessage} (${response.status})`, response.status);
+      throw new Error("Payment server returned an invalid response.");
+    }
+  }
+  if (!response.ok) {
+    throw new PaymentApiError(
+      data?.error || data?.message || `${fallbackMessage} (${response.status})`,
+      response.status,
+      data?.errorCode,
+      data?.detail,
+    );
+  }
+  return data as T;
+}
+
+async function switchPaymentChain(provider: any, chainId: number) {
+  const hexChainId = `0x${chainId.toString(16)}`;
+  try {
+    await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexChainId }] });
+  } catch (switchErr: any) {
+    if (switchErr?.code === 4902 && CHAIN_METADATA[chainId]) {
+      await provider.request({ method: "wallet_addEthereumChain", params: [CHAIN_METADATA[chainId]] });
+      return;
+    }
+    throw switchErr;
+  }
+}
+
+async function getActiveWalletAddress(provider: any, fallbackAddress?: string) {
+  const accounts = await provider.request({ method: "eth_requestAccounts" }).catch(async () => {
+    return provider.request({ method: "eth_accounts" }).catch(() => []);
+  });
+  const address = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : String(fallbackAddress || "");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error("No wallet account selected");
+  return address.toLowerCase();
+}
+
+function paymentFailureMessage(error: any): string {
+  const message = String(error?.message || error || "Transaction failed");
+  if (error?.code === 4001 || /rejected|denied|cancelled/i.test(message)) return "Transaction cancelled.";
+  if (/gas limit too high|gas required exceeds allowance|execution reverted|transaction is likely to fail/i.test(message)) {
+    return "Transaction simulation failed. Please check your token balance and Sepolia ETH for gas, then try again.";
+  }
+  if (/wallet_addEthereumChain|wallet_switchEthereumChain|unrecognized chain|unsupported chain/i.test(message)) {
+    return "Please add or switch to the payment network in your wallet, then try again.";
+  }
+  if (error?.errorCode === "no_liquidity" || /no liquidity|No liquidity is available/i.test(message)) {
+    return "Currently there is no liquidity for this transaction. Please try a different payment coin.";
+  }
+  if (isQuoteStaleError(error)) {
+    return "The quote closed before it could be submitted. Please try again.";
+  }
+  if (
+    error?.errorCode === "sera_connection_error"
+    || error?.status >= 500
+    || /Failed to fetch|fetch failed|network|timeout|aborted|ECONN|Unable to reach Sera|Sera is temporarily unavailable/i.test(message)
+  ) {
+    return "We could not connect to Sera right now. Please try again in a moment.";
+  }
+  if (/Unable to create Sera swap quote/i.test(message)) {
+    return "Unable to create a Sera swap quote right now. Please try the same receive coin, or try again later.";
+  }
+  return message;
+}
+
+function isQuoteStaleError(error: any): boolean {
+  const message = String(error?.message || error || "");
+  return error?.errorCode === "quote_stale"
+    || error?.errorCode === "QUOTE_STALE"
+    || error?.status === 409
+    || error?.status === 410
+    || /quote.*(expired|closed|stale|consumed|not found)|QUOTE_STALE/i.test(message);
+}
+
+function sameTypedData(a: unknown, b: unknown): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
 }
 
 async function totalOrderItemsInCoin(
@@ -598,7 +719,7 @@ export default function PayPage() {
         const converted = parseFloat(amount) * data.rate;
         const formatted = converted >= 1
           ? converted.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          : converted.toFixed(6);
+          : formatDecimalAmount(converted);
         setPayAmount(formatted);
         rateRef.current = data.rate;
         setDisplayRate(`1 ${receiveCoin} ≈ ${data.rate >= 1 ? data.rate.toLocaleString(undefined, { maximumFractionDigits: 4 }) : data.rate.toFixed(6)} ${payCoin}`);
@@ -681,7 +802,10 @@ export default function PayPage() {
           closed = true;
           clearInterval(pollInterval!);
           setPhase("failed");
-          setTxError("Payment verification failed. Please contact the merchant.");
+          setTxError(paymentFailureMessage({
+            message: data.failureReason || data.memo || "Payment verification failed. Please contact the merchant.",
+            errorCode: data.errorCode,
+          }));
         }
       } catch { /* ignore poll errors */ }
     }, 5000);
@@ -703,64 +827,99 @@ export default function PayPage() {
       const provider = await wallet.getEthereumProvider();
       const cid = req.chainId ?? 1;
 
-      try {
-        await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: `0x${cid.toString(16)}` }] });
-      } catch (switchErr: any) {
-        if (switchErr.code === 4902) throw new Error("Please add this network to your wallet first.");
-      }
+      await switchPaymentChain(provider, cid);
+      const activeWalletAddress = await getActiveWalletAddress(provider, wallet.address);
 
-      const sendAmount = finalPayAmount.replace(/,/g, "");
-      const receiveAmountForQuote = (finalReceiveAmount || receiveAmount || req.amount || finalPayAmount).replace(/,/g, "");
+      const sendAmount = normalizeDecimalAmountText(finalPayAmount.replace(/,/g, ""));
+      const receiveAmountForQuote = normalizeDecimalAmountText((finalReceiveAmount || receiveAmount || req.amount || finalPayAmount).replace(/,/g, ""));
+      if (!sendAmount) throw new Error("Invalid payment amount");
 
       if (requiresSeraSwap) {
-        const quoteRes = await fetch("/api/payment/swap/quote", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            merchantAddress: req.receiverAddress,
-            payerAddress: wallet.address,
-            payCoin: selectedCoin.symbol,
-            receiveCoin: req.receiveCoin,
-            payAmount: sendAmount,
-            receiveAmount: receiveAmountForQuote,
-            chainId: cid,
-            paymentIntentId: (req as any).paymentIntentId,
-            orderId: (req as any).orderId,
-          }),
-        });
-        const quoteData = await quoteRes.json();
-        if (!quoteRes.ok) throw new Error(quoteData.error || "Failed to create Sera swap quote");
-        setTxId(quoteData.txId);
+        const attemptStartedAt = Date.now();
+        const swapExpiration = Math.floor((attemptStartedAt + PAYMENT_ATTEMPT_MAX_MS) / 1000);
+        let quoteRetries = 0;
 
-        let permitSignature: string | undefined;
-        if (quoteData.permitTypedData) {
-          permitSignature = await provider.request({
-            method: "eth_signTypedData_v4",
-            params: [wallet.address, JSON.stringify(quoteData.permitTypedData)],
-          }) as string;
+        const createSwapQuote = async () => {
+          const quoteRes = await fetch("/api/payment/swap/quote", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              merchantAddress: req.receiverAddress,
+              payerAddress: activeWalletAddress,
+              payCoin: selectedCoin.symbol,
+              receiveCoin: req.receiveCoin,
+              payAmount: sendAmount,
+              receiveAmount: receiveAmountForQuote || sendAmount,
+              chainId: cid,
+              paymentIntentId: (req as any).paymentIntentId,
+              orderId: (req as any).orderId,
+              expiration: swapExpiration,
+            }),
+          });
+          const quoteData = await readPaymentApiJson<any>(quoteRes, "Unable to create Sera swap quote");
+          setTxId(quoteData.txId);
+          return quoteData;
+        };
+
+        while (true) {
+          try {
+            let quoteData = await createSwapQuote();
+            let permitSignature: string | undefined;
+            let permitDeadline = quoteData.permitDeadline;
+
+            if (quoteData.permitTypedData) {
+              const signedPermitTypedData = quoteData.permitTypedData;
+              permitSignature = await provider.request({
+                method: "eth_signTypedData_v4",
+                params: [activeWalletAddress, JSON.stringify(signedPermitTypedData)],
+              }) as string;
+
+              // Sera quotes can close quickly. Refresh after the slower permit prompt so the
+              // final intent signature is made against a fresh, still-open quote.
+              quoteData = await createSwapQuote();
+              permitDeadline = quoteData.permitDeadline;
+              if (quoteData.permitTypedData && !sameTypedData(quoteData.permitTypedData, signedPermitTypedData)) {
+                permitSignature = await provider.request({
+                  method: "eth_signTypedData_v4",
+                  params: [activeWalletAddress, JSON.stringify(quoteData.permitTypedData)],
+                }) as string;
+              } else if (!quoteData.permitTypedData) {
+                permitSignature = undefined;
+                permitDeadline = undefined;
+              }
+            }
+
+            const signature = await provider.request({
+              method: "eth_signTypedData_v4",
+              params: [activeWalletAddress, JSON.stringify(quoteData.intentTypedData)],
+            }) as string;
+
+            const submitRes = await fetch("/api/payment/swap/submit", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                txId: quoteData.txId,
+                quoteUuid: quoteData.quoteUuid,
+                signature,
+                permitSignature,
+                permitDeadline,
+              }),
+            });
+            const submitData = await readPaymentApiJson<any>(submitRes, "Unable to submit Sera swap");
+            if (submitData.txHash) setTxHash(submitData.txHash);
+            if (submitData.status === "confirmed") setPhase("success");
+            return;
+          } catch (error: any) {
+            const stillWithinAttemptWindow = Date.now() - attemptStartedAt < PAYMENT_ATTEMPT_MAX_MS;
+            if (isQuoteStaleError(error) && stillWithinAttemptWindow && quoteRetries < MAX_SWAP_QUOTE_RETRIES) {
+              quoteRetries += 1;
+              setTxId("");
+              setTxError("Quote refreshed. Please approve the fresh request in your wallet.");
+              continue;
+            }
+            throw error;
+          }
         }
-
-        const signature = await provider.request({
-          method: "eth_signTypedData_v4",
-          params: [wallet.address, JSON.stringify(quoteData.intentTypedData)],
-        }) as string;
-
-        const submitRes = await fetch("/api/payment/swap/submit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            txId: quoteData.txId,
-            quoteUuid: quoteData.quoteUuid,
-            signature,
-            permitSignature,
-            permitDeadline: quoteData.permitDeadline,
-          }),
-        });
-        const submitData = await submitRes.json();
-        if (!submitRes.ok) throw new Error(submitData.error || "Failed to submit Sera swap");
-        if (submitData.txHash) setTxHash(submitData.txHash);
-        if (submitData.status === "confirmed") setPhase("success");
-        return;
       }
 
       const coinAddress = COIN_ADDRESSES[selectedCoin.symbol]?.[cid];
@@ -770,8 +929,7 @@ export default function PayPage() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ merchantAddress: req.receiverAddress, coin: selectedCoin.symbol, amount: sendAmount, chainId: cid, orderId: (req as any).orderId, paymentUrl: window.location.href }),
       });
-      const createData = await createRes.json();
-      if (!createRes.ok) throw new Error(createData.error || "Failed to create payment");
+      const createData = await readPaymentApiJson<any>(createRes, "Unable to create payment");
       setTxId(createData.txId);
 
       const decimals = 6; // All Sera testnet tokens use 6 decimals
@@ -783,19 +941,20 @@ export default function PayPage() {
 
       const hash = await provider.request({
         method: "eth_sendTransaction",
-        params: [{ from: wallet.address, to: coinAddress, data: transferData, chainId: `0x${cid.toString(16)}` }],
+        params: [{ from: activeWalletAddress, to: coinAddress, data: transferData, chainId: `0x${cid.toString(16)}` }],
       });
 
       setTxHash(hash as string);
 
       await fetch("/api/payment/notify", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ txId: createData.txId, txHash: hash, fromAddress: wallet.address }),
+        body: JSON.stringify({ txId: createData.txId, txHash: hash, fromAddress: activeWalletAddress }),
       });
 
     } catch (e: any) {
-      setTxError(e?.code === 4001 || e?.message?.includes("rejected") ? "Transaction cancelled." : (e?.message || "Transaction failed"));
-      setPhase("failed");
+      const message = paymentFailureMessage(e);
+      setTxError(message);
+      setPhase(e?.errorCode === "no_liquidity" ? "select-coin" : "failed");
     }
   }, [req, selectedCoin, wallets, requiresSeraSwap, receiveAmount]);
 
@@ -815,6 +974,7 @@ export default function PayPage() {
 
   const handlePay = useCallback(async () => {
     if (!req || !selectedCoin || !payAmount) return;
+    setTxError("");
     if (req.orderItems?.length) {
       setRateLoading(true);
       try {
@@ -850,7 +1010,7 @@ export default function PayPage() {
         const newConverted = parseFloat(req.amount) * data.rate;
         const newFormatted = newConverted >= 1
           ? newConverted.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          : newConverted.toFixed(6);
+          : formatDecimalAmount(newConverted);
         const oldNum = parseFloat(payAmount.replace(/,/g, ""));
         const newNum = newConverted;
         const changePct = Math.abs((newNum - oldNum) / oldNum) * 100;
@@ -1271,9 +1431,7 @@ export default function PayPage() {
                         value={payAmount ?? ""}
                         autoFocus
                         onChange={e => {
-                          const v = e.target.value.replace(/[^0-9.]/g, "");
-                          const parts = v.split(".");
-                          const clean = parts.length > 2 ? parts[0] + "." + parts.slice(1).join("") : v;
+                          const clean = limitDecimalPlaces(e.target.value);
                           setPayAmount(clean || null);
                           const num = parseFloat(clean);
                           if (clean && (isNaN(num) || num < 0.01)) {
@@ -1490,6 +1648,11 @@ export default function PayPage() {
                 {selectedCoin.symbol} is not supported on {CHAIN_NAMES[chainId] || "this network"}. Please choose a different coin.
               </p>
             )}
+            {txError && (
+              <div style={{ borderRadius: 12, background: "#FFF8E6", border: "1px solid rgba(245,158,11,0.26)", color: "#9A5B00", fontSize: 12, lineHeight: 1.45, fontWeight: 600, padding: "10px 12px", marginBottom: 12, textAlign: "left" }}>
+                {txError}
+              </div>
+            )}
             <button
               onClick={handlePay}
               className="serapay-action-primary serapay-shine-button"
@@ -1525,7 +1688,7 @@ export default function PayPage() {
       {showCoinSheet && (
         <CoinSheet
           onClose={() => setShowCoinSheet(false)}
-          onSelect={setSelectedCoin}
+          onSelect={(coin) => { setSelectedCoin(coin); setTxError(""); }}
           selectedSymbol={selectedCoin?.symbol}
           receiveCoin={req?.receiveCoin}
           supportedCoins={supportedCoins}

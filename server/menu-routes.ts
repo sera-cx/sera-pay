@@ -54,6 +54,14 @@ function normalizeSoldOutUntil(value: unknown) {
   return date.getTime() > Date.now() ? date : null;
 }
 
+function normalizePriceAmount(value: unknown): string | null {
+  const text = String(value ?? "").replace(/,/g, "").trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(text)) return null;
+  const num = Number(text);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return num.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
 function validateMenuItemInput(input: any, { partial = false } = {}) {
   const errors: string[] = [];
   const has = (key: string) => Object.prototype.hasOwnProperty.call(input, key);
@@ -67,8 +75,7 @@ function validateMenuItemInput(input: any, { partial = false } = {}) {
     if (typeof input.coin !== "string" || !input.coin.trim()) errors.push("coin");
   }
   if (!partial || has("price")) {
-    const price = Number(input.price);
-    if (!String(input.price ?? "").trim() || !Number.isFinite(price) || price <= 0) errors.push("price greater than 0");
+    if (!normalizePriceAmount(input.price)) errors.push("price greater than 0 with max 6 decimals");
   }
   return errors;
 }
@@ -196,14 +203,15 @@ menuRouter.post("/menus/:menuId/items", requireApiKey as any, async (req: any, r
     const { name, description, price, coin, imageUrl, sortOrder, category } = req.body;
     const missing = validateMenuItemInput(req.body);
     if (missing.length) { res.status(400).json({ error: `Required fields: ${missing.join(", ")}` }); return; }
-    const priceNum = Number(price);
+    const normalizedPrice = normalizePriceAmount(price);
+    if (!normalizedPrice) { res.status(400).json({ error: "Invalid price" }); return; }
     const id = uuidv4();
     await db.insert(menuItems).values({
       id,
       menuId,
       name: name.trim(),
       description: description?.trim()?.slice(0, 500) || null,
-      price: priceNum.toString(),
+      price: normalizedPrice,
       coin: coin.trim().slice(0, 20).toUpperCase(),
       imageUrl: imageUrl?.slice(0, 512) || null,
       category: category.trim().slice(0, 60),
@@ -234,8 +242,9 @@ menuRouter.put("/menus/:menuId/items/:itemId", requireApiKey as any, async (req:
     if (name !== undefined) updates.name = name.trim().slice(0, 120);
     if (description !== undefined) updates.description = description?.trim()?.slice(0, 500) || null;
     if (price !== undefined) {
-      const p = Number(price);
-      updates.price = p.toString();
+      const normalizedPrice = normalizePriceAmount(price);
+      if (!normalizedPrice) { res.status(400).json({ error: "Invalid price" }); return; }
+      updates.price = normalizedPrice;
     }
     if (coin !== undefined) updates.coin = coin.trim().slice(0, 20).toUpperCase();
     if (imageUrl !== undefined) updates.imageUrl = imageUrl?.slice(0, 512) || null;
@@ -279,7 +288,7 @@ menuRouter.patch("/menus/:menuId/items/coin", requireApiKey as any, async (req: 
     if (Number.isFinite(conversionRate) && conversionRate > 0) {
       const items = await db.select().from(menuItems).where(eq(menuItems.menuId, menuId));
       await Promise.all(items.map((item: any) => {
-        const nextPrice = (Number(item.price) * conversionRate).toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00");
+        const nextPrice = normalizePriceAmount((Number(item.price) * conversionRate).toFixed(6)) || "0.000001";
         return db.update(menuItems).set({ coin: targetCoin, price: nextPrice }).where(eq(menuItems.id, item.id));
       }));
       res.json({ success: true, coin: targetCoin, converted: true, rate: conversionRate });
@@ -312,7 +321,7 @@ menuRouter.post("/menus/:menuId/items/batch", requireApiKey as any, async (req: 
       menuId,
       name: String(item.name || "").trim().slice(0, 200),
       description: item.description ? String(item.description).trim().slice(0, 500) : null,
-      price: String(Number(item.price)),
+      price: normalizePriceAmount(item.price) || "0.000001",
       coin: String(item.coin).trim().slice(0, 20).toUpperCase(),
       imageUrl: null as string | null,
       category: String(item.category).trim().slice(0, 60),

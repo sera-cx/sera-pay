@@ -66,6 +66,20 @@ interface SeraRequestOptions {
   sensitiveResponse?: boolean;
 }
 
+export class SeraApiError extends Error {
+  status: number;
+  detail: unknown;
+  errorCode: string | null;
+
+  constructor(status: number, message: string, detail?: unknown, errorCode?: string | null) {
+    super(message);
+    this.name = "SeraApiError";
+    this.status = status;
+    this.detail = detail;
+    this.errorCode = errorCode ?? null;
+  }
+}
+
 export function normalizeSeraBaseUrl(value: string | null | undefined): string {
   const base = value?.trim() || DEFAULT_SERA_API_BASE_URL;
   return base.replace(/\/+$/, "");
@@ -98,6 +112,30 @@ function parseJson(text: string): unknown {
   } catch {
     return text;
   }
+}
+
+function objectMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const nested = record.detail;
+  const direct = record.error ?? record.error_code ?? record.message;
+  if (typeof direct === "string") return direct;
+  if (nested && nested !== value) return objectMessage(nested);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function objectErrorCode(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const direct = record.error_code ?? record.error ?? record.code;
+  if (typeof direct === "string") return direct;
+  if (record.detail && record.detail !== value) return objectErrorCode(record.detail);
+  return null;
 }
 
 function redactedPayload(label: "request" | "response") {
@@ -172,14 +210,18 @@ export async function callSeraApi<T>(options: SeraRequestOptions): Promise<T> {
     });
 
     if (!response.ok) {
-      const message = typeof parsed === "object" && parsed && "detail" in parsed
-        ? String((parsed as { detail: unknown }).detail)
-        : text || response.statusText;
-      throw new Error(`Sera API ${response.status}: ${message}`);
+      const detail = typeof parsed === "object" && parsed && "detail" in parsed
+        ? (parsed as { detail: unknown }).detail
+        : parsed;
+      const message = objectMessage(detail) || text || response.statusText;
+      throw new SeraApiError(response.status, `Sera API ${response.status}: ${message}`, detail, objectErrorCode(detail));
     }
 
     return parsed as T;
   } catch (error) {
+    if (error instanceof SeraApiError) {
+      throw error;
+    }
     const durationMs = Date.now() - startedAt;
     await writeSeraApiLog({
       merchantId: options.merchantId,

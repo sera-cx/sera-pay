@@ -571,17 +571,17 @@ export async function getPendingTransactions(): Promise<Transaction[]> {
   const pgPool = await getPostgresPool();
   if (pgPool) {
     const result = await pgPool.query(
-      `SELECT * FROM "transactions" WHERE "status" = 'pending' AND "verified" = 0 ORDER BY "createdAt" DESC LIMIT 100`,
+      `SELECT * FROM "transactions" WHERE "status" IN ('pending', 'confirming') AND "verified" = 0 ORDER BY "createdAt" DESC LIMIT 100`,
     );
     return result.rows as Transaction[];
   }
   const db = await getDb();
   if (!db) return Array.from(memory.transactions.values())
-    .filter((tx) => tx.status === "pending" && tx.verified === 0)
+    .filter((tx) => (tx.status === "pending" || tx.status === "confirming") && tx.verified === 0)
     .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
     .slice(0, 100);
   return db.select().from(transactions)
-    .where(and(eq(transactions.status, "pending"), eq(transactions.verified, 0)))
+    .where(and(or(eq(transactions.status, "pending"), eq(transactions.status, "confirming")), eq(transactions.verified, 0)))
     .orderBy(desc(transactions.createdAt))
     .limit(100);
 }

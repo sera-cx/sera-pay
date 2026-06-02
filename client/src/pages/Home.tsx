@@ -15,6 +15,7 @@ import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal } from "@/components/NetworkSwitcher";
 import { prepareImageForUpload } from "@/lib/imageUpload";
+import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 const SERAPAY_LOGO_URL = "/icon-512.png";
@@ -165,6 +166,7 @@ function StatusBadge({ status }: { status: string }) {
     confirmed: { bg: "#E8F8F0", text: "#00A855", label: "Successful" },
     confirming: { bg: "#FFF8E6", text: "#D4820A", label: "Processing" },
     pending:    { bg: "#F2F2F7", text: "#8E8E93", label: "Pending" },
+    canceled:   { bg: "#F2F2F7", text: "#8E8E93", label: "Canceled" },
     failed:     { bg: "#FFF0F0", text: "#FF3B30", label: "Failed" },
   };
   const s = colors[status] ?? colors.pending;
@@ -1209,10 +1211,10 @@ export default function Home() {
           // Recalculate the dependent field
           if (lastEdited === "receive" && amount) {
             const calc = (parseFloat(amount) * data.rate);
-            setCustomerAmount(isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6));
+            setCustomerAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));
           } else if (lastEdited === "pay" && customerAmount) {
             const calc = (parseFloat(customerAmount) / data.rate);
-            setAmount(isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6));
+            setAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));
           }
         }
       })
@@ -1293,11 +1295,12 @@ export default function Home() {
   const handleSwapCoins = useCallback(() => {
     if (!selectedCoin || !customerCoin) return;
     const receiveCoin = selectedCoin;
-    const receiveAmount = amount;
+    const receiveAmount = normalizeDecimalAmountText(amount);
+    const payAmount = normalizeDecimalAmountText(customerAmount);
     setSelectedCoin(customerCoin);
     setCustomerCoin(receiveCoin);
-    setAmount(customerAmount || receiveAmount);
-    setCustomerAmount(receiveAmount || customerAmount);
+    setAmount(payAmount || receiveAmount);
+    setCustomerAmount(receiveAmount || payAmount);
     setLastEdited("receive");
   }, [selectedCoin, customerCoin, amount, customerAmount]);
 
@@ -1605,16 +1608,18 @@ export default function Home() {
 
     const handleQrEditSave = () => {
       if (!qrEditAmount || isNaN(parseFloat(qrEditAmount))) { setQrEditMode(false); return; }
-      setAmount(qrEditAmount);
+      const safeAmount = normalizeDecimalAmountText(qrEditAmount);
+      if (!safeAmount) { setQrEditMode(false); return; }
+      setAmount(safeAmount);
       // Recalculate customer amount
-      let nextPayAmount = customerCoin?.symbol === selectedCoin?.symbol ? qrEditAmount : customerAmount;
+      let nextPayAmount = customerCoin?.symbol === selectedCoin?.symbol ? safeAmount : normalizeDecimalAmountText(customerAmount);
       if (exchangeRate && customerCoin && selectedCoin?.symbol !== customerCoin?.symbol) {
-        const calc = parseFloat(qrEditAmount) * exchangeRate;
-        nextPayAmount = isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6);
+        const calc = parseFloat(safeAmount) * exchangeRate;
+        nextPayAmount = isNaN(calc) ? "" : formatDecimalAmount(calc);
         setCustomerAmount(nextPayAmount);
       }
       // Rebuild payment URL
-      const newUrl = createPaymentUrl({ receiveAmount: qrEditAmount, payAmount: nextPayAmount });
+      const newUrl = createPaymentUrl({ receiveAmount: safeAmount, payAmount: nextPayAmount });
       setPaymentUrl(newUrl);
       setQrEditMode(false);
     };
@@ -1625,8 +1630,9 @@ export default function Home() {
       // Fetch new rate and rebuild URL
       if (!selectedCoin) return;
       if (coin.symbol === selectedCoin.symbol) {
-        setCustomerAmount(amount);
-        const newUrl = createPaymentUrl({ payCoin: coin, payAmount: amount });
+        const sameAmount = normalizeDecimalAmountText(amount);
+        setCustomerAmount(sameAmount);
+        const newUrl = createPaymentUrl({ payCoin: coin, payAmount: sameAmount });
         setPaymentUrl(newUrl);
         return;
       }
@@ -1636,7 +1642,7 @@ export default function Home() {
         .then(data => {
           if (data.rate) {
             const calc = parseFloat(amount) * data.rate;
-            const newPayAmount = isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6);
+            const newPayAmount = isNaN(calc) ? "" : formatDecimalAmount(calc);
             setExchangeRate(data.rate);
             setCustomerAmount(newPayAmount);
             const newUrl = createPaymentUrl({ payCoin: coin, payAmount: newPayAmount });
@@ -1863,15 +1869,15 @@ export default function Home() {
               <p style={{ fontSize: 16, fontWeight: 700, color: "#1C1C1E", margin: "0 0 16px" }}>Edit Receive Amount</p>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
                 <input
-                  type="number"
+                  type="text"
                   inputMode="decimal"
                   value={qrEditAmount}
                   onChange={e => {
-                    const nextAmount = e.target.value;
+                    const nextAmount = limitDecimalPlaces(e.target.value);
                     setQrEditAmount(nextAmount);
                     if (!nextAmount || isNaN(parseFloat(nextAmount))) return;
                     const nextPayAmount = exchangeRate && customerCoin && selectedCoin?.symbol !== customerCoin?.symbol
-                      ? (parseFloat(nextAmount) * exchangeRate).toFixed(parseFloat(nextAmount) * exchangeRate >= 1 ? 2 : 6)
+                      ? formatDecimalAmount(parseFloat(nextAmount) * exchangeRate)
                       : nextAmount;
                     const nextUrl = createPaymentUrl({ receiveAmount: nextAmount, payAmount: nextPayAmount });
                     if (nextUrl) setPaymentUrl(nextUrl);
@@ -1940,13 +1946,14 @@ export default function Home() {
                   .then(r => r.json())
                   .then(data => {
                     if (data.rate) {
-                      const calc = parseFloat(qrEditAmount || amount) * data.rate;
-                      const newPayAmount = isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6);
+                      const receiveAmount = normalizeDecimalAmountText(qrEditAmount || amount);
+                      const calc = parseFloat(receiveAmount) * data.rate;
+                      const newPayAmount = isNaN(calc) ? "" : formatDecimalAmount(calc);
                       setExchangeRate(data.rate);
                       setCustomerAmount(newPayAmount);
                       const newUrl = createPaymentUrl({
                         receiveCoin: coin,
-                        receiveAmount: qrEditAmount || amount,
+                        receiveAmount,
                         payCoin: customerCoin,
                         payAmount: newPayAmount,
                       });
@@ -1958,9 +1965,9 @@ export default function Home() {
                 // Same coin — rebuild URL with new receive coin
                 const newUrl = createPaymentUrl({
                   receiveCoin: coin,
-                  receiveAmount: qrEditAmount || amount,
+                  receiveAmount: normalizeDecimalAmountText(qrEditAmount || amount),
                   payCoin: coin,
-                  payAmount: qrEditAmount || amount,
+                  payAmount: normalizeDecimalAmountText(qrEditAmount || amount),
                 });
                 setPaymentUrl(newUrl);
               }
@@ -2041,16 +2048,16 @@ export default function Home() {
             </button>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, padding: "0 16px" }}>
               <input
-                type="number" min="0" step="any"
+                type="text"
                 inputMode="decimal"
                 value={amount}
                 onChange={e => {
-                  const val = e.target.value;
+                  const val = limitDecimalPlaces(e.target.value);
                   setAmount(val);
                   setLastEdited("receive");
                   if (exchangeRate && val) {
                     const calc = parseFloat(val) * exchangeRate;
-                    setCustomerAmount(isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6));
+                    setCustomerAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));
                   } else if (!val) {
                     setCustomerAmount("");
                   }
@@ -2142,16 +2149,16 @@ export default function Home() {
                 </div>
               ) : (
                 <input
-                  type="number" min="0" step="any"
+                  type="text"
                   inputMode="decimal"
                   value={customerAmount}
                   onChange={e => {
-                    const val = e.target.value;
+                    const val = limitDecimalPlaces(e.target.value);
                     setCustomerAmount(val);
                     setLastEdited("pay");
                     if (exchangeRate && val) {
                       const calc = parseFloat(val) / exchangeRate;
-                      setAmount(isNaN(calc) ? "" : calc.toFixed(calc >= 1 ? 2 : 6));
+                      setAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));
                     } else if (!val) {
                       setAmount("");
                     }

@@ -24,6 +24,7 @@ import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/cu
 import { CurrencySelectModal } from "@/components/CurrencySelectModal";
 import { QRStyled, buildQrOptions, type QrStyle } from "@/components/QRStyled";
 import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
+import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 
 // Build a name→category lookup from all templates for backfill
 const TEMPLATE_CATEGORY_MAP: Record<string, string> = {};
@@ -232,8 +233,8 @@ type CropSource = {
 function validateItemForm(data: { name: string; price: string; coin: string; category?: string }) {
   if (!data.name.trim()) return "Item name is required";
   if (!data.category?.trim()) return "Category is required";
-  const price = Number(data.price);
-  if (!data.price.trim() || !Number.isFinite(price) || price <= 0) return "Price must be greater than 0";
+  const price = normalizeDecimalAmountText(data.price);
+  if (!price) return "Price must be greater than 0";
   if (!data.coin.trim()) return "Coin is required";
   return "";
 }
@@ -429,7 +430,7 @@ function ItemEditDialog({
     onSave({
       name: name.trim(),
       description: description.trim(),
-      price: price.trim(),
+      price: normalizeDecimalAmountText(price),
       coin,
       imageUrl: imageUrl || undefined,
       category: category.trim(),
@@ -488,7 +489,7 @@ function ItemEditDialog({
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
-              <Input value={price} onChange={e => { setPrice(e.target.value); setError(""); }} placeholder="0.00" type="number" min="0.01" step="0.01" />
+              <Input value={price} onChange={e => { setPrice(limitDecimalPlaces(e.target.value)); setError(""); }} placeholder="0.00" type="text" inputMode="decimal" />
             </div>
             <div className="w-32">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
@@ -561,7 +562,7 @@ function AddItemDialog({
       setError(validation);
       return;
     }
-    onSave({ name: name.trim(), description: description.trim(), price: price.trim(), coin, category: category.trim() });
+    onSave({ name: name.trim(), description: description.trim(), price: normalizeDecimalAmountText(price), coin, category: category.trim() });
   };
 
   return (
@@ -588,7 +589,7 @@ function AddItemDialog({
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
-              <Input value={price} onChange={e => { setPrice(e.target.value); setError(""); }} placeholder="0.00" type="number" min="0.01" step="0.01" />
+              <Input value={price} onChange={e => { setPrice(limitDecimalPlaces(e.target.value)); setError(""); }} placeholder="0.00" type="text" inputMode="decimal" />
             </div>
             <div className="w-32">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
@@ -1134,7 +1135,7 @@ function POSView({
         method: "PATCH",
         body: JSON.stringify({ coin: toCoin, rate }),
       });
-      setItems(prev => prev.map(i => ({ ...i, coin: toCoin, price: (Number(i.price) * rate).toFixed(6).replace(/0+$/, "").replace(/\.$/, ".00") })));
+      setItems(prev => prev.map(i => ({ ...i, coin: toCoin, price: formatDecimalAmount(Number(i.price) * rate) || "0.000001" })));
       setBulkCoinOpen(false);
       toast.success(`Prices converted from ${fromCoin} to ${toCoin}`);
     } catch (e: any) {

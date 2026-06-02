@@ -21,7 +21,7 @@ export const coinSymbolSchema = z
 export const amountStringSchema = z
   .string()
   .trim()
-  .regex(/^\d+(\.\d+)?$/, "Expected a positive decimal amount")
+  .regex(/^\d+(\.\d{1,6})?$/, "Expected a positive decimal amount with max 6 decimals")
   .refine((value) => Number(value) > 0, "Amount must be greater than zero");
 
 export const seraApiConfigInputSchema = z.object({

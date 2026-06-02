@@ -33,6 +33,7 @@ import { decryptSecret, encryptSecret, isSecretEncryptionReady, maskSecret } fro
 import {
   DEFAULT_SERA_API_BASE_URL,
   DEFAULT_SERA_API_TESTNET_BASE_URL,
+  SeraApiError,
   callSeraApi,
   getSeraFxRate,
   getSeraMarkets,
@@ -53,6 +54,48 @@ function validationError(res: any, error: unknown) {
     return true;
   }
   return false;
+}
+
+function seraGatewayErrorResponse(error: unknown, fallback: string) {
+  if (error instanceof SeraApiError) {
+    const code = error.errorCode;
+    const detail = error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
+    const humanDetail = typeof detail?.detail === "string"
+      ? detail.detail
+      : typeof detail?.message === "string"
+        ? detail.message
+        : null;
+    const isQuoteStale = error.status === 409
+      || error.status === 410
+      || code === "QUOTE_STALE"
+      || code === "quote_stale";
+    const isUnavailable = error.status >= 500;
+    const message = code === "no_liquidity" || code === "NO_LIQUIDITY"
+      ? "Currently there is no liquidity for this transaction. Please try a different payment coin."
+      : isQuoteStale
+        ? "This quote closed before it could be submitted. Please try again."
+      : isUnavailable
+        ? "Sera is temporarily unavailable. Please try again shortly."
+        : humanDetail || error.message;
+    return {
+      status: error.status >= 400 && error.status < 500 ? error.status : 502,
+      body: {
+        error: message,
+        errorCode: isQuoteStale ? "quote_stale" : code ?? (isUnavailable ? "sera_connection_error" : null),
+        seraStatus: error.status,
+        detail: error.detail,
+      },
+    };
+  }
+  const detail = error instanceof Error ? error.message : fallback;
+  return {
+    status: 502,
+    body: {
+      error: "Unable to reach Sera right now. Please try again shortly.",
+      errorCode: "sera_connection_error",
+      detail,
+    },
+  };
 }
 
 function getPublicBaseUrl(req: any): string {
@@ -273,7 +316,8 @@ gatewayRouter.post("/sera/swap/quote", requireApiKey as any, async (req: any, re
       },
     });
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera swap quote" });
+    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera swap quote");
+    res.status(response.status).json(response.body);
   }
 });
 
@@ -373,7 +417,9 @@ gatewayRouter.post("/compliance/screen-address", requireApiKey as any, async (re
 });
 
 function toRawTokenAmount(amount: string, decimals: number): string {
-  const [whole, fraction = ""] = amount.split(".");
+  const normalized = amount.replace(/,/g, "").trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(normalized)) throw new Error("Invalid amount. Max 6 decimals.");
+  const [whole, fraction = ""] = normalized.split(".");
   const normalizedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
   const raw = `${whole}${normalizedFraction}`.replace(/^0+(?=\d)/, "");
   return raw || "0";

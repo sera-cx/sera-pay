@@ -8,6 +8,7 @@ import { MENU_TEMPLATES, SCRATCH_TEMPLATE } from "@/lib/menuTemplates";
 import { fetchApi } from "@/lib/api";
 import { STABLECOINS } from "@/lib/stablecoins";
 import { AdvancedSelect } from "@/components/AdvancedSelect";
+import { limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 
 interface EditableItem {
   name: string;
@@ -40,13 +41,13 @@ export default function MenuCreatePage() {
   const addItem = () => setItems(prev => [...prev, { name: "", description: "", category: "", price: "", coin: "USDC" }]);
   const removeItem = (idx: number) => setItems(prev => prev.filter((_, i) => i !== idx));
   const updateItem = (idx: number, field: keyof EditableItem, value: string) => {
-    setItems(prev => prev.map((item, i) => i === idx ? { ...item, [field]: value } : item));
+    setItems(prev => prev.map((item, i) => i === idx ? { ...item, [field]: field === "price" ? limitDecimalPlaces(value) : value } : item));
   };
 
   const handleCreate = async () => {
     if (!menuName.trim()) { setError("Menu name is required"); return; }
     if (items.length === 0) { setError("Add at least one item"); return; }
-    const invalidIndex = items.findIndex(i => !i.name.trim() || !i.category.trim() || !i.coin.trim() || !i.price.trim() || !Number.isFinite(Number(i.price)) || Number(i.price) <= 0);
+    const invalidIndex = items.findIndex(i => !i.name.trim() || !i.category.trim() || !i.coin.trim() || !normalizeDecimalAmountText(i.price));
     if (invalidIndex >= 0) {
       setError(`Item ${invalidIndex + 1} needs a name, category, price greater than 0, and coin`);
       return;
@@ -55,7 +56,7 @@ export default function MenuCreatePage() {
       name: i.name.trim(),
       description: i.description.trim(),
       category: i.category.trim(),
-      price: i.price.trim(),
+      price: normalizeDecimalAmountText(i.price),
       coin: i.coin.trim(),
     }));
     setSaving(true);
@@ -183,7 +184,7 @@ export default function MenuCreatePage() {
                         value={item.price}
                         onChange={e => updateItem(idx, "price", e.target.value)}
                         placeholder="0.00"
-                        type="number"
+                        type="text"
                         min="0.01"
                         step="0.01"
                         className="w-28 font-mono"

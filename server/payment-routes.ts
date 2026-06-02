@@ -35,6 +35,7 @@ import { isR2StorageConfigured, storagePut, storageRead } from "./storage";
 import {
   DEFAULT_SERA_API_BASE_URL,
   DEFAULT_SERA_API_TESTNET_BASE_URL,
+  SeraApiError,
   callSeraApi,
   getSeraTokens,
   normalizeSeraBaseUrl,
@@ -788,7 +789,7 @@ paymentRouter.patch("/merchant/transactions/:id/cancel", requireApiKey as any, a
 
 function toRawTokenAmount(amount: string, decimals: number): string {
   const normalized = amount.replace(/,/g, "").trim();
-  if (!/^\d+(\.\d+)?$/.test(normalized)) throw new Error("Invalid amount");
+  if (!/^\d+(\.\d{1,6})?$/.test(normalized)) throw new Error("Invalid amount. Max 6 decimals.");
   const [whole, fraction = ""] = normalized.split(".");
   const raw = `${whole}${fraction.padEnd(decimals, "0").slice(0, decimals)}`.replace(/^0+(?=\d)/, "");
   return raw || "0";
@@ -806,10 +807,10 @@ function fromRawTokenAmount(raw: string | number | bigint, decimals: number): st
 
 function normalizeDecimalAmount(amount: unknown): string {
   const value = String(amount ?? "").replace(/,/g, "").trim();
-  if (!/^\d+(\.\d+)?$/.test(value) || Number(value) <= 0) {
-    throw new Error("Invalid amount");
+  if (!/^\d+(\.\d{1,6})?$/.test(value) || Number(value) <= 0) {
+    throw new Error("Invalid amount. Max 6 decimals.");
   }
-  return value;
+  return value.replace(/^0+(?=\d)/, "");
 }
 
 async function resolvePaymentMerchant(merchantAddress: string) {
@@ -891,6 +892,16 @@ function orderIdFromTransactionNotes(notes: string | null | undefined): string |
   return transactionNotesMeta(notes).orderId;
 }
 
+function transactionFailureReason(notes: string | null | undefined): string | null {
+  if (!notes) return null;
+  try {
+    const parsed = JSON.parse(notes) as { failureReason?: unknown; cancellationReason?: unknown };
+    if (typeof parsed.failureReason === "string" && parsed.failureReason) return parsed.failureReason;
+    if (typeof parsed.cancellationReason === "string" && parsed.cancellationReason) return parsed.cancellationReason;
+  } catch {}
+  return null;
+}
+
 function notesWithCancellationReason(notes: string | null | undefined, reason: string): string {
   const canceledAt = new Date().toISOString();
   if (!notes) return JSON.stringify({ canceledAt, cancellationReason: reason });
@@ -899,6 +910,17 @@ function notesWithCancellationReason(notes: string | null | undefined, reason: s
     return JSON.stringify({ ...parsed, canceledAt, cancellationReason: reason });
   } catch {
     return `${notes}\n${reason} (${canceledAt})`;
+  }
+}
+
+function notesWithFailureReason(notes: string | null | undefined, reason: string): string {
+  const failedAt = new Date().toISOString();
+  if (!notes) return JSON.stringify({ failedAt, failureReason: reason });
+  try {
+    const parsed = JSON.parse(notes) as Record<string, unknown>;
+    return JSON.stringify({ ...parsed, failedAt, failureReason: reason });
+  } catch {
+    return `${notes}\n${reason} (${failedAt})`;
   }
 }
 
@@ -928,6 +950,32 @@ async function cancelTransactionRecord(tx: Transaction, reason: string, event: "
   return true;
 }
 
+async function failTransactionRecord(tx: Transaction, reason: string) {
+  if (tx.status !== "pending" && tx.status !== "confirming") return false;
+  const meta = transactionNotesMeta(tx.notes);
+  await updateTransaction(tx.id, {
+    status: "failed",
+    memo: tx.memo || reason.slice(0, 200),
+    notes: notesWithFailureReason(tx.notes, reason),
+  });
+  if (meta.orderId) {
+    await updateMenuOrderPayment(meta.orderId, tx.merchantId, { status: "failed", paymentId: tx.id, transactionId: tx.id }).catch(() => undefined);
+  }
+  if (meta.paymentIntentId) {
+    await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
+  }
+  notifySseClients(tx.id, { status: "failed", reason });
+  notifyMerchantSse(tx.merchantId, {
+    event: "payment_failed",
+    transactionId: tx.id,
+    status: "failed",
+    amount: tx.amount,
+    coin: tx.coin,
+    reason,
+  });
+  return true;
+}
+
 async function cancelStaleMerchantTransactions(merchantId: string, transactions?: Transaction[]) {
   const txs = transactions ?? await getMerchantTransactions(merchantId, 1000);
   const cutoff = Date.now() - PENDING_TRANSACTION_CANCEL_AFTER_MS;
@@ -940,6 +988,48 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
     }
   }
   return canceled;
+}
+
+function seraPaymentErrorResponse(error: unknown, fallback: string) {
+  if (error instanceof SeraApiError) {
+    const detail = error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
+    const humanDetail = typeof detail?.detail === "string"
+      ? detail.detail
+      : typeof detail?.message === "string"
+        ? detail.message
+        : null;
+    const code = error.errorCode;
+    const isQuoteStale = error.status === 409
+      || error.status === 410
+      || code === "QUOTE_STALE"
+      || code === "quote_stale";
+    const isUnavailable = error.status >= 500;
+    const message = code === "no_liquidity" || code === "NO_LIQUIDITY"
+      ? "Currently there is no liquidity for this transaction. Please try a different payment coin."
+      : isQuoteStale
+        ? "This quote closed before it could be submitted. Please try again."
+      : isUnavailable
+        ? "Sera is temporarily unavailable. Please try again shortly."
+        : humanDetail || error.message;
+    return {
+      status: error.status >= 400 && error.status < 500 ? error.status : 502,
+      body: {
+        error: message,
+        errorCode: isQuoteStale ? "quote_stale" : code ?? (isUnavailable ? "sera_connection_error" : null),
+        seraStatus: error.status,
+        detail: error.detail,
+      },
+    };
+  }
+  const detail = error instanceof Error ? error.message : fallback;
+  return {
+    status: 502,
+    body: {
+      error: "Unable to reach Sera right now. Please try again shortly.",
+      errorCode: "sera_connection_error",
+      detail,
+    },
+  };
 }
 
 async function cancelAllStalePendingTransactions() {
@@ -969,7 +1059,14 @@ paymentRouter.post("/payment/create", async (req, res) => {
     const paymentUrl = typeof req.body.paymentUrl === "string" && req.body.paymentUrl.length <= 4096 ? req.body.paymentUrl : null;
     if (!merchantAddress || !/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     if (!coin || !VALID_COINS.has(coin)) { res.status(400).json({ error: "Invalid coin" }); return; }
-    const parsedAmount = parseFloat(amount);
+    let normalizedAmount = "";
+    try {
+      normalizedAmount = normalizeDecimalAmount(amount);
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || "Invalid amount" });
+      return;
+    }
+    const parsedAmount = parseFloat(normalizedAmount);
     if (isNaN(parsedAmount) || parsedAmount <= 0 || parsedAmount > 1_000_000) { res.status(400).json({ error: "Invalid amount" }); return; }
     const normalizedMerchantAddress = merchantAddress.toLowerCase();
     const merchantAddressCompliance = await screenWalletAddress(normalizedMerchantAddress, "recipient_wallet");
@@ -996,7 +1093,7 @@ paymentRouter.post("/payment/create", async (req, res) => {
       merchantId: merchant.id,
       toAddress,
       coin,
-      amount: parsedAmount.toString(),
+      amount: normalizedAmount,
       chainId: resolvedChainId,
       status: "pending",
       verified: 0,
@@ -1005,7 +1102,7 @@ paymentRouter.post("/payment/create", async (req, res) => {
     if (orderId) {
       await updateMenuOrderPayment(orderId, merchant.id, { paymentId: id, transactionId: id, status: "payment_pending" }).catch(() => undefined);
     }
-    res.json({ txId: id, toAddress, coin, amount: parsedAmount.toString(), chainId: resolvedChainId });
+    res.json({ txId: id, toAddress, coin, amount: normalizedAmount, chainId: resolvedChainId });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
 });
 
@@ -1016,12 +1113,24 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     const payerAddress = String(req.body.payerAddress ?? "").trim().toLowerCase();
     const payCoin = String(req.body.payCoin ?? "").trim().toUpperCase();
     const receiveCoin = String(req.body.receiveCoin ?? "").trim().toUpperCase();
-    const payAmount = normalizeDecimalAmount(req.body.payAmount);
-    const requestedReceiveAmount = req.body.receiveAmount ? normalizeDecimalAmount(req.body.receiveAmount) : null;
+    let payAmount = "";
+    let requestedReceiveAmount: string | null = null;
+    try {
+      payAmount = normalizeDecimalAmount(req.body.payAmount);
+      requestedReceiveAmount = req.body.receiveAmount ? normalizeDecimalAmount(req.body.receiveAmount) : null;
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || "Invalid amount" });
+      return;
+    }
     const requestedChainId = Number(req.body.chainId ?? 1);
     const chainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : 1;
     const paymentIntentId = typeof req.body.paymentIntentId === "string" ? req.body.paymentIntentId : null;
     const orderId = typeof req.body.orderId === "string" ? req.body.orderId : null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const requestedExpiration = Number(req.body.expiration);
+    const expiration = Number.isInteger(requestedExpiration) && requestedExpiration > nowSec + 15
+      ? Math.min(requestedExpiration, nowSec + 300)
+      : nowSec + 300;
 
     if (!/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     if (!/^0x[0-9a-fA-F]{40}$/.test(payerAddress)) { res.status(400).json({ error: "Invalid payerAddress" }); return; }
@@ -1049,7 +1158,6 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     ]);
     if (!config.eip712_domain) throw new Error("Sera /config did not return eip712_domain");
 
-    const expiration = Math.floor(Date.now() / 1000) + 900;
     const quoteRequest = {
       from_token: fromToken.address,
       to_token: toToken.address,
@@ -1126,12 +1234,14 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     });
   } catch (e: any) {
     console.error("[payment/swap/quote]", e?.message || e);
-    res.status(502).json({ error: e?.message || "Unable to create Sera swap quote" });
+    const response = seraPaymentErrorResponse(e, "Unable to create Sera swap quote");
+    res.status(response.status).json(response.body);
   }
 });
 
 /** POST /api/payment/swap/submit - submit signed Sera swap intent */
 paymentRouter.post("/payment/swap/submit", async (req, res) => {
+  let txForFailure: Transaction | undefined;
   try {
     const txId = String(req.body.txId ?? "").trim();
     const quoteUuid = String(req.body.quoteUuid ?? req.body.uuid ?? "").trim();
@@ -1154,6 +1264,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
     if (tx.status === "canceled") { res.status(409).json({ error: "Transaction was canceled" }); return; }
     if (tx.status === "confirmed") { res.json({ success: true, status: "confirmed" }); return; }
+    txForFailure = tx;
 
     const body: Record<string, unknown> = {
       uuid: quoteUuid,
@@ -1254,7 +1365,13 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     res.json({ success: true, status: "confirmed", txHash, sera: result });
   } catch (e: any) {
     console.error("[payment/swap/submit]", e?.message || e);
-    res.status(502).json({ error: e?.message || "Unable to submit Sera swap" });
+    if (txForFailure) {
+      await failTransactionRecord(txForFailure, e?.message || "Sera swap submit failed").catch((failError) => {
+        console.error("[payment/swap/submit] failed to update transaction status", failError);
+      });
+    }
+    const response = seraPaymentErrorResponse(e, "Unable to submit Sera swap");
+    res.status(response.status).json(response.body);
   }
 });
 
@@ -1316,6 +1433,8 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
       amount: tx.amount,
       toAddress: tx.toAddress,
       fromAddress: tx.fromAddress,
+      memo: tx.memo || null,
+      failureReason: transactionFailureReason(tx.notes) || tx.memo || null,
       createdAt: tx.createdAt,
       chainId: tx.chainId ?? 11155111,
       merchantName: merchant?.name || null,
