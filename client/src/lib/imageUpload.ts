@@ -3,6 +3,17 @@ export const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 export const MAX_RENDERED_IMAGE_BYTES = 5 * 1024 * 1024;
 
+type UploadImageMime = "image/jpeg" | "image/png" | "image/webp";
+
+function getDataUrlMimeType(dataUrl: string): UploadImageMime | null {
+  const match = dataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,/i);
+  return match ? (match[1].toLowerCase() as UploadImageMime) : null;
+}
+
+function preservesTransparency(mimeType: string | null | undefined) {
+  return mimeType === "image/png" || mimeType === "image/webp";
+}
+
 export type PreparedImage = {
   dataUrl: string;
   width: number;
@@ -54,8 +65,13 @@ export async function prepareImageForUpload(file: File, options: { maxDimension?
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Unable to prepare image");
   context.imageSmoothingQuality = "high";
+  if (!preservesTransparency(file.type)) {
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+  }
   context.drawImage(image, 0, 0, width, height);
-  const dataUrl = canvas.toDataURL("image/jpeg", options.quality ?? 0.86);
+  const outputType = preservesTransparency(file.type) ? (file.type as UploadImageMime) : "image/jpeg";
+  const dataUrl = canvas.toDataURL(outputType, options.quality ?? 0.86);
 
   return {
     dataUrl,
@@ -89,15 +105,28 @@ export async function renderCroppedImageForUpload({
   if (!context) throw new Error("Unable to prepare image");
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, outputWidth, outputHeight);
+  const sourceMimeType = getDataUrlMimeType(source);
+  const shouldPreserveTransparency = preservesTransparency(sourceMimeType);
+  if (!shouldPreserveTransparency) {
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, outputWidth, outputHeight);
+  }
   context.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, outputWidth, outputHeight);
 
   let nextQuality = quality;
-  let dataUrl = canvas.toDataURL("image/jpeg", nextQuality);
-  while (dataUrlBytes(dataUrl) > maxBytes && nextQuality > 0.62) {
+  let outputType: UploadImageMime = shouldPreserveTransparency && sourceMimeType ? sourceMimeType : "image/jpeg";
+  let dataUrl = canvas.toDataURL(outputType, nextQuality);
+  if (shouldPreserveTransparency && outputType === "image/png" && dataUrlBytes(dataUrl) > maxBytes) {
+    outputType = "image/webp";
+    nextQuality = quality;
+    dataUrl = canvas.toDataURL(outputType, nextQuality);
+  }
+  while ((outputType === "image/jpeg" || outputType === "image/webp") && dataUrlBytes(dataUrl) > maxBytes && nextQuality > 0.62) {
     nextQuality -= 0.06;
-    dataUrl = canvas.toDataURL("image/jpeg", nextQuality);
+    dataUrl = canvas.toDataURL(outputType, nextQuality);
+  }
+  if (dataUrlBytes(dataUrl) > maxBytes) {
+    throw new Error("Image must be smaller after cropping. Try zooming in or using a smaller image.");
   }
 
   return {

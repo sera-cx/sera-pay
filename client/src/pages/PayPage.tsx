@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "wouter";
-import { usePrivy, useWallets } from "@privy-io/react-auth";
+import { useLoginWithOAuth, usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
-import { ChevronRight, Chrome, MoreHorizontal, Network, Wallet } from "lucide-react";
+import { ChevronRight, MoreHorizontal, Wallet } from "lucide-react";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
 import { decodePaymentRequest } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
@@ -201,6 +201,30 @@ const CHAIN_NAMES: Record<number, string> = {
   1: "Ethereum", 137: "Polygon", 8453: "Base", 42161: "Arbitrum", 11155111: "Sepolia",
 };
 
+function HeaderNetworkBadge({ isTestnet }: { isTestnet: boolean }) {
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6,
+      height: 30,
+      padding: "0 10px",
+      borderRadius: 999,
+      border: "1px solid rgba(10,31,26,0.08)",
+      background: "#fff",
+      color: "rgba(10,31,26,0.72)",
+      fontSize: 11,
+      fontWeight: 750,
+      whiteSpace: "nowrap",
+      flexShrink: 0,
+      boxShadow: "0 1px 8px rgba(10,31,26,0.04)",
+    }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: isTestnet ? "#FFB020" : "#00C896" }} />
+      Network: {isTestnet ? "Testnet" : "Live"}
+    </span>
+  );
+}
+
 const CHAIN_METADATA: Record<number, {
   chainId: string;
   chainName: string;
@@ -292,6 +316,9 @@ function paymentFailureMessage(error: any): string {
   }
   if (/wallet_addEthereumChain|wallet_switchEthereumChain|unrecognized chain|unsupported chain/i.test(message)) {
     return "Please add or switch to the payment network in your wallet, then try again.";
+  }
+  if (/string did not match the expected pattern|Load failed|URI malformed|invalid url|Failed to construct 'URL'/i.test(message)) {
+    return "Your wallet browser could not open this payment request. Please try Connect with existing wallets, or open the browser payment QR.";
   }
   if (error?.errorCode === "no_liquidity" || /no liquidity|No liquidity is available/i.test(message)) {
     return "Currently there is no liquidity for this transaction. Please try a different payment coin.";
@@ -546,6 +573,7 @@ type PaymentLoginMethod = "wallet" | "google" | "email" | "telegram";
 export default function PayPage() {
   const { encoded } = useParams<{ encoded: string }>();
   const { ready, authenticated, login } = usePrivy();
+  const { initOAuth } = useLoginWithOAuth();
   const { wallets } = useWallets();
   const isConnected = authenticated;
 
@@ -969,8 +997,10 @@ export default function PayPage() {
   }, [login]);
 
   const handleConnectWallet = useCallback(() => openPrivyLogin(["wallet"]), [openPrivyLogin]);
-  const handleGoogleLogin = useCallback(() => openPrivyLogin(["google"]), [openPrivyLogin]);
-  const handleOtherLogin = useCallback(() => openPrivyLogin(["wallet", "email", "google", "telegram"]), [openPrivyLogin]);
+  const handleGoogleLogin = useCallback(() => {
+    void initOAuth({ provider: "google" });
+  }, [initOAuth]);
+  const handleOtherLogin = useCallback(() => openPrivyLogin(["email", "google", "telegram"]), [openPrivyLogin]);
 
   const handlePay = useCallback(async () => {
     if (!req || !selectedCoin || !payAmount) return;
@@ -1343,7 +1373,6 @@ export default function PayPage() {
   const isSameCoin = selectedCoin?.symbol === req?.receiveCoin;
   const hasOrderItems = !!req?.orderItems?.length;
   const showCountdown = !!rateExpiry && !!selectedCoin && (hasOrderItems || (!isSameCoin && !!req?.amount));
-  const paymentNetworkName = CHAIN_NAMES[chainId] || "Ethereum";
   const isPaymentTestnet = chainId === 11155111;
   const payOptionStyle: React.CSSProperties = {
     width: "100%",
@@ -1363,8 +1392,9 @@ export default function PayPage() {
     <div dir={isRTL ? "rtl" : "ltr"} lang={locale} style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
       {/* Header */}
       <SeraPayHeader
-        maxWidth={480}
+        maxWidth={1240}
         compact
+        afterLogoContent={<HeaderNetworkBadge isTestnet={isPaymentTestnet} />}
         walletAddress={wallets[0]?.address || ""}
       />
 
@@ -1563,43 +1593,32 @@ export default function PayPage() {
         {phase === "connect" && (
           <div style={{ background: "#fff", borderRadius: 20, padding: "24px", boxShadow: "0 1px 8px rgba(0,0,0,0.07)" }}>
             <h3 style={{ fontSize: 16, fontWeight: 700, color: "#1C1C1E", margin: "0 0 8px" }}>Pay with</h3>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 14, background: isPaymentTestnet ? "#FFF8E6" : "#F4FBF8", border: `1px solid ${isPaymentTestnet ? "#F3D88B" : "rgba(78,206,154,0.22)"}`, padding: "10px 12px", marginBottom: 14 }}>
-              <Network size={18} color={isPaymentTestnet ? "#B7791F" : "#00A87A"} />
-              <div style={{ flex: 1 }}>
-                <p style={{ fontSize: 12, color: "rgba(60,60,67,0.5)", margin: "0 0 2px", fontWeight: 600 }}>Network</p>
-                <p style={{ fontSize: 14, color: "#1C1C1E", margin: 0, fontWeight: 750 }}>{paymentNetworkName}</p>
-              </div>
-              <span style={{ borderRadius: 999, background: "#fff", color: isPaymentTestnet ? "#B7791F" : "#00A87A", padding: "4px 8px", fontSize: 11, fontWeight: 750 }}>{isPaymentTestnet ? "Test" : "Live"}</span>
-            </div>
             <div style={{ display: "grid", gap: 10 }}>
               <button onClick={handleConnectWallet} style={{ ...payOptionStyle, borderColor: "rgba(0,168,122,0.28)", background: "#F4FBF8" }}>
                 <span style={{ width: 36, height: 36, borderRadius: 12, background: "#E6FAF5", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><Wallet size={18} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Continue with wallet address</span>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Connect with existing wallets</span>
                   <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Use an EVM wallet to sign and pay</span>
                 </span>
                 <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
               </button>
               <button onClick={handleGoogleLogin} style={payOptionStyle}>
-                <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F8FAFC", color: "#4285F4", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><Chrome size={18} /></span>
+                <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F4FBF8", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto", overflow: "hidden" }}><img src="/apple-icon-180x180.png" alt="" style={{ width: 28, height: 28, borderRadius: "50%", display: "block" }} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Login using Google</span>
-                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Privy creates a payment wallet when needed</span>
+                  <img src="/sera-logo.svg" alt="Sera.cx" style={{ display: "block", height: 14, width: 82, objectFit: "contain", objectPosition: "left center" }} />
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Continue with SeraPay sign-in</span>
                 </span>
                 <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
               </button>
               <button onClick={handleOtherLogin} style={payOptionStyle}>
                 <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F9F9FB", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><MoreHorizontal size={18} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Choose other wallet</span>
-                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>MetaMask, OKX, Trust Wallet, email, Telegram</span>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Other socials</span>
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Email, Google and Telegram</span>
                 </span>
                 <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
               </button>
             </div>
-            <button onClick={handleOtherLogin} style={{ width: "100%", marginTop: 12, height: 44, borderRadius: 14, border: "none", background: "transparent", color: "rgba(60,60,67,0.48)", fontSize: 12, fontWeight: 650, cursor: "pointer" }}>
-              More login options
-            </button>
             {req?.menuSlug ? (
               <a href={`/menu/${req.menuSlug}?chainId=${chainId}`} style={{ display: "block", marginTop: 12, textAlign: "center", color: "#FF3B30", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
                 Back to menu

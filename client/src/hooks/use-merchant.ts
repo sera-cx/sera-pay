@@ -12,6 +12,7 @@ export interface MerchantProfile {
   qrFgColor: string | null;
   qrBgColor: string | null;
   qrStyle: string | null;
+  qrMode: string | null;
   receiveCoin: string | null;
   storeAddress: string | null;
   createdAt: string;
@@ -55,6 +56,7 @@ export function useUpdateProfile() {
       qrFgColor?: string | null;
       qrBgColor?: string | null;
       qrStyle?: string | null;
+      qrMode?: string | null;
       receiveCoin?: string | null;
       storeAddress?: string | null;
     }) =>

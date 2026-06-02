@@ -5,10 +5,11 @@
 import { Router, Request, Response } from "express";
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
-import { createPublicClient, http, webSocket, parseAbi, decodeEventLog, keccak256, toHex, encodeAbiParameters, parseAbiParameters, verifyMessage } from "viem";
+import { createPublicClient, http, webSocket, parseAbi, parseAbiItem, decodeEventLog, keccak256, toHex, encodeAbiParameters, parseAbiParameters, verifyMessage } from "viem";
 import { sepolia, mainnet, polygon, base, arbitrum } from "viem/chains";
 import {
   getMerchantByWallet,
+  getMerchantByStoreAddress,
   getMerchantByApiKey,
   getMerchantById,
   createMerchant,
@@ -120,6 +121,7 @@ const VALID_COINS = new Set([
   // Other
   "ARC", "MYRT", "TRYB", "PHPC", "HKDR", "CNHT", "ARZ", "CNGN", "A7A5",
 ]);
+const VALID_QR_MODES = new Set(["standard", "advanced"]);
 
 type SeraRouteParams = {
   taker: string;
@@ -350,6 +352,7 @@ paymentRouter.get("/merchant/public/:address?", async (req, res) => {
       qrFgColor: merchant.qrFgColor,
       qrBgColor: merchant.qrBgColor,
       qrStyle: merchant.qrStyle,
+      qrMode: (merchant as any).qrMode || "standard",
     });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
 });
@@ -358,7 +361,7 @@ paymentRouter.get("/merchant/public/:address?", async (req, res) => {
 paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, res) => {
   try {
     const merchant = req.merchant;
-    const { name, description, receiveCoin, logoData, webhookUrl, webhookSecret, storeAddress, qrFgColor, qrBgColor, qrStyle } = req.body;
+    const { name, description, receiveCoin, logoData, webhookUrl, webhookSecret, storeAddress, qrFgColor, qrBgColor, qrStyle, qrMode } = req.body;
     const updates: Record<string, any> = {};
     if (name !== undefined) {
       if (typeof name !== "string" || name.trim().length < 1 || name.length > 120) { res.status(400).json({ error: "Invalid name" }); return; }
@@ -400,6 +403,10 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
     if (qrFgColor !== undefined) updates.qrFgColor = qrFgColor?.slice(0, 9) || null;
     if (qrBgColor !== undefined) updates.qrBgColor = qrBgColor?.slice(0, 9) || null;
     if (qrStyle !== undefined) updates.qrStyle = qrStyle?.slice(0, 20) || null;
+    if (qrMode !== undefined) {
+      if (qrMode !== null && (typeof qrMode !== "string" || !VALID_QR_MODES.has(qrMode))) { res.status(400).json({ error: "Invalid qrMode" }); return; }
+      updates.qrMode = qrMode || "standard";
+    }
     await updateMerchant(merchant.id, updates);
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
@@ -410,20 +417,20 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
 /** GET /api/merchant/me — get merchant profile */
 paymentRouter.get("/merchant/me", requireApiKey as any, async (req: any, res) => {
   const m = req.merchant;
-  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, description: (m as any).description, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, createdAt: m.createdAt, updatedAt: m.updatedAt });
+  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, description: (m as any).description, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, qrMode: (m as any).qrMode || "standard", createdAt: m.createdAt, updatedAt: m.updatedAt });
 });
 
 /** GET /api/merchant/profile — alias for /merchant/me (used by dashboard) */
 paymentRouter.get("/merchant/profile", requireApiKey as any, async (req: any, res) => {
   const m = req.merchant;
-  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, description: (m as any).description, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, createdAt: m.createdAt, updatedAt: m.updatedAt });
+  res.json({ id: m.id, walletAddress: m.walletAddress, name: m.name, description: (m as any).description, receiveCoin: m.receiveCoin, logoData: m.logoData, webhookUrl: m.webhookUrl, storeAddress: m.storeAddress, qrFgColor: m.qrFgColor, qrBgColor: m.qrBgColor, qrStyle: (m as any).qrStyle, qrMode: (m as any).qrMode || "standard", createdAt: m.createdAt, updatedAt: m.updatedAt });
 });
 
 /** PUT /api/merchant/profile — update profile (used by dashboard Settings page) */
 paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, res) => {
   try {
     const merchant = req.merchant;
-    const { name, description, receiveCoin, logoData, webhookUrl, storeAddress, qrFgColor, qrBgColor, qrStyle } = req.body;
+    const { name, description, receiveCoin, logoData, webhookUrl, storeAddress, qrFgColor, qrBgColor, qrStyle, qrMode } = req.body;
     const updates: Record<string, any> = {};
     if (name !== undefined) {
       if (typeof name !== "string" || name.trim().length < 1 || name.length > 120) { res.status(400).json({ error: "Invalid name" }); return; }
@@ -466,6 +473,10 @@ paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, re
     if (qrFgColor !== undefined) updates.qrFgColor = qrFgColor?.slice(0, 9) || null;
     if (qrBgColor !== undefined) updates.qrBgColor = qrBgColor?.slice(0, 9) || null;
     if (qrStyle !== undefined) updates.qrStyle = qrStyle?.slice(0, 20) || null;
+    if (qrMode !== undefined) {
+      if (qrMode !== null && (typeof qrMode !== "string" || !VALID_QR_MODES.has(qrMode))) { res.status(400).json({ error: "Invalid qrMode" }); return; }
+      updates.qrMode = qrMode || "standard";
+    }
     await updateMerchant(merchant.id, updates);
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
@@ -1445,6 +1456,84 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
 });
 
 /** GET /api/payment/events/:txId — SSE stream for real-time status */
+/** POST /api/payment/direct/scan — detect and record direct wallet QR ERC-20 transfers */
+function withDirectScanTimeout<T>(promise: Promise<T>, timeoutMs = 8000): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Direct scan RPC timeout")), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+paymentRouter.post("/payment/direct/scan", async (req, res) => {
+  try {
+    const toAddress = String(req.body.toAddress ?? "").trim().toLowerCase();
+    const coin = String(req.body.coin ?? "").trim().toUpperCase();
+    const amount = String(req.body.amount ?? "").trim();
+    const chainId = Number(req.body.chainId ?? 11155111);
+    const paymentUrl = typeof req.body.paymentUrl === "string" ? req.body.paymentUrl : null;
+    const requestedFromBlock = req.body.fromBlock !== undefined && req.body.fromBlock !== null && req.body.fromBlock !== ""
+      ? BigInt(String(req.body.fromBlock))
+      : null;
+
+    if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) { res.status(400).json({ error: "Invalid receiver wallet" }); return; }
+    if (!VALID_COINS.has(coin)) { res.status(400).json({ error: "Unsupported coin" }); return; }
+    if (!/^\d+(\.\d{1,6})?$/.test(amount) || Number(amount) <= 0) { res.status(400).json({ error: "Invalid amount" }); return; }
+    const client = CHAIN_CLIENTS[chainId];
+    if (!client) { res.status(400).json({ error: "Unsupported chain" }); return; }
+    if (!COIN_CONTRACTS[coin]?.[chainId]) { res.status(400).json({ error: "Unsupported coin on this network" }); return; }
+
+    let latestBlock: bigint;
+    try {
+      latestBlock = await withDirectScanTimeout(client.getBlockNumber(), 8000);
+    } catch {
+      res.json({ status: "pending", fromBlock: requestedFromBlock?.toString() ?? null, warning: "Scanner RPC is temporarily slow" });
+      return;
+    }
+    const fromBlock = requestedFromBlock ?? (latestBlock > 3n ? latestBlock - 3n : 0n);
+    let match: Awaited<ReturnType<typeof findDirectTransfer>> | null = null;
+    try {
+      match = await withDirectScanTimeout(findDirectTransfer({ toAddress, coin, amount, chainId, fromBlock }), 8000);
+    } catch {
+      res.json({ status: "pending", fromBlock: fromBlock.toString(), latestBlock: latestBlock.toString(), warning: "Scanner RPC is temporarily slow" });
+      return;
+    }
+    if (!match?.txHash) {
+      res.json({ status: "pending", fromBlock: fromBlock.toString(), latestBlock: (match?.latestBlock ?? latestBlock).toString() });
+      return;
+    }
+
+    const recorded = await recordDirectTransferPayment({
+      txHash: match.txHash,
+      fromAddress: match.fromAddress,
+      toAddress,
+      coin,
+      amount,
+      chainId,
+      paymentUrl,
+      verified: true,
+    });
+    res.json({
+      status: "confirmed",
+      fromBlock: fromBlock.toString(),
+      latestBlock: (match.latestBlock ?? latestBlock).toString(),
+      transaction: transactionToJson(recorded.transaction),
+      created: recorded.created,
+    });
+  } catch (e: any) {
+    console.error("[payment/direct/scan]", e?.message || e);
+    res.status(500).json({ error: e?.message || "Unable to scan direct payment" });
+  }
+});
+
 paymentRouter.get("/payment/events/:txId", (req, res) => {
   const txId = req.params.txId;
   res.setHeader("Content-Type", "text/event-stream");
@@ -1470,6 +1559,7 @@ const ERC20_ABI = parseAbi([
   "event Transfer(address indexed from, address indexed to, uint256 value)",
   "function decimals() view returns (uint8)",
 ]);
+const ERC20_TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
 
 // Sepolia USDC contract address (Circle's official)
 const COIN_CONTRACTS: Record<string, Record<number, `0x${string}`>> = {
@@ -1497,7 +1587,11 @@ const COIN_CONTRACTS: Record<string, Record<number, `0x${string}`>> = {
   TGBP: { 11155111: "0xA26f1088f41714B696d0e7b117FA9cbd810bbE8B" },
   VGBP: { 11155111: "0x01d8b6E34a57573Ff48d49fA047b45054f939eDa" },
   // SGD
-  XSGD: { 11155111: "0x1Fe69B1171d8aA5e6d432F14A9E4129ED96E40C0" },
+  XSGD: {
+    1: "0x70e8dE73cE538DA2bEEd35d14187F6959a8ecA96",
+    137: "0xDC3326e71D45186F113a2F448984CA0e8D201995",
+    11155111: "0x1Fe69B1171d8aA5e6d432F14A9E4129ED96E40C0",
+  },
   TNSGD: { 11155111: "0x4638F8eB9F2047Ab18d70E12539E0B16fF2998A2" },
   // JPY
   GYEN: { 11155111: "0xA39c3648Cd2b5a183Af33Dcc30af6799A13aD7aE" },
@@ -1536,7 +1630,10 @@ const COIN_CONTRACTS: Record<string, Record<number, `0x${string}`>> = {
   ZARU: { 11155111: "0x721CB3e2B0BA43b0a51f2179b7D260DD98d4BAF1" },
   // Other
   ARC: { 11155111: "0xDbb492152eBd689ceF184C17e6F65AB18DCDe627" },
-  MYRT: { 11155111: "0x68077f53a6562D42051C86b09160EA577f3C7476" },
+  MYRT: {
+    1: "0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f",
+    11155111: "0x68077f53a6562D42051C86b09160EA577f3C7476",
+  },
   TRYB: { 11155111: "0x0d2968Dc1b9EC131bEcaB8e28193e81Bcd63040c" },
   PHPC: { 11155111: "0x9aA087afD8C3EadA4f52Dfe61aaC507Bf845BC29" },
   HKDR: { 11155111: "0x40ad01c5ade2a9202D110C621919D0a2b147EB97" },
@@ -1564,6 +1661,164 @@ const CHAIN_CLIENTS: Record<number, any> = {
   42161:    createPublicClient({ chain: arbitrum, transport: http() }),
   11155111: createPublicClient({ chain: sepolia,  transport: http() }),
 };
+
+async function getTokenDecimals(client: any, tokenAddress: `0x${string}`): Promise<number> {
+  try {
+    const decimals = await client.readContract({ address: tokenAddress, abi: ERC20_ABI, functionName: "decimals" });
+    const parsed = Number(decimals);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 6;
+  } catch {
+    return 6;
+  }
+}
+
+async function resolveMerchantForReceiver(toAddress: string) {
+  const normalizedTo = toAddress.toLowerCase();
+  const subWallet = await getSubWalletByAddress(normalizedTo);
+  if (subWallet) {
+    const merchant = await getMerchantById(subWallet.merchantId);
+    if (merchant) return { merchant, receiveAddress: subWallet.address.toLowerCase() };
+  }
+  const merchant = await getMerchantByWallet(normalizedTo) || await getMerchantByStoreAddress(normalizedTo);
+  if (!merchant) return null;
+  return { merchant, receiveAddress: normalizedTo };
+}
+
+async function recordDirectTransferPayment({
+  txHash,
+  fromAddress,
+  toAddress,
+  coin,
+  amount,
+  chainId,
+  paymentUrl,
+  verified,
+}: {
+  txHash: `0x${string}`;
+  fromAddress?: string | null;
+  toAddress: string;
+  coin: string;
+  amount: string;
+  chainId: number;
+  paymentUrl?: string | null;
+  verified: boolean;
+}) {
+  const existing = await getTransactionByHash(txHash);
+  if (existing) {
+    return { transaction: existing, created: false };
+  }
+
+  const resolved = await resolveMerchantForReceiver(toAddress);
+  if (!resolved) {
+    throw new Error("Receiver wallet is not attached to a SeraPay merchant.");
+  }
+
+  const txId = uuidv4();
+  const notes = JSON.stringify({
+    type: "direct_wallet_qr",
+    paymentUrl: typeof paymentUrl === "string" ? paymentUrl.slice(0, 1200) : null,
+  });
+
+  await createTransaction({
+    id: txId,
+    merchantId: resolved.merchant.id,
+    txHash,
+    fromAddress: fromAddress?.toLowerCase() || null,
+    toAddress: resolved.receiveAddress,
+    coin,
+    amount,
+    chainId,
+    status: "confirmed",
+    verified: verified ? 1 : 0,
+    payCoin: coin,
+    payAmount: amount,
+    notes,
+    notifiedAt: new Date(),
+    webhookSentAt: resolved.merchant.webhookUrl ? new Date() : null,
+  });
+
+  const transaction = await getTransactionById(txId);
+  notifyMerchantSse(resolved.merchant.id, {
+    event: "payment_received",
+    transactionId: txId,
+    txHash,
+    amount,
+    coin,
+    payAmount: amount,
+    payCoin: coin,
+    from: fromAddress?.toLowerCase() || null,
+    verified,
+    source: "direct_wallet_qr",
+  });
+
+  if (resolved.merchant.webhookUrl) {
+    sendWebhook(
+      resolved.merchant.webhookUrl,
+      resolved.merchant.webhookSecret,
+      {
+        event: "payment.confirmed",
+        txId,
+        txHash,
+        coin,
+        amount,
+        payCoin: coin,
+        payAmount: amount,
+        fromAddress: fromAddress?.toLowerCase() || null,
+        toAddress: resolved.receiveAddress,
+        verified,
+        source: "direct_wallet_qr",
+      },
+      { merchantId: resolved.merchant.id, txId, txHash },
+    ).catch(console.error);
+  }
+
+  return { transaction: transaction!, created: true };
+}
+
+async function findDirectTransfer({
+  toAddress,
+  coin,
+  amount,
+  chainId,
+  fromBlock,
+}: {
+  toAddress: string;
+  coin: string;
+  amount: string;
+  chainId: number;
+  fromBlock: bigint;
+}) {
+  const client = CHAIN_CLIENTS[chainId];
+  const coinAddress = COIN_CONTRACTS[coin]?.[chainId];
+  if (!client || !coinAddress) return null;
+
+  const decimals = await getTokenDecimals(client, coinAddress);
+  const expectedRaw = BigInt(toRawTokenAmount(amount, decimals));
+  const latestBlock = await client.getBlockNumber();
+  const logs = await client.getLogs({
+    address: coinAddress,
+    event: ERC20_TRANSFER_EVENT,
+    args: { to: toAddress.toLowerCase() as `0x${string}` },
+    fromBlock,
+    toBlock: "latest",
+  });
+
+  for (const log of logs) {
+    const args = (log as any).args || {};
+    const actualRaw = BigInt(String(args.value ?? 0));
+    const diff = actualRaw > expectedRaw ? actualRaw - expectedRaw : expectedRaw - actualRaw;
+    if (diff > 1n) continue;
+    const txHash = String(log.transactionHash || "");
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) continue;
+    return {
+      txHash: txHash as `0x${string}`,
+      fromAddress: typeof args.from === "string" ? args.from.toLowerCase() : null,
+      latestBlock,
+    };
+  }
+
+  return { txHash: null, fromAddress: null, latestBlock };
+}
 
 /**
  * Wait for a transaction receipt using Alchemy WebSocket subscription.

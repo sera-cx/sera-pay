@@ -3,8 +3,8 @@ import { AppLayout } from "@/components/AppLayout";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, Label, Input, Button, Skeleton } from "@/components/dashboard-ui";
 import { useMerchantProfile, useUpdateProfile } from "@/hooks/use-merchant";
 import { useToast } from "@/components/toast-system";
-import { Save, ImageIcon, Upload, X, QrCode, Coins, Search, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
-import { QRStyled, QR_STYLES, type QrStyle } from "@/components/QRStyled";
+import { Save, ImageIcon, Upload, X, QrCode, Coins, Search, Check, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
+import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { prepareImageForUpload } from "@/lib/imageUpload";
 import { groupCurrenciesByRegion, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { buildClientAppUrl } from "@/lib/app-url";
@@ -245,6 +245,7 @@ export function Settings() {
   const [qrStyle, setQrStyle] = useState<QrStyle>("classic");
   const [qrFgColor, setQrFgColor] = useState("#000000");
   const [qrBgColor, setQrBgColor] = useState("#ffffff");
+  const [qrMode, setQrMode] = useState<QrMode>("standard");
   const [receiveCoin, setReceiveCoin] = useState("");
   const [coinSearch, setCoinSearch] = useState("");
   const [coinExpanded, setCoinExpanded] = useState(false);
@@ -282,6 +283,7 @@ export function Settings() {
       if ((profile as any).qrStyle) setQrStyle((profile as any).qrStyle as QrStyle);
       if ((profile as any).qrFgColor) setQrFgColor((profile as any).qrFgColor);
       if ((profile as any).qrBgColor) setQrBgColor((profile as any).qrBgColor);
+      if ((profile as any).qrMode === "advanced" || (profile as any).qrMode === "standard") setQrMode((profile as any).qrMode);
       const profileLogo = typeof (profile as any).logoData === "string" ? (profile as any).logoData : "";
       if (profileLogo) {
         setLogoUrl(profileLogo);
@@ -305,6 +307,11 @@ export function Settings() {
   const handleBgColorChange = (c: string) => {
     setQrBgColor(c);
     updateProfile.mutate({ qrBgColor: c } as any);
+  };
+
+  const handleQrModeChange = (mode: QrMode) => {
+    setQrMode(mode);
+    updateProfile.mutate({ qrMode: mode } as any);
   };
 
   const handleSaveStoreInfo = (e: React.FormEvent) => {
@@ -561,24 +568,53 @@ export function Settings() {
               <CardDescription>Choose how the QR code dots look on your payment page.</CardDescription>
             </CardHeader>
             <CardContent>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+                {([
+                  { id: "advanced" as QrMode, label: "Advanced QR Mode", desc: "Auto coloring based on logo" },
+                  { id: "standard" as QrMode, label: "Standard Mode", desc: "Classic QR colors" },
+                ]).map((modeOption) => {
+                  const active = qrMode === modeOption.id;
+                  return (
+                    <button
+                      key={modeOption.id}
+                      type="button"
+                      onClick={() => handleQrModeChange(modeOption.id)}
+                      className={`flex items-center gap-2 rounded-xl border-2 p-3 text-left transition-all ${active ? "border-[#00D1A0] bg-[#F0FAF6]" : "border-border/40 hover:border-[#00D1A0]/50"}`}
+                    >
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${active ? "bg-[#00D1A0] text-white" : "border border-border/60 bg-white"}`}>
+                        {active ? <Check className="h-3 w-3" /> : null}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-foreground">{modeOption.label}</span>
+                        <span className="block text-[10px] text-muted-foreground">{modeOption.desc}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 {QR_STYLES.map(s => (
                   <button
                     key={s.id}
-                    onClick={() => handleStyleChange(s.id)}
+                    onClick={() => { if (qrMode !== "advanced") handleStyleChange(s.id); }}
+                    disabled={qrMode === "advanced"}
                     className={`flex flex-col items-center gap-2 p-2.5 rounded-xl border-2 transition-all ${
-                      qrStyle === s.id
+                      qrMode === "advanced"
+                        ? "border-border/30 bg-muted/30 opacity-60 cursor-default"
+                        : qrStyle === s.id
                         ? "border-[#00D1A0] bg-[#F0FAF6] shadow-sm"
                         : "border-border/40 hover:border-[#00D1A0]/50"
                     }`}
                   >
-                    <div className="rounded-lg overflow-hidden" style={{ background: (profile as any)?.qrBgColor || "#fff" }}>
+                    <div className="rounded-lg overflow-hidden" style={{ background: qrBgColor || "#fff" }}>
                       <QRStyled
                         value="https://serapay.io"
                         size={68}
                         fgColor={(profile as any)?.qrFgColor || "#000000"}
                         bgColor={(profile as any)?.qrBgColor || "#ffffff"}
                         style={s.id}
+                        logo={logoUrl || undefined}
+                        mode={qrMode}
                       />
                     </div>
                     <span className="text-[9px] font-medium text-center leading-tight whitespace-nowrap">{s.label}</span>
@@ -589,11 +625,11 @@ export function Settings() {
               {/* Color pickers */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide block mb-1.5">Dot Color</label>
-                  <div className="flex items-center gap-2 bg-background border border-border/60 rounded-xl px-3 py-2.5 cursor-pointer" onClick={() => document.getElementById('settings-fg-picker')?.click()}>
+                  <label className={`text-xs font-semibold uppercase tracking-wide block mb-1.5 ${qrMode === "advanced" ? "text-muted-foreground/50" : "text-muted-foreground"}`}>Dot Color</label>
+                  <div className={`flex items-center gap-2 border rounded-xl px-3 py-2.5 ${qrMode === "advanced" ? "bg-muted/40 border-border/30 opacity-60 cursor-default" : "bg-background border-border/60 cursor-pointer"}`} onClick={() => { if (qrMode !== "advanced") document.getElementById('settings-fg-picker')?.click(); }}>
                     <span className="w-5 h-5 rounded-md border border-border/40 shrink-0" style={{ background: qrFgColor }} />
-                    <span className="text-sm font-mono text-foreground">{qrFgColor.toUpperCase()}</span>
-                    <input id="settings-fg-picker" type="color" value={qrFgColor} onChange={e => handleFgColorChange(e.target.value)} className="sr-only" />
+                    <span className={`text-sm font-mono ${qrMode === "advanced" ? "text-muted-foreground" : "text-foreground"}`}>{qrFgColor.toUpperCase()}</span>
+                    <input id="settings-fg-picker" type="color" value={qrFgColor} onChange={e => handleFgColorChange(e.target.value)} disabled={qrMode === "advanced"} className="sr-only" />
                   </div>
                 </div>
                 <div>
@@ -678,6 +714,7 @@ export function Settings() {
                       bgColor={qrBgColor}
                       style={qrStyle}
                       logo={logoUrl || undefined}
+                      mode={qrMode}
                     />
                   </div>
 

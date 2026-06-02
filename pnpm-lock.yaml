@@ -4,6 +4,24 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+catalogs:
+  default:
+    '@tanstack/react-query':
+      specifier: ^5.90.21
+      version: 5.97.0
+    '@types/node':
+      specifier: ^25.3.3
+      version: 25.6.0
+    drizzle-orm:
+      specifier: ^0.45.1
+      version: 0.45.2
+    tsx:
+      specifier: ^4.21.0
+      version: 4.21.0
+    zod:
+      specifier: ^3.25.76
+      version: 3.25.76
+
 overrides:
   tailwindcss>nanoid: 3.3.7
   '@types/express': 4.17.21
@@ -180,6 +198,9 @@ importers:
       jspdf:
         specifier: ^4.2.1
         version: 4.2.1
+      jsqr:
+        specifier: ^1.4.0
+        version: 1.4.0
       lucide-react:
         specifier: ^0.453.0
         version: 0.453.0(react@19.2.1)
@@ -5014,6 +5035,9 @@ packages:
 
   jspdf@4.2.1:
     resolution: {integrity: sha512-YyAXyvnmjTbR4bHQRLzex3CuINCDlQnBqoSYyjJwTP2x9jDLuKDzy7aKUl0hgx3uhcl7xzg32agn5vlie6HIlQ==}
+
+  jsqr@1.4.0:
+    resolution: {integrity: sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==}
 
   keccak@3.0.4:
     resolution: {integrity: sha512-3vKuW0jV8J3XNTzvfyicFR5qvxrSAGl7KIhvgOu5cmWwM7tZRj3fMbj/pfIf4be7aznbc+prBWGjywox/g2Y6Q==}
@@ -13397,6 +13421,8 @@ snapshots:
       core-js: 3.49.0
       dompurify: 3.3.3
       html2canvas: 1.4.1
+
+  jsqr@1.4.0: {}
 
   keccak@3.0.4:
     dependencies:

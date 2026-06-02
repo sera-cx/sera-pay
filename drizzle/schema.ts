@@ -50,6 +50,7 @@ export const merchants = pgTable(
     qrFgColor: varchar("qrFgColor", { length: 9 }),
     qrBgColor: varchar("qrBgColor", { length: 9 }),
     qrStyle: varchar("qrStyle", { length: 20 }),
+    qrMode: varchar("qrMode", { length: 20 }).default("standard"),
     createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
   },

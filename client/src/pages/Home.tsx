@@ -1,20 +1,21 @@
-import { usePrivy } from "@privy-io/react-auth";
+import { useLoginWithOAuth, usePrivy } from "@privy-io/react-auth";
 import { useState, useRef, useCallback, useEffect } from "react";
+import jsQR from "jsqr";
 import { useLocation } from "wouter";
 import { useChainId } from "wagmi";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId } from "@/lib/payment";
+import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId, parseAmountToRaw } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
-import { QRStyled, QR_STYLES, type QrStyle } from "@/components/QRStyled";
+import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowUpDown } from "lucide-react";
+import { ArrowRight, ArrowUpDown, Copy, Download, Mail, QrCode, Wallet } from "lucide-react";
 import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal } from "@/components/NetworkSwitcher";
-import { prepareImageForUpload } from "@/lib/imageUpload";
+import { MAX_IMAGE_UPLOAD_BYTES, loadImage, prepareImageForUpload, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
@@ -107,7 +108,94 @@ function isSupportedLogoValue(value: unknown): value is string {
   );
 }
 
+function normalizeQrColor(value: string | null | undefined, fallback: string) {
+  const color = (value || fallback).trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(color) ? color.toUpperCase() : fallback;
+}
+
 // ── Token Icon ─────────────────────────────────────────────────────────────
+type BarcodeDetectorResultLike = { rawValue?: string };
+type BarcodeDetectorLike = {
+  detect(source: HTMLVideoElement): Promise<BarcodeDetectorResultLike[]>;
+};
+type BarcodeDetectorConstructorLike = new (options?: { formats?: string[] }) => BarcodeDetectorLike;
+
+declare global {
+  interface Window {
+    BarcodeDetector?: BarcodeDetectorConstructorLike;
+  }
+}
+
+function isValidEvmAddress(value: string) {
+  return /^0x[0-9a-fA-F]{40}$/.test(value.trim());
+}
+
+function extractWalletAddressFromQr(value: string) {
+  return value.match(/0x[0-9a-fA-F]{40}/)?.[0] ?? "";
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+const DIRECT_WALLET_TOKEN_ADDRESSES: Record<string, Record<number, `0x${string}`>> = {
+  USDC: {
+    1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    137: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+  },
+  USDT: {
+    1: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+    137: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+    42161: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+    11155111: "0x1920bf0643ae49B4fB334586dAd6Bed29fF30F88",
+  },
+  XSGD: {
+    1: "0x70e8dE73cE538DA2bEEd35d14187F6959a8ecA96",
+    137: "0xDC3326e71D45186F113a2F448984CA0e8D201995",
+    11155111: "0x1Fe69B1171d8aA5e6d432F14A9E4129ED96E40C0",
+  },
+  TNSGD: {
+    11155111: "0x4638F8eB9F2047Ab18d70E12539E0B16fF2998A2",
+  },
+  MYRT: {
+    1: "0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f",
+    11155111: "0x68077f53a6562D42051C86b09160EA577f3C7476",
+  },
+};
+
+const SUPPORTED_WALLETS = [
+  { name: "MetaMask", logo: "/logo/metamask.png" },
+  { name: "OKX", logo: "/logo/okx.png" },
+  { name: "Trust Wallet", logo: "/logo/trust.png" },
+  { name: "Coinbase", logo: "/logo/coinbase.png" },
+];
+
+function buildDirectWalletPaymentUri({
+  receiverAddress,
+  coin,
+  amount,
+  chainId,
+  customerCoin,
+}: {
+  receiverAddress: string;
+  coin: Stablecoin | null;
+  amount: string;
+  chainId: number;
+  customerCoin?: Stablecoin | null;
+}) {
+  if (!coin || !amount || !isValidEvmAddress(receiverAddress)) return "";
+  if (customerCoin && customerCoin.symbol !== coin.symbol) return "";
+  const tokenAddress = DIRECT_WALLET_TOKEN_ADDRESSES[coin.symbol]?.[chainId]
+    || (chainId === 11155111 && isValidEvmAddress(coin.contractAddress) ? (coin.contractAddress as `0x${string}`) : undefined);
+  if (!tokenAddress) return "";
+  const rawAmount = parseAmountToRaw(normalizeDecimalAmountText(amount) || "", coin.decimals || 6);
+  if (rawAmount <= 0n) return "";
+  return `ethereum:${tokenAddress}@${chainId}/transfer?address=${receiverAddress.trim()}&uint256=${rawAmount.toString()}`;
+}
+
 const TOKEN_COLORS: Record<string, string> = {
   USDT: "#26A17B", USDC: "#2775CA", XSGD: "#EF3E42", MYRT: "#CC0001",
   IDRX: "#E4002B", IDRT: "#E4002B", EURC: "#003399", AUDD: "#00843D",
@@ -397,12 +485,145 @@ function LogoAvatar({
   );
 }
 
+type LogoCropSource = {
+  dataUrl: string;
+  width: number;
+  height: number;
+  fileName: string;
+};
+
+function LogoCropModal({
+  source,
+  uploading,
+  onCancel,
+  onConfirm,
+}: {
+  source: LogoCropSource;
+  uploading: boolean;
+  onCancel: () => void;
+  onConfirm: (dataUrl: string) => void;
+}) {
+  const frameSize = 300;
+  const baseScale = Math.max(frameSize / source.width, frameSize / source.height);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
+  const displayW = source.width * baseScale * zoom;
+  const displayH = source.height * baseScale * zoom;
+  const maxOffsetX = Math.max(0, (displayW - frameSize) / 2);
+  const maxOffsetY = Math.max(0, (displayH - frameSize) / 2);
+  const safeOffset = { x: clampNumber(offset.x, -maxOffsetX, maxOffsetX), y: clampNumber(offset.y, -maxOffsetY, maxOffsetY) };
+
+  useEffect(() => {
+    setOffset((current) => ({
+      x: clampNumber(current.x, -maxOffsetX, maxOffsetX),
+      y: clampNumber(current.y, -maxOffsetY, maxOffsetY),
+    }));
+  }, [maxOffsetX, maxOffsetY]);
+
+  const handleConfirm = async () => {
+    const scale = baseScale * zoom;
+    const drawnX = (frameSize - displayW) / 2 + safeOffset.x;
+    const drawnY = (frameSize - displayH) / 2 + safeOffset.y;
+    const prepared = await renderCroppedImageForUpload({
+      source: source.dataUrl,
+      crop: {
+        x: clampNumber(-drawnX / scale, 0, source.width),
+        y: clampNumber(-drawnY / scale, 0, source.height),
+        width: Math.min(frameSize / scale, source.width),
+        height: Math.min(frameSize / scale, source.height),
+      },
+      outputWidth: 1024,
+      outputHeight: 1024,
+      quality: 0.9,
+    });
+    onConfirm(prepared.dataUrl);
+  };
+
+  return (
+    <>
+      <div style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }} />
+      <div style={{ position: "fixed", inset: 0, zIndex: 81, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+        <div style={{ width: "min(420px, calc(100vw - 32px))", borderRadius: 22, background: "#fff", boxShadow: "0 24px 70px rgba(10,31,26,0.22)", padding: 20, boxSizing: "border-box" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+            <div>
+              <h3 style={{ margin: 0, color: "#0A1F1A", fontSize: 18, fontWeight: 800 }}>Crop logo</h3>
+              <p style={{ margin: "6px 0 0", color: "rgba(60,60,67,0.58)", fontSize: 13, lineHeight: 1.45 }}>Drag to reposition, then adjust the scale.</p>
+            </div>
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={uploading}
+              aria-label="Cancel crop"
+              style={{ width: 36, height: 36, borderRadius: "50%", border: "none", background: "#F2F2F7", color: "rgba(60,60,67,0.55)", cursor: uploading ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+            >
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+          <div
+            style={{ position: "relative", width: "min(300px, 100%)", aspectRatio: "1 / 1", margin: "0 auto", overflow: "hidden", borderRadius: 22, border: "2px solid #00C896", background: "#E6FAF5", touchAction: "none", boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.72)" }}
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, startX: safeOffset.x, startY: safeOffset.y };
+            }}
+            onPointerMove={(event) => {
+              const drag = dragRef.current;
+              if (!drag || drag.pointerId !== event.pointerId) return;
+              setOffset({
+                x: clampNumber(drag.startX + event.clientX - drag.x, -maxOffsetX, maxOffsetX),
+                y: clampNumber(drag.startY + event.clientY - drag.y, -maxOffsetY, maxOffsetY),
+              });
+            }}
+            onPointerUp={() => { dragRef.current = null; }}
+            onPointerCancel={() => { dragRef.current = null; }}
+          >
+            <img
+              src={source.dataUrl}
+              alt=""
+              draggable={false}
+              style={{ position: "absolute", left: "50%", top: "50%", width: displayW, height: displayH, maxWidth: "none", userSelect: "none", transform: `translate(calc(-50% + ${safeOffset.x}px), calc(-50% + ${safeOffset.y}px))` }}
+            />
+          </div>
+          <div style={{ marginTop: 18 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, color: "rgba(60,60,67,0.55)", fontSize: 12, fontWeight: 700 }}>
+              <span>Scale</span>
+              <span>{Math.round(zoom * 100)}%</span>
+            </div>
+            <input type="range" min="1" max="3" step="0.01" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} style={{ width: "100%", accentColor: "#00C853" }} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1.35fr", gap: 10, marginTop: 18 }}>
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={uploading}
+              style={{ height: 50, borderRadius: 14, border: "1px solid rgba(10,31,26,0.10)", background: "#fff", color: "#1C1C1E", fontSize: 14, fontWeight: 750, cursor: uploading ? "default" : "pointer" }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleConfirm()}
+              disabled={uploading}
+              className="serapay-action-primary"
+              style={{ height: 50, borderRadius: 14, border: "none", background: "linear-gradient(135deg, #00C896, #00A87A, #008A64)", color: "#fff", fontSize: 14, fontWeight: 800, cursor: uploading ? "default" : "pointer" }}
+            >
+              {uploading ? "Saving..." : "Confirm"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function QRStylePicker({
   value,
   onChange,
+  disabled = false,
 }: {
   value: QrStyle;
   onChange: (style: QrStyle) => void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -421,16 +642,18 @@ function QRStylePicker({
     <div ref={pickerRef} style={{ position: "relative" }}>
       <button
         type="button"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => { if (!disabled) setOpen((current) => !current); }}
+        disabled={disabled}
         style={{
           width: "100%",
           minHeight: 54,
           borderRadius: 16,
-          border: open ? "1.5px solid rgba(62,190,138,0.55)" : "1.5px solid rgba(60,60,67,0.1)",
-          background: "linear-gradient(180deg, #FFFFFF 0%, #F8FBFA 100%)",
+          border: disabled ? "1.5px solid rgba(60,60,67,0.08)" : open ? "1.5px solid rgba(62,190,138,0.55)" : "1.5px solid rgba(60,60,67,0.1)",
+          background: disabled ? "#F2F2F4" : "linear-gradient(180deg, #FFFFFF 0%, #F8FBFA 100%)",
           boxShadow: open ? "0 0 0 4px rgba(78,206,154,0.12)" : "0 1px 4px rgba(10,31,26,0.04)",
           padding: "9px 12px",
-          cursor: "pointer",
+          cursor: disabled ? "default" : "pointer",
+          opacity: disabled ? 0.66 : 1,
           display: "flex",
           alignItems: "center",
           gap: 10,
@@ -465,7 +688,7 @@ function QRStylePicker({
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      {open && (
+      {open && !disabled && (
         <div style={{
           position: "absolute",
           left: 0,
@@ -523,10 +746,12 @@ function ColorField({
   label,
   value,
   onChange,
+  disabled = false,
 }: {
   label: string;
   value: string;
   onChange: (color: string) => void;
+  disabled?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(value.toUpperCase());
@@ -535,28 +760,30 @@ function ColorField({
 
   const commitColor = (nextValue: string) => {
     const normalized = nextValue.startsWith("#") ? nextValue : `#${nextValue}`;
-    if (/^#[0-9a-fA-F]{6}$/.test(normalized)) onChange(normalized.toUpperCase());
+    if (!disabled && /^#[0-9a-fA-F]{6}$/.test(normalized)) onChange(normalized.toUpperCase());
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
-      <span style={{ fontSize: 11, color: "rgba(60,60,67,0.5)", fontWeight: 650 }}>{label}</span>
+      <span style={{ fontSize: 11, color: disabled ? "rgba(60,60,67,0.32)" : "rgba(60,60,67,0.5)", fontWeight: 650 }}>{label}</span>
       <div style={{
         height: 54,
         borderRadius: 16,
-        border: "1.5px solid rgba(60,60,67,0.1)",
-        background: "linear-gradient(180deg, #FFFFFF 0%, #F8FBFA 100%)",
-        boxShadow: "0 1px 4px rgba(10,31,26,0.04)",
+        border: disabled ? "1.5px solid rgba(60,60,67,0.08)" : "1.5px solid rgba(60,60,67,0.1)",
+        background: disabled ? "#F2F2F4" : "linear-gradient(180deg, #FFFFFF 0%, #F8FBFA 100%)",
+        boxShadow: disabled ? "none" : "0 1px 4px rgba(10,31,26,0.04)",
         padding: "8px 10px",
         display: "flex",
         alignItems: "center",
         gap: 9,
         boxSizing: "border-box",
         minWidth: 0,
+        opacity: disabled ? 0.66 : 1,
       }}>
         <button
           type="button"
-          onClick={() => inputRef.current?.click()}
+          onClick={() => { if (!disabled) inputRef.current?.click(); }}
+          disabled={disabled}
           aria-label={`Choose ${label.toLowerCase()}`}
           style={{
             width: 34,
@@ -565,7 +792,7 @@ function ColorField({
             border: value.toLowerCase() === "#ffffff" ? "1.5px solid rgba(60,60,67,0.16)" : "1.5px solid rgba(255,255,255,0.9)",
             background: value,
             boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.06), 0 3px 8px rgba(10,31,26,0.12)",
-            cursor: "pointer",
+            cursor: disabled ? "default" : "pointer",
             flexShrink: 0,
           }}
         />
@@ -574,6 +801,7 @@ function ColorField({
           onChange={(event) => setDraft(event.target.value.toUpperCase().slice(0, 7))}
           onBlur={() => commitColor(draft)}
           onKeyDown={(event) => { if (event.key === "Enter") (event.currentTarget as HTMLInputElement).blur(); }}
+          disabled={disabled}
           spellCheck={false}
           style={{
             minWidth: 0,
@@ -581,7 +809,7 @@ function ColorField({
             border: "none",
             outline: "none",
             background: "transparent",
-            color: "#1C1C1E",
+            color: disabled ? "rgba(60,60,67,0.45)" : "#1C1C1E",
             fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
             fontSize: 12,
             fontWeight: 750,
@@ -592,6 +820,7 @@ function ColorField({
           type="color"
           value={value}
           onChange={(event) => { const nextColor = event.target.value.toUpperCase(); setDraft(nextColor); onChange(nextColor); }}
+          disabled={disabled}
           style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
           tabIndex={-1}
         />
@@ -612,6 +841,7 @@ function SettingsModal({
   qrFgColor,
   qrBgColor,
   qrStyle,
+  qrMode,
   onQrPrefsSaved,
   accountError,
   accountLoading,
@@ -627,7 +857,8 @@ function SettingsModal({
   qrFgColor?: string;
   qrBgColor?: string;
   qrStyle?: string;
-  onQrPrefsSaved?: (fgColor: string, bgColor: string, style: QrStyle) => void;
+  qrMode?: string;
+  onQrPrefsSaved?: (fgColor: string, bgColor: string, style: QrStyle, mode: QrMode) => void;
   accountError?: string | null;
   accountLoading?: boolean;
   onRetryAccount?: () => void;
@@ -637,11 +868,24 @@ function SettingsModal({
   const [dotColor, setDotColor] = useState(qrFgColor || "#000000");
   const [bgColor, setBgColor] = useState(qrBgColor || "#ffffff");
   const [selectedStyle, setSelectedStyle] = useState<QrStyle>((qrStyle as QrStyle) || "rounded");
+  const [selectedQrMode, setSelectedQrMode] = useState<QrMode>((qrMode as QrMode) || "standard");
   const [saving, setSaving] = useState(false);
+  const [logoSaving, setLogoSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [logoCropSource, setLogoCropSource] = useState<LogoCropSource | null>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
   const accountReady = Boolean(apiKey);
+  const hasNameOrQrChanges = name.trim() !== initialName.trim()
+    || normalizeQrColor(dotColor, "#000000") !== normalizeQrColor(qrFgColor, "#000000")
+    || normalizeQrColor(bgColor, "#ffffff") !== normalizeQrColor(qrBgColor, "#ffffff")
+    || selectedStyle !== ((qrStyle as QrStyle) || "rounded")
+    || selectedQrMode !== ((qrMode as QrMode) || "standard");
+  const isRetryAccountAction = !accountReady && Boolean(accountError && onRetryAccount);
+  const saveDisabled = isRetryAccountAction
+    ? saving || logoSaving
+    : saving || logoSaving || saved || !accountReady || !hasNameOrQrChanges;
+  const saveLooksActive = accountReady && hasNameOrQrChanges && !saved;
 
   useEffect(() => {
     setName(initialName);
@@ -663,19 +907,61 @@ function SettingsModal({
     setSelectedStyle((qrStyle as QrStyle) || "rounded");
   }, [qrStyle]);
 
+  useEffect(() => {
+    setSelectedQrMode((qrMode as QrMode) || "standard");
+  }, [qrMode]);
+
   const handleLogoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const prepared = await prepareImageForUpload(file, { maxDimension: 1024, quality: 0.88 });
-      setLogoPreview(prepared.dataUrl);
+      if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error("Use a PNG, JPG, or WebP image.");
+      if (file.size > MAX_IMAGE_UPLOAD_BYTES) throw new Error("Image must be 10 MB or smaller.");
+      const dataUrl = await readFileAsDataUrl(file);
+      const image = await loadImage(dataUrl);
+      setLogoCropSource({
+        dataUrl,
+        width: image.naturalWidth || image.width,
+        height: image.naturalHeight || image.height,
+        fileName: file.name,
+      });
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid image file");
+    } finally {
+      e.target.value = "";
     }
   };
+
+  const saveLogoData = async (logoData: string | null) => {
+    if (!accountReady) { setError("Merchant account is still syncing. Please try again shortly."); return; }
+    setLogoSaving(true);
+    setError("");
+    try {
+      const res = await fetch("/api/merchant/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Api-Key": apiKey },
+        body: JSON.stringify({ logoData }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setError(d.error || "Logo update failed");
+        return;
+      }
+      const savedProfile = await res.json().catch(() => null);
+      const savedLogo = logoData && isSupportedLogoValue(savedProfile?.logoData) ? savedProfile.logoData : (logoData || "");
+      setLogoPreview(savedLogo);
+      if (onLogoSaved) onLogoSaved(savedLogo);
+    } catch {
+      setError("Network error - please try again");
+    } finally {
+      setLogoSaving(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!accountReady) { setError("Merchant account is still syncing. Please try again shortly."); return; }
+    if (!hasNameOrQrChanges) return;
     if (!name.trim()) { setError("Business name cannot be empty"); return; }
     if (name.trim().length > 80) { setError("Business name must be 80 characters or fewer"); return; }
     setSaving(true);
@@ -687,26 +973,24 @@ function SettingsModal({
         qrFgColor: dotColor,
         qrBgColor: bgColor,
         qrStyle: selectedStyle,
+        qrMode: selectedQrMode,
       };
-      if (!logoPreview) body.logoData = null;
-      else if (isSupportedLogoValue(logoPreview)) body.logoData = logoPreview;
       const res = await fetch("/api/merchant/profile", {
         method: "PUT",
         headers: { "Content-Type": "application/json", "X-Api-Key": apiKey },
         body: JSON.stringify(body),
       });
       if (!res.ok) { const d = await res.json(); setError(d.error || "Failed to save"); return; }
-      const saved = await res.json().catch(() => null);
-      const savedLogo = isSupportedLogoValue(saved?.logoData) ? saved.logoData : (isSupportedLogoValue(logoPreview) ? logoPreview : "");
+      await res.json().catch(() => null);
       onNameSaved(name.trim());
-      if (onLogoSaved) onLogoSaved(savedLogo);
       // Persist QR prefs locally (wallet-scoped) so they survive page reload without a profile fetch
       try {
         localStorage.setItem(`serapay_qr_fgColor_${walletAddress}`, dotColor);
         localStorage.setItem(`serapay_qr_bgColor_${walletAddress}`, bgColor);
         localStorage.setItem(`serapay_qr_style_${walletAddress}`, selectedStyle);
+        localStorage.setItem(`serapay_qr_mode_${walletAddress}`, selectedQrMode);
       } catch {}
-      if (onQrPrefsSaved) onQrPrefsSaved(dotColor, bgColor, selectedStyle);
+      if (onQrPrefsSaved) onQrPrefsSaved(dotColor, bgColor, selectedStyle, selectedQrMode);
       setSaved(true);
       setTimeout(() => { setSaved(false); onClose(); }, 1200);
     } catch {
@@ -788,21 +1072,23 @@ function SettingsModal({
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
                 <button
                   onClick={() => logoInputRef.current?.click()}
+                  disabled={logoSaving}
                   style={{
                     padding: "8px 14px", borderRadius: 10, border: "1.5px solid rgba(78,206,154,0.4)",
                     background: "#F4FBF8", color: "#3EBE8A", fontSize: 13, fontWeight: 600,
-                    cursor: "pointer",
+                    cursor: logoSaving ? "default" : "pointer",
                   }}
                 >
-                  {logoPreview ? "Change" : "Upload Logo"}
+                  {logoSaving ? "Saving..." : logoPreview ? "Change" : "Upload Logo"}
                 </button>
                 {logoPreview && (
                   <button
-                    onClick={() => setLogoPreview("")}
+                    onClick={() => void saveLogoData(null)}
+                    disabled={logoSaving}
                     style={{
                       padding: "8px 12px", borderRadius: 10, border: "1.5px solid rgba(255,59,48,0.25)",
                       background: "#FFF5F5", color: "#FF3B30", fontSize: 13, fontWeight: 600,
-                      cursor: "pointer",
+                      cursor: logoSaving ? "default" : "pointer",
                     }}
                   >
                     Remove
@@ -818,18 +1104,58 @@ function SettingsModal({
             accept="image/png,image/jpeg,image/webp"
             style={{ display: "none" }}
             onChange={handleLogoChange}
+            disabled={logoSaving}
           />
         </div>
         {/* QR Style + Colors */}
         <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
           <label style={{ fontSize: 12, fontWeight: 600, color: "rgba(60,60,67,0.5)", textTransform: "uppercase", letterSpacing: "0.08em" }}>QR Style &amp; Colors</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {([
+              { id: "advanced" as QrMode, label: "Advanced QR Mode", desc: "Auto coloring based on logo" },
+              { id: "standard" as QrMode, label: "Standard Mode", desc: "Classic QR colors" },
+            ]).map((modeOption) => {
+              const active = selectedQrMode === modeOption.id;
+              return (
+                <button
+                  key={modeOption.id}
+                  type="button"
+                  onClick={() => { setSelectedQrMode(modeOption.id); setError(""); setSaved(false); }}
+                  style={{
+                    minHeight: 62,
+                    borderRadius: 14,
+                    border: active ? "1.5px solid #3EBE8A" : "1.5px solid rgba(60,60,67,0.12)",
+                    background: active ? "#F0FAF6" : "#fff",
+                    color: "#1C1C1E",
+                    cursor: "pointer",
+                    padding: "10px 11px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 9,
+                    textAlign: "left",
+                    boxSizing: "border-box",
+                  }}
+                >
+                  <span style={{ width: 18, height: 18, borderRadius: 5, border: active ? "none" : "1.5px solid rgba(60,60,67,0.24)", background: active ? "#3EBE8A" : "#fff", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {active ? (
+                      <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    ) : null}
+                  </span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 12, fontWeight: 800, lineHeight: 1.15 }}>{modeOption.label}</span>
+                    <span style={{ display: "block", marginTop: 3, fontSize: 10, color: "rgba(60,60,67,0.45)", lineHeight: 1.2 }}>{modeOption.desc}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
             <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 5 }}>
-              <span style={{ fontSize: 11, color: "rgba(60,60,67,0.5)", fontWeight: 650 }}>Style</span>
-              <QRStylePicker value={selectedStyle} onChange={setSelectedStyle} />
+              <span style={{ fontSize: 11, color: selectedQrMode === "advanced" ? "rgba(60,60,67,0.32)" : "rgba(60,60,67,0.5)", fontWeight: 650 }}>Style</span>
+              <QRStylePicker value={selectedStyle} onChange={(style) => { setSelectedStyle(style); setError(""); setSaved(false); }} disabled={selectedQrMode === "advanced"} />
             </div>
-            <ColorField label="Dot Color" value={dotColor} onChange={setDotColor} />
-            <ColorField label="Background" value={bgColor} onChange={setBgColor} />
+            <ColorField label="Dot Color" value={dotColor} onChange={(color) => { setDotColor(color); setError(""); setSaved(false); }} disabled={selectedQrMode === "advanced"} />
+            <ColorField label="Background" value={bgColor} onChange={(color) => { setBgColor(color); setError(""); setSaved(false); }} />
           </div>
         </div>
 
@@ -844,6 +1170,7 @@ function SettingsModal({
               bgColor={bgColor}
               style={selectedStyle}
               logo={logoPreview || undefined}
+              mode={selectedQrMode}
             />
           </div>
           <p style={{ fontSize: 10, color: "rgba(60,60,67,0.35)", textAlign: "center", margin: 0 }}>Live preview — updates as you change style and colors</p>
@@ -880,23 +1207,23 @@ function SettingsModal({
 
         {/* Save button */}
         <button
-          onClick={!accountReady && accountError ? onRetryAccount : handleSave}
-          disabled={saving || saved || (!accountReady && !accountError)}
-          className={!accountReady && accountError ? "serapay-action-danger" : "serapay-action-primary"}
+          onClick={() => { if (isRetryAccountAction) onRetryAccount?.(); else void handleSave(); }}
+          disabled={saveDisabled}
+          className={isRetryAccountAction ? "serapay-action-danger" : "serapay-action-primary"}
           style={{
             width: "100%", minHeight: 56, borderRadius: 18,
-            background: !accountReady ? (accountError ? "#FFF5F5" : "#E8ECEA") : saved ? "#E8F8F0" : "linear-gradient(135deg, #4ECE9A, #2FAA7D)",
-            border: saved ? "1px solid rgba(0,168,85,0.3)" : accountError && !accountReady ? "1px solid rgba(255,59,48,0.3)" : "none",
-            color: !accountReady ? (accountError ? "#FF3B30" : "rgba(60,60,67,0.45)") : saved ? "#00A855" : "#fff",
-            fontSize: 16, fontWeight: 800, cursor: saving || saved || (!accountReady && !accountError) ? "default" : "pointer",
-            boxShadow: !accountReady || saved ? "none" : "0 8px 22px rgba(78,206,154,0.32)",
+            background: isRetryAccountAction ? "#FFF5F5" : !accountReady ? "#E8ECEA" : saved ? "#E8F8F0" : saveLooksActive ? "linear-gradient(135deg, #4ECE9A, #2FAA7D)" : "#E8ECEA",
+            border: saved ? "1px solid rgba(0,168,85,0.3)" : isRetryAccountAction ? "1px solid rgba(255,59,48,0.3)" : "none",
+            color: isRetryAccountAction ? "#FF3B30" : !accountReady || (!saveLooksActive && !saved) ? "rgba(60,60,67,0.45)" : saved ? "#00A855" : "#fff",
+            fontSize: 16, fontWeight: 800, cursor: saveDisabled ? "default" : "pointer",
+            boxShadow: saveLooksActive ? "0 8px 22px rgba(78,206,154,0.32)" : "none",
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             transition: "all 0.2s",
             flexShrink: 0,
           }}
         >
-          {!accountReady && accountError ? "Retry Account Setup" : null}
-          <span style={{ display: !accountReady && accountError ? "none" : "contents" }}>
+          {isRetryAccountAction ? "Retry Account Setup" : null}
+          <span style={{ display: isRetryAccountAction ? "none" : "contents" }}>
           {!accountReady ? "Preparing Account…" : saved ? (
             <>
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -904,16 +1231,291 @@ function SettingsModal({
               </svg>
               Saved!
             </>
-          ) : saving ? "Saving…" : "Save Changes"}
+          ) : saving ? "Saving…" : "Save"}
           </span>
         </button>
+        </div>
+      </div>
+      {logoCropSource ? (
+        <LogoCropModal
+          source={logoCropSource}
+          uploading={logoSaving}
+          onCancel={() => setLogoCropSource(null)}
+          onConfirm={(dataUrl) => {
+            void saveLogoData(dataUrl).then(() => setLogoCropSource(null));
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+// ── Payment Toast Banner ──────────────────────────────────────────────
+type HomeLoginMethod = "wallet" | "email" | "google" | "telegram";
+
+function WalletQrScannerModal({
+  onClose,
+  onDetected,
+}: {
+  onClose: () => void;
+  onDetected: (address: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [message, setMessage] = useState("Point the camera at a wallet QR.");
+
+  useEffect(() => {
+    let stopped = false;
+    let raf = 0;
+    let stream: MediaStream | null = null;
+    let detector: BarcodeDetectorLike | null = null;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    async function startScanner() {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setMessage("Camera access is not available in this browser.");
+        return;
+      }
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+        const video = videoRef.current;
+        if (!video) return;
+        video.srcObject = stream;
+        await video.play();
+
+        if (window.BarcodeDetector) {
+          detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        }
+        setMessage("Point the camera at a wallet QR.");
+
+        const scan = async () => {
+          if (stopped || !videoRef.current) return;
+          let rawValue = "";
+          try {
+            if (detector) {
+              const codes = await detector.detect(videoRef.current);
+              rawValue = codes[0]?.rawValue || "";
+            }
+          } catch {
+            // Some browsers throw while the video element is still warming up.
+          }
+
+          if (!rawValue && ctx && videoRef.current.readyState >= 2 && videoRef.current.videoWidth > 0) {
+            try {
+              canvas.width = videoRef.current.videoWidth;
+              canvas.height = videoRef.current.videoHeight;
+              ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+              const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              rawValue = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "attemptBoth" })?.data || "";
+            } catch {
+              // Keep scanning; the next animation frame usually has a usable video frame.
+            }
+          }
+
+          if (rawValue) {
+            const address = extractWalletAddressFromQr(rawValue);
+            if (address) {
+              onDetected(address);
+              return;
+            }
+            setMessage("QR found, but it does not contain an EVM wallet address.");
+          }
+          raf = requestAnimationFrame(scan);
+        };
+        raf = requestAnimationFrame(scan);
+      } catch (error: any) {
+        setMessage(error?.message || "Unable to open the camera. Paste the wallet address instead.");
+      }
+    }
+
+    void startScanner();
+
+    return () => {
+      stopped = true;
+      if (raf) cancelAnimationFrame(raf);
+      stream?.getTracks().forEach((track) => track.stop());
+    };
+  }, [onDetected]);
+
+  return (
+    <>
+      <div style={{ position: "fixed", inset: 0, zIndex: 82, background: "rgba(0,0,0,0.38)", backdropFilter: "blur(6px)" }} onClick={onClose} />
+      <div style={{ position: "fixed", inset: 0, zIndex: 83, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "none" }}>
+        <div style={{ width: "min(420px, calc(100vw - 32px))", borderRadius: 22, background: "#fff", boxShadow: "0 24px 70px rgba(10,31,26,0.2)", padding: 18, boxSizing: "border-box", pointerEvents: "auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <div>
+              <h3 style={{ margin: 0, color: "#0A1F1A", fontSize: 18, fontWeight: 850 }}>Scan wallet QR</h3>
+              <p style={{ margin: "4px 0 0", color: "rgba(60,60,67,0.58)", fontSize: 12 }}>{message}</p>
+            </div>
+            <button type="button" onClick={onClose} aria-label="Close" style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "#F2F2F7", color: "rgba(60,60,67,0.55)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+          <div style={{ position: "relative", overflow: "hidden", borderRadius: 18, background: "#0A1F1A", aspectRatio: "1 / 1" }}>
+            <video ref={videoRef} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            <div style={{ position: "absolute", inset: 36, borderRadius: 18, border: "2px solid rgba(255,255,255,0.78)", boxShadow: "0 0 0 999px rgba(10,31,26,0.28)" }} />
+          </div>
         </div>
       </div>
     </>
   );
 }
 
-// ── Payment Toast Banner ──────────────────────────────────────────────
+function HeaderNetworkBadge({ activeMode }: { activeMode: PaymentMode }) {
+  const isLive = activeMode === "live";
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6,
+      height: 30,
+      padding: "0 10px",
+      borderRadius: 999,
+      border: "1px solid rgba(10,31,26,0.08)",
+      background: "#fff",
+      color: "rgba(10,31,26,0.72)",
+      fontSize: 11,
+      fontWeight: 750,
+      whiteSpace: "nowrap",
+      flexShrink: 0,
+      boxShadow: "0 1px 8px rgba(10,31,26,0.04)",
+    }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: isLive ? "#00C896" : "#FFB020" }} />
+      Network: {isLive ? "Live" : "Testnet"}
+    </span>
+  );
+}
+
+function GuestReceiverModal({
+  onClose,
+  onSubmitAddress,
+  onConnect,
+  onSeraLogin,
+}: {
+  onClose: () => void;
+  onSubmitAddress: (address: string) => void;
+  onConnect: (methods: HomeLoginMethod[]) => void;
+  onSeraLogin: () => void;
+}) {
+  const [address, setAddress] = useState("");
+  const [error, setError] = useState("");
+  const [showScanner, setShowScanner] = useState(false);
+
+  const submit = () => {
+    const nextAddress = address.trim();
+    if (!isValidEvmAddress(nextAddress)) {
+      setError("Enter a valid EVM wallet address.");
+      return;
+    }
+    onSubmitAddress(nextAddress);
+  };
+
+  const optionStyle: React.CSSProperties = {
+    width: "100%",
+    minHeight: 54,
+    borderRadius: 15,
+    border: "1px solid rgba(10,31,26,0.08)",
+    background: "#fff",
+    color: "#0A1F1A",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "10px 12px",
+    cursor: "pointer",
+    textAlign: "left",
+    fontFamily: font,
+  };
+
+  return (
+    <>
+      <div style={{ position: "fixed", inset: 0, zIndex: 70, background: "rgba(0,0,0,0.32)", backdropFilter: "blur(6px)" }} onClick={onClose} />
+      <div style={{ position: "fixed", inset: 0, zIndex: 71, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "none" }}>
+        <div style={{ width: "min(460px, calc(100vw - 32px))", borderRadius: 24, background: "#fff", boxShadow: "0 24px 70px rgba(10,31,26,0.18)", padding: 22, boxSizing: "border-box", pointerEvents: "auto" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 18 }}>
+            <div>
+              <h3 style={{ margin: 0, color: "#0A1F1A", fontSize: 20, fontWeight: 850 }}>Receive to wallet</h3>
+              <p style={{ margin: "6px 0 0", color: "rgba(60,60,67,0.6)", fontSize: 13, lineHeight: 1.45 }}>Add the wallet that should receive this QR payment.</p>
+            </div>
+            <button type="button" onClick={onClose} aria-label="Close" style={{ width: 36, height: 36, borderRadius: "50%", border: "none", background: "#F2F2F7", color: "rgba(60,60,67,0.55)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+
+          <label style={{ display: "block", marginBottom: 8, color: "rgba(60,60,67,0.5)", fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>Enter your wallet</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ position: "relative", minWidth: 0, flex: 1 }}>
+              <input
+                value={address}
+                onChange={(event) => { setAddress(event.target.value); setError(""); }}
+                onKeyDown={(event) => { if (event.key === "Enter") submit(); }}
+                placeholder="0x..."
+                spellCheck={false}
+                style={{ width: "100%", height: 50, borderRadius: 15, border: `1.5px solid ${error ? "rgba(255,59,48,0.45)" : "rgba(10,31,26,0.10)"}`, background: "#F9F9FB", color: "#0A1F1A", fontSize: 14, fontWeight: 600, padding: "0 48px 0 14px", outline: "none", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", boxSizing: "border-box" }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowScanner(true)}
+                aria-label="Scan wallet QR"
+                style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", width: 34, height: 34, borderRadius: 12, border: "1px solid rgba(10,31,26,0.08)", background: "#fff", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
+              >
+                <QrCode size={17} />
+              </button>
+            </div>
+            <button type="button" onClick={submit} className="serapay-action-primary" aria-label="Use wallet address" style={{ width: 54, height: 50, borderRadius: 15, border: "none", background: "linear-gradient(135deg, #00C896, #00A87A, #008A64)", color: "#fff", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <ArrowRight size={20} strokeWidth={2.8} />
+            </button>
+          </div>
+          {error ? <p style={{ margin: "8px 0 0", color: "#FF3B30", fontSize: 12, fontWeight: 650 }}>{error}</p> : null}
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 14px" }}>
+            <div style={{ height: 1, background: "rgba(10,31,26,0.08)", flex: 1 }} />
+            <span style={{ color: "rgba(60,60,67,0.42)", fontSize: 11, fontWeight: 750, letterSpacing: "0.08em", textTransform: "uppercase" }}>Or connect with</span>
+            <div style={{ height: 1, background: "rgba(10,31,26,0.08)", flex: 1 }} />
+          </div>
+
+          <div style={{ display: "grid", gap: 10 }}>
+            <button type="button" onClick={onSeraLogin} style={{ ...optionStyle, background: "#F4FBF8", borderColor: "rgba(0,168,122,0.22)" }}>
+              <span style={{ width: 36, height: 36, borderRadius: 12, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}><img src="/apple-icon-180x180.png" alt="" style={{ width: 28, height: 28, borderRadius: "50%", display: "block" }} /></span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <img src="/sera-logo.svg" alt="Sera.cx" style={{ display: "block", height: 14, width: 82, objectFit: "contain", objectPosition: "left center" }} />
+                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Fast sign-in with SeraPay</span>
+              </span>
+            </button>
+            <button type="button" onClick={() => onConnect(["wallet"])} style={optionStyle}>
+              <span style={{ width: 36, height: 36, borderRadius: 12, background: "#E6FAF5", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Wallet size={18} /></span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>Existing wallets</span>
+                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>MetaMask, OKX, Trust Wallet and more</span>
+              </span>
+            </button>
+            <button type="button" onClick={() => onConnect(["email", "google", "telegram"])} style={optionStyle}>
+              <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F4F5F8", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Mail size={17} /></span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>Other socials</span>
+                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Email, Google and Telegram</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+      {showScanner ? (
+        <WalletQrScannerModal
+          onClose={() => setShowScanner(false)}
+          onDetected={(nextAddress) => {
+            setAddress(nextAddress);
+            setError("");
+            setShowScanner(false);
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function PaymentToast({ amount, coin, onDismiss }: { amount: string; coin: string; onDismiss: () => void }) {
   useEffect(() => {
     const t = setTimeout(onDismiss, 5000);
@@ -1097,6 +1699,7 @@ function TransactionHistory({ apiKey, chainId }: { apiKey: string; chainId: numb
 // ── Main Home Page ─────────────────────────────────────────────────────────
 export default function Home() {
   const { login, authenticated, ready, user } = usePrivy();
+  const { initOAuth } = useLoginWithOAuth();
   const { apiKey: dashboardApiKey, walletAddress: authWalletAddress, logout: authLogout, retry: retryAccountSetup, error: accountSetupError, isLoading: accountSetupLoading } = useAuth();
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
@@ -1122,6 +1725,9 @@ export default function Home() {
   const [rateLoading, setRateLoading] = useState(false);
   const rateAbortRef = useRef<AbortController | null>(null);
   const [paymentUrl, setPaymentUrl] = useState("");
+  const [guestReceiverAddress, setGuestReceiverAddress] = useState("");
+  const [showGuestReceiverModal, setShowGuestReceiverModal] = useState(false);
+  const [qrMode, setQrMode] = useState<"browser" | "wallet">("browser");
   const [showCoinSheet, setShowCoinSheet] = useState(false);
   const [showCustomerCoinSheet, setShowCustomerCoinSheet] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -1139,6 +1745,7 @@ export default function Home() {
   const [localQrFgColor, setLocalQrFgColor] = useState("");
   const [localQrBgColor, setLocalQrBgColor] = useState("");
   const [localQrStyle, setLocalQrStyle] = useState<QrStyle>("" as QrStyle);
+  const [localQrMode, setLocalQrMode] = useState<QrMode>("" as QrMode);
   // QR generation options
   const [description, setDescription] = useState("");
   const [expiryOption, setExpiryOption] = useState<"none" | "15m" | "1h" | "24h" | "7d">("none");
@@ -1150,12 +1757,15 @@ export default function Home() {
   const [showQrCoinSheet, setShowQrCoinSheet] = useState(false);
   const [showQrReceiveCoinSheet, setShowQrReceiveCoinSheet] = useState(false);
   const [qrRateLoading, setQrRateLoading] = useState(false);
+  const [directPaymentNotice, setDirectPaymentNotice] = useState<{ amount: string; coin: string } | null>(null);
+  const directScanFromBlockRef = useRef<string | null>(null);
+  const directScanSeenHashRef = useRef("");
 
   const walletAddress = authWalletAddress ||
     user?.wallet?.address ||
     (user?.linkedAccounts as any[])?.find((a: any) => a.type === "wallet")?.address ||
     "";
-  const receiverAddress = merchantProfile?.storeAddress || walletAddress;
+  const receiverAddress = merchantProfile?.storeAddress || walletAddress || guestReceiverAddress;
   const isConnected = authenticated;
   const merchantWorkspaceReady = Boolean(dashboardApiKey && walletAddress);
 
@@ -1193,6 +1803,90 @@ export default function Home() {
       await login();
     } catch {}
   }, [isConnected, login, setLocation]);
+
+  const openLoginMethods = useCallback((methods: HomeLoginMethod[]) => {
+    try {
+      (login as any)({ loginMethods: methods });
+      setShowGuestReceiverModal(false);
+    } catch {}
+  }, [login]);
+
+  const openSeraGoogleLogin = useCallback(() => {
+    setShowGuestReceiverModal(false);
+    void initOAuth({ provider: "google" });
+  }, [initOAuth]);
+
+  useEffect(() => {
+    const normalizedAmount = normalizeDecimalAmountText(amount);
+    const directWatchUri = buildDirectWalletPaymentUri({
+      receiverAddress,
+      coin: selectedCoin,
+      amount,
+      chainId: paymentChainId,
+      customerCoin,
+    });
+    if (
+      step !== 2 ||
+      !paymentUrl ||
+      qrMode !== "wallet" ||
+      !directWatchUri ||
+      !selectedCoin ||
+      !receiverAddress ||
+      !normalizedAmount
+    ) {
+      return;
+    }
+
+    let stopped = false;
+    let timer: number | undefined;
+
+    const scan = async () => {
+      try {
+        const res = await fetch("/api/payment/direct/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            toAddress: receiverAddress,
+            coin: selectedCoin.symbol,
+            amount: normalizedAmount,
+            chainId: paymentChainId,
+            paymentUrl,
+            fromBlock: directScanFromBlockRef.current,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (res.status >= 400 && res.status < 500) return;
+          throw new Error(data?.error || "Unable to scan direct payment");
+        }
+        if (!directScanFromBlockRef.current && data?.fromBlock) {
+          directScanFromBlockRef.current = String(data.fromBlock);
+        }
+        if (data?.status === "confirmed" && data?.transaction?.txHash) {
+          const txHash = String(data.transaction.txHash);
+          if (directScanSeenHashRef.current !== txHash) {
+            directScanSeenHashRef.current = txHash;
+            setDirectPaymentNotice({
+              amount: String(data.transaction.amount || normalizedAmount),
+              coin: String(data.transaction.coin || selectedCoin.symbol),
+            });
+            queryClient.invalidateQueries({ queryKey: ["/merchant/transactions"] });
+          }
+          return;
+        }
+      } catch {
+        // Keep polling; short RPC/API hiccups should not kill the merchant-facing QR display.
+      }
+
+      if (!stopped) timer = window.setTimeout(scan, 5000);
+    };
+
+    void scan();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [amount, customerCoin?.symbol, paymentChainId, paymentUrl, qrMode, queryClient, receiverAddress, selectedCoin, step]);
 
   // ── Fetch exchange rate whenever coins change ──────────────────────────
   useEffect(() => {
@@ -1245,9 +1939,11 @@ export default function Home() {
       const fg = localStorage.getItem(`serapay_qr_fgColor_${walletAddress}`);
       const bg = localStorage.getItem(`serapay_qr_bgColor_${walletAddress}`);
       const st = localStorage.getItem(`serapay_qr_style_${walletAddress}`) as QrStyle;
+      const mode = localStorage.getItem(`serapay_qr_mode_${walletAddress}`) as QrMode;
       if (fg) setLocalQrFgColor(fg);
       if (bg) setLocalQrBgColor(bg);
       if (st) setLocalQrStyle(st);
+      if (mode === "standard" || mode === "advanced") setLocalQrMode(mode);
     } catch {}
   }, [isConnected, walletAddress]);
   // Hydrate localLogoData from profile once it loads (so logo shows in QR after page refresh)
@@ -1269,17 +1965,19 @@ export default function Home() {
     receiveAmount?: string;
     payCoin?: Stablecoin | null;
     payAmount?: string;
+    receiverAddress?: string;
     includeExpiry?: boolean;
   } = {}) => {
     const receiveCoin = overrides.receiveCoin ?? selectedCoin;
-    if (!receiveCoin || !receiverAddress) return "";
+    const receiveAddress = overrides.receiverAddress ?? receiverAddress;
+    if (!receiveCoin || !receiveAddress) return "";
     const receiveAmount = overrides.receiveAmount ?? amount;
     const payCoin = overrides.payCoin ?? customerCoin;
     const payAmount = overrides.payAmount ?? customerAmount;
     const includeExpiry = overrides.includeExpiry ?? true;
 
     return buildPaymentUrl({
-      receiverAddress,
+      receiverAddress: receiveAddress,
       receiveCoin: receiveCoin.symbol,
       chainId: paymentChainId,
       amount: receiveAmount || undefined,
@@ -1305,11 +2003,49 @@ export default function Home() {
   }, [selectedCoin, customerCoin, amount, customerAmount]);
 
   const handleGenerateQR = useCallback(() => {
+    if (!selectedCoin) return;
+    if (!receiverAddress) {
+      setShowGuestReceiverModal(true);
+      return;
+    }
     const url = createPaymentUrl();
     if (!url) return;
+    const directWalletUri = buildDirectWalletPaymentUri({
+      receiverAddress,
+      coin: selectedCoin,
+      amount,
+      chainId: paymentChainId,
+      customerCoin,
+    });
+    directScanFromBlockRef.current = null;
+    directScanSeenHashRef.current = "";
+    setDirectPaymentNotice(null);
+    setQrMode(directWalletUri ? "wallet" : "browser");
     setPaymentUrl(url);
     setStep(2);
-  }, [createPaymentUrl]);
+  }, [amount, createPaymentUrl, customerCoin, paymentChainId, receiverAddress, selectedCoin]);
+
+  const handleGuestReceiverSubmit = useCallback((address: string) => {
+    if (!selectedCoin) return;
+    const nextAddress = address.trim();
+    setGuestReceiverAddress(nextAddress);
+    setShowGuestReceiverModal(false);
+    const url = createPaymentUrl({ receiverAddress: nextAddress });
+    if (!url) return;
+    const directWalletUri = buildDirectWalletPaymentUri({
+      receiverAddress: nextAddress,
+      coin: selectedCoin,
+      amount,
+      chainId: paymentChainId,
+      customerCoin,
+    });
+    directScanFromBlockRef.current = null;
+    directScanSeenHashRef.current = "";
+    setDirectPaymentNotice(null);
+    setQrMode(directWalletUri ? "wallet" : "browser");
+    setPaymentUrl(url);
+    setStep(2);
+  }, [amount, createPaymentUrl, customerCoin, paymentChainId, selectedCoin]);
 
   const handleCopyLink = useCallback(async () => {
     try {
@@ -1319,28 +2055,35 @@ export default function Home() {
     } catch {}
   }, [paymentUrl]);
 
-   const handleDownloadQR = useCallback(() => {
+  const handleDownloadQR = useCallback(() => {
     setQrDownloading(true);
     setTimeout(async () => {
       try {
-        // 1. Grab the QR SVG from the DOM
         const qrWrapper = document.getElementById("serapay-qr-wrapper");
-        const svg = qrWrapper?.querySelector("svg");
-        if (!svg) { setQrDownloading(false); return; }
-
-        // 2. Convert SVG → Image
-        const svgData = new XMLSerializer().serializeToString(svg);
-        const svgBlob = new Blob([svgData], { type: "image/svg+xml;charset=utf-8" });
-        const svgUrl = URL.createObjectURL(svgBlob);
-        const qrImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = reject;
-          i.src = svgUrl;
+        if (!qrWrapper) { setQrDownloading(false); return; }
+        const qrSvg = qrWrapper.querySelector("svg");
+        const qrCanvas = qrWrapper.querySelector("canvas");
+        const loadCanvasImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+          const image = new Image();
+          image.crossOrigin = "anonymous";
+          image.onload = () => resolve(image);
+          image.onerror = reject;
+          image.src = src;
         });
-        URL.revokeObjectURL(svgUrl);
 
-        // 3. Draw branded payment card on canvas
+        let qrObjectUrl = "";
+        let qrSource = "";
+        if (qrSvg) {
+          const clone = qrSvg.cloneNode(true) as SVGElement;
+          clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+          qrSource = new XMLSerializer().serializeToString(clone);
+          qrObjectUrl = URL.createObjectURL(new Blob([qrSource], { type: "image/svg+xml;charset=utf-8" }));
+        } else if (qrCanvas instanceof HTMLCanvasElement) {
+          qrSource = qrCanvas.toDataURL("image/png");
+        }
+        if (!qrSource) throw new Error("QR image is not ready yet");
+        const qrImg = await loadCanvasImage(qrObjectUrl || qrSource);
+
         const W = 600, H = 920;
         const canvas = document.createElement("canvas");
         canvas.width = W; canvas.height = H;
@@ -1383,13 +2126,13 @@ export default function Home() {
         ctx.arc(W / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
         ctx.clip();
         if (logoData) {
-          const logoImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const i = new Image();
-            i.onload = () => resolve(i);
-            i.onerror = reject;
-            i.src = logoData;
-          });
-          ctx.drawImage(logoImg, logoX, logoY, logoSize, logoSize);
+          try {
+            const logoImg = await loadCanvasImage(logoData);
+            ctx.drawImage(logoImg, logoX, logoY, logoSize, logoSize);
+          } catch {
+            ctx.fillStyle = "#E8F9F2";
+            ctx.fillRect(logoX, logoY, logoSize, logoSize);
+          }
         } else {
           // Initials circle
           ctx.fillStyle = "#E8F9F2";
@@ -1455,6 +2198,7 @@ export default function Home() {
         a.href = canvas.toDataURL("image/png");
         a.download = `serapay-payment-${merchantName ? merchantName.replace(/\s+/g, "-").toLowerCase() : "card"}-${_displayCoin?.symbol ?? "qr"}.png`;
         a.click();
+        if (qrObjectUrl) URL.revokeObjectURL(qrObjectUrl);
       } catch (e) {
         console.error("QR card download failed:", e);
       }
@@ -1503,7 +2247,7 @@ export default function Home() {
   }
 
   // ── Unauthenticated landing page ───────────────────────────────────────
-  if (!isConnected) {
+  if (false && !isConnected) {
     return (
       <>
       <div style={{
@@ -1587,7 +2331,7 @@ export default function Home() {
     );
   }
 
-  if (!merchantWorkspaceReady) {
+  if (isConnected && !merchantWorkspaceReady) {
     return (
       <AccountSetupScreen
         walletAddress={walletAddress}
@@ -1604,7 +2348,19 @@ export default function Home() {
     // Determine display values: show what customer pays
     const displayCoin = customerCoin ?? selectedCoin;
     const displayAmount = customerAmount || amount;
-    const receiveLabel = `You receive ${amount ? amount + " " : ""}${selectedCoin?.symbol ?? ""}`;
+    const directWalletQrValue = buildDirectWalletPaymentUri({
+      receiverAddress,
+      coin: selectedCoin,
+      amount,
+      chainId: paymentChainId,
+      customerCoin,
+    });
+    const activeQrMode = qrMode === "wallet" && directWalletQrValue ? "wallet" : "browser";
+    const activeQrValue = activeQrMode === "wallet" ? directWalletQrValue : paymentUrl;
+    const activeQrRenderMode = localQrMode || (merchantProfile?.qrMode as QrMode) || "standard";
+    const activeQrLogo = localLogoData || merchantProfile?.logoData || undefined;
+    const activeQrFgColor = normalizeQrColor(localQrFgColor || merchantProfile?.qrFgColor, "#000000");
+    const activeQrBgColor = normalizeQrColor(localQrBgColor || merchantProfile?.qrBgColor, "#ffffff");
 
     const handleQrEditSave = () => {
       if (!qrEditAmount || isNaN(parseFloat(qrEditAmount))) { setQrEditMode(false); return; }
@@ -1633,9 +2389,24 @@ export default function Home() {
         const sameAmount = normalizeDecimalAmountText(amount);
         setCustomerAmount(sameAmount);
         const newUrl = createPaymentUrl({ payCoin: coin, payAmount: sameAmount });
+        const directUri = buildDirectWalletPaymentUri({
+          receiverAddress,
+          coin: selectedCoin,
+          amount,
+          chainId: paymentChainId,
+          customerCoin: coin,
+        });
+        directScanFromBlockRef.current = null;
+        directScanSeenHashRef.current = "";
+        setDirectPaymentNotice(null);
+        setQrMode(directUri ? "wallet" : "browser");
         setPaymentUrl(newUrl);
         return;
       }
+      setQrMode("browser");
+      directScanFromBlockRef.current = null;
+      directScanSeenHashRef.current = "";
+      setDirectPaymentNotice(null);
       setQrRateLoading(true);
       fetch(`/api/rates?from=${selectedCoin.symbol}&to=${coin.symbol}&chainId=${paymentChainId}`)
         .then(r => r.json())
@@ -1655,12 +2426,21 @@ export default function Home() {
 
     return (
       <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
+        {directPaymentNotice ? (
+          <PaymentToast
+            amount={parseFloat(directPaymentNotice.amount).toLocaleString(undefined, { maximumFractionDigits: 6 })}
+            coin={directPaymentNotice.coin}
+            onDismiss={() => setDirectPaymentNotice(null)}
+          />
+        ) : null}
         <SeraPayHeader
           maxWidth={1240}
           compact
-          walletAddress={walletAddress}
-          dashboardAction={{ label: "Dashboard", onClick: () => setLocation("/dashboard") }}
-          disconnectAction={{ label: "Disconnect", onClick: authLogout }}
+          afterLogoContent={<HeaderNetworkBadge activeMode={paymentMode} />}
+          walletAddress={isConnected ? walletAddress : ""}
+          primaryAction={!isConnected ? { label: "Dashboard", onClick: handleConnectWallet } : undefined}
+          dashboardAction={isConnected ? { label: "Dashboard", onClick: () => setLocation("/dashboard") } : undefined}
+          disconnectAction={isConnected ? { label: "Disconnect", onClick: authLogout } : undefined}
         />
 
         <div style={{ maxWidth: 520, margin: "0 auto", padding: "18px 16px 40px", minHeight: "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
@@ -1697,31 +2477,63 @@ export default function Home() {
                 <span style={{ fontSize: 14, color: "rgba(60,60,67,0.4)", fontWeight: 500 }}>Calculating…</span>
               </div>
             ) : displayAmount ? (
-              <p style={{ fontSize: 28, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
-                {parseFloat(displayAmount).toLocaleString(undefined, { maximumFractionDigits: 6 })} <span style={{ color: "#00D1A0" }}>{displayCoin?.symbol}</span>
-              </p>
+              <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, margin: "0 0 4px" }}>
+                <span style={{ fontSize: 28, fontWeight: 800, color: "#0A1F1A", letterSpacing: "-0.5px" }}>
+                  {parseFloat(displayAmount).toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowQrCoinSheet(true)}
+                  aria-label="Change customer pay currency"
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "#00D1A0",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: 0,
+                    fontSize: 28,
+                    fontWeight: 800,
+                    cursor: "pointer",
+                    fontFamily: font,
+                  }}
+                >
+                  {displayCoin?.symbol}
+                  <ArrowUpDown size={16} strokeWidth={2.6} />
+                </button>
+              </div>
             ) : (
               // No amount set (open-amount QR) — still show the coin so merchant knows what's configured
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
-                <span style={{ fontSize: 28, fontWeight: 800, color: "#00D1A0", letterSpacing: "-0.5px" }}>{displayCoin?.symbol ?? selectedCoin?.symbol}</span>
+                <button
+                  type="button"
+                  onClick={() => setShowQrCoinSheet(true)}
+                  aria-label="Change customer pay currency"
+                  style={{ border: "none", background: "transparent", color: "#00D1A0", display: "inline-flex", alignItems: "center", gap: 6, padding: 0, fontSize: 28, fontWeight: 800, cursor: "pointer", fontFamily: font, letterSpacing: "-0.5px" }}
+                >
+                  {displayCoin?.symbol ?? selectedCoin?.symbol}
+                  <ArrowUpDown size={16} strokeWidth={2.6} />
+                </button>
               </div>
             )}
             {/* Spacer — receiveLabel moved below QR */}
             {/* QR Code */}
             <div id="serapay-qr-wrapper" style={{
               display: "inline-block",
-              background: localQrBgColor || merchantProfile?.qrBgColor || "#ffffff",
+              background: activeQrBgColor,
               borderRadius: 16,
               overflow: "hidden",
               maxWidth: "100%", boxSizing: "border-box" as const,
             }}>
               <QRStyled
-                value={paymentUrl}
+                value={activeQrValue}
                 size={Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320)}
-                fgColor={localQrFgColor || merchantProfile?.qrFgColor || "#000000"}
-                bgColor={localQrBgColor || merchantProfile?.qrBgColor || "#ffffff"}
+                fgColor={activeQrFgColor}
+                bgColor={activeQrBgColor}
                 style={localQrStyle || (merchantProfile?.qrStyle as QrStyle) || "rounded"}
-                logo={localLogoData || merchantProfile?.logoData || undefined}
+                logo={activeQrLogo}
+                mode={activeQrRenderMode}
                 className="qr-step2-container"
               />
             </div>
@@ -1729,112 +2541,118 @@ export default function Home() {
             <p style={{ fontSize: 10, color: "rgba(60,60,67,0.2)", marginTop: 10, marginBottom: 0, wordBreak: "break-all", lineHeight: 1.4 }}>
               {receiverAddress}
             </p>
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(10,31,26,0.06)" }}>
+              <p style={{ margin: "0 0 8px", color: "rgba(60,60,67,0.42)", fontSize: 11, fontWeight: 750 }}>Supported with</p>
+              <div style={{ display: "flex", justifyContent: "center", gap: 7, flexWrap: "wrap" }}>
+                {SUPPORTED_WALLETS.map((wallet) => (
+                  <span key={wallet.name} title={wallet.name} style={{ width: 30, height: 30, borderRadius: "50%", background: "#fff", border: "1px solid rgba(10,31,26,0.08)", display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 5px rgba(10,31,26,0.05)", overflow: "hidden" }}>
+                    <img src={wallet.logo} alt={wallet.name} style={{ width: 23, height: 23, borderRadius: "50%", objectFit: "cover", display: "block" }} />
+                  </span>
+                ))}
+              </div>
+              {directWalletQrValue ? (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>
+                  <button
+                    type="button"
+                    onClick={() => setQrMode("wallet")}
+                    className={activeQrMode === "wallet" ? "serapay-action-primary" : "serapay-action-secondary"}
+                    style={{
+                      minHeight: 40,
+                      borderRadius: 13,
+                      border: activeQrMode === "wallet" ? "none" : "1px solid rgba(10,31,26,0.08)",
+                      background: activeQrMode === "wallet" ? "linear-gradient(135deg, #00C896, #00A87A, #008A64)" : "#fff",
+                      color: activeQrMode === "wallet" ? "#fff" : "#0A1F1A",
+                      fontSize: 12,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Scan wallet QR
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQrMode("browser")}
+                    style={{
+                      minHeight: 40,
+                      borderRadius: 13,
+                      border: activeQrMode === "browser" ? "none" : "1px solid rgba(10,31,26,0.08)",
+                      background: activeQrMode === "browser" ? "#0A1F1A" : "#fff",
+                      color: activeQrMode === "browser" ? "#fff" : "#0A1F1A",
+                      fontSize: 12,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                    }}
+                  >
+                    No wallets?
+                  </button>
+                </div>
+              ) : (
+                <p style={{ margin: "10px 0 0", color: "rgba(60,60,67,0.48)", fontSize: 11, lineHeight: 1.45 }}>
+                  Scan with a browser to choose Sera.cx, existing wallets, or socials.
+                </p>
+              )}
+              {directWalletQrValue ? (
+                <p style={{ margin: "9px 0 0", color: "rgba(60,60,67,0.46)", fontSize: 11, lineHeight: 1.45 }}>
+                  {activeQrMode === "wallet" ? "Wallet apps can open this same-coin token transfer directly." : "Browser QR opens the SeraPay checkout page."}
+                </p>
+              ) : null}
+              <div style={{ display: "grid", gridTemplateColumns: activeQrMode === "browser" ? "1fr 1fr" : "1fr", gap: 8, marginTop: 12 }}>
+                <button
+                  type="button"
+                  onClick={handleDownloadQR}
+                  disabled={qrDownloading}
+                  className="serapay-action-secondary"
+                  style={{
+                    minHeight: 40,
+                    borderRadius: 13,
+                    border: "1px solid rgba(10,31,26,0.08)",
+                    background: "#fff",
+                    color: "#0A1F1A",
+                    fontSize: 12,
+                    fontWeight: 800,
+                    cursor: qrDownloading ? "default" : "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                  }}
+                >
+                  <Download size={14} />
+                  {qrDownloading ? "Downloading..." : "Download QR"}
+                </button>
+                {activeQrMode === "browser" ? (
+                  <button
+                    type="button"
+                    onClick={handleCopyLink}
+                    className="serapay-action-primary"
+                    style={{
+                      minHeight: 40,
+                      borderRadius: 13,
+                      border: "none",
+                      background: copied ? "linear-gradient(135deg, #4ECE9A, #3AB882)" : "linear-gradient(135deg, #00C896, #00A87A, #008A64)",
+                      color: "#fff",
+                      fontSize: 12,
+                      fontWeight: 800,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <Copy size={14} />
+                    {copied ? "Copied" : "Copy Link"}
+                  </button>
+                ) : null}
+              </div>
+            </div>
           </div>
           {/* Merchant receives line — directly above action buttons */}
-          {amount && selectedCoin && (
+          {/* {amount && selectedCoin && (
             <p style={{ fontSize: 12, color: "rgba(60,60,67,0.5)", textAlign: "center", margin: "0 0 12px", fontWeight: 500 }}>
               {merchantName ? `${merchantName} receives` : "Merchant receives"} <strong style={{ color: "#1C1C1E" }}>{parseFloat(amount).toLocaleString(undefined, { maximumFractionDigits: 6 })} {selectedCoin.symbol}</strong>
             </p>
-          )}
-          {/* Action buttons — Row 1: Copy Link + Save QR */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-            {/* Copy Link button */}
-            <button onClick={handleCopyLink} className="serapay-action-primary" style={{
-              height: 54, borderRadius: 16,
-              background: copied ? "linear-gradient(135deg, #4ECE9A, #3AB882)" : "linear-gradient(135deg, #4ECE9A, #3AB882)",
-              border: "none", color: "#fff",
-              fontSize: 14, fontWeight: 700, cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              boxShadow: "0 6px 20px rgba(78,206,154,0.28)",
-              transition: "all 0.2s",
-            }}>
-              {copied
-                ? <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                : <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-              }
-              {copied ? "Copied!" : "Copy Link"}
-            </button>
-            <button onClick={handleDownloadQR} disabled={qrDownloading} className="serapay-action-secondary" style={{
-              height: 54, borderRadius: 16,
-              background: "#fff", border: "1px solid rgba(0,0,0,0.08)",
-              color: "#1C1C1E", fontSize: 14, fontWeight: 600, cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              boxShadow: "0 1px 8px rgba(0,0,0,0.05)",
-            }}>
-              <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-              {qrDownloading ? "Saving…" : "Save QR"}
-            </button>
-          </div>
-
-          {/* Action buttons — Row 2: Edit Amount + Change Pay Coin */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-            {/* Edit Amount */}
-            <button onClick={() => { setQrEditAmount(amount); setQrEditMode(true); }} className="serapay-action-secondary" style={{
-              height: 50, borderRadius: 16,
-              background: "#fff", border: "1px solid rgba(0,0,0,0.08)",
-              color: "#1C1C1E", fontSize: 14, fontWeight: 600, cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              boxShadow: "0 1px 8px rgba(0,0,0,0.05)",
-            }}>
-              <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-              Edit Amount
-            </button>
-            {/* Change Pay Coin */}
-            <button onClick={() => setShowQrCoinSheet(true)} className="serapay-action-secondary" style={{
-              height: 50, borderRadius: 16,
-              background: "#fff", border: "1px solid rgba(0,0,0,0.08)",
-              color: "#1C1C1E", fontSize: 14, fontWeight: 600, cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              boxShadow: "0 1px 8px rgba(0,0,0,0.05)",
-            }}>
-              <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-              </svg>
-              {displayCoin?.symbol ?? "Pay Coin"}
-            </button>
-           </div>
-          {/* Action buttons — Row 3: Print */}
-          <div style={{ marginTop: 0 }}>
-            <button
-              onClick={() => {
-                const printWindow = window.open("", "_blank");
-                if (!printWindow) return;
-                const qrContainer = document.querySelector<HTMLElement>(".qr-step2-container");
-                const qrSvg = qrContainer?.querySelector("svg");
-                let qrDataUrl = "";
-                if (qrSvg) {
-                  const svgData = new XMLSerializer().serializeToString(qrSvg);
-                  qrDataUrl = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svgData)));
-                }
-                const printedAt = new Date().toLocaleString();
-                const safeMerchantName = merchantName ? escapeHtml(merchantName) : "SeraPay";
-                const safeDescription = description ? escapeHtml(description) : "";
-                const merchantInfo = merchantName ? `<p class="merchant">${safeMerchantName}</p>` : "";
-                const amountInfo = amount && selectedCoin ? `<p class="amount">${parseFloat(amount).toLocaleString(undefined, { maximumFractionDigits: 6 })} ${escapeHtml(selectedCoin.symbol)}</p>` : "";
-                const descInfo = safeDescription ? `<p class="desc">${safeDescription}</p>` : "";
-                const expiryInfo = expiryOption !== "none" ? `<p class="expiry">Expires ${expiryOption === "15m" ? "15 minutes" : expiryOption === "1h" ? "1 hour" : expiryOption === "24h" ? "24 hours" : "7 days"} from generation</p>` : "";
-                printWindow.document.write(`<!DOCTYPE html><html><head><title>SeraPay QR Code</title><style>@page{margin:0}*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;margin:0;background:#fff;color:#0A1F1A;text-align:center;padding:36px 34px 72px;display:flex;align-items:center;justify-content:center}.sheet{width:min(440px,100%);margin:auto}.merchant{font-size:18px;font-weight:750;margin:0 0 6px}.amount{font-size:32px;font-weight:850;margin:0 0 6px;letter-spacing:0}.desc{font-size:14px;color:#586B65;margin:0 0 18px}.qr-frame{position:relative;width:334px;height:334px;margin:18px auto 14px;border:10px solid #F0FBF6;border-radius:28px;padding:17px;background:#fff;box-shadow:inset 0 0 0 1px rgba(0,209,160,.14)}.qr-frame img.qr{width:280px;height:280px;display:block;margin:0}.qr-logo{position:absolute;left:50%;top:50%;width:58px;height:58px;transform:translate(-50%,-50%);border-radius:16px;background:#fff;padding:8px;box-shadow:0 2px 10px rgba(10,31,26,.14)}.scan{font-size:13px;color:#586B65;margin:8px 0 0}.expiry{font-size:12px;color:#7A8D87;margin:8px 0 0}.footer{position:fixed;left:0;right:0;bottom:22px;font-size:11px;color:#8A9E98;line-height:1.5}.footer strong{display:block;color:#0A1F1A;font-size:12px}@media print{body{padding-bottom:78px}.qr-frame{box-shadow:none}}</style></head><body><main class="sheet">${merchantInfo}${amountInfo}${descInfo}<div class="qr-frame"><img class="qr" src="${qrDataUrl}" alt="QR Code" /><img class="qr-logo" src="${SERAPAY_LOGO_URL}" alt="SeraPay" /></div><p class="scan">Scan to pay with any stablecoin</p>${expiryInfo}</main><footer class="footer"><strong>SeraPay QR Code</strong><span>${escapeHtml(printedAt)}</span></footer></body></html>`);
-                printWindow.document.close();
-                setTimeout(() => printWindow.print(), 300);
-              }}
-              className="serapay-action-secondary"
-              style={{
-                width: "100%", height: 44, borderRadius: 14,
-                background: "#fff", border: "1px solid rgba(0,0,0,0.08)",
-                color: "rgba(60,60,67,0.6)", fontSize: 13, fontWeight: 600, cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                boxShadow: "0 1px 8px rgba(0,0,0,0.05)",
-              }}
-              aria-label="Print QR code"
-            >
-              <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
-              </svg>
-              Print QR
-            </button>
-          </div>
+          )} */}
           <button
             onClick={handleReset}
             className="serapay-back-to-form"
@@ -1984,14 +2802,16 @@ export default function Home() {
     <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
       <SeraPayHeader
         maxWidth={1240}
-        walletAddress={walletAddress}
+        walletAddress={isConnected ? walletAddress : ""}
         afterLogoContent={<PaymentModeSwitch activeMode={paymentMode} />}
-        dashboardAction={{ label: "Dashboard", onClick: () => setLocation("/dashboard") }}
-        disconnectAction={{ label: "Disconnect", onClick: authLogout }}
+        primaryAction={!isConnected ? { label: "Dashboard", onClick: handleConnectWallet } : undefined}
+        dashboardAction={isConnected ? { label: "Dashboard", onClick: () => setLocation("/dashboard") } : undefined}
+        disconnectAction={isConnected ? { label: "Disconnect", onClick: authLogout } : undefined}
       />
 
       <div style={{ maxWidth: 520, margin: "0 auto", padding: "24px 16px 40px", minHeight: "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
         {/* Business name display with circular logo avatar */}
+        {isConnected ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, paddingLeft: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {/* Circular logo avatar — tap to upload */}
@@ -2019,6 +2839,7 @@ export default function Home() {
             Edit
           </button>
         </div>
+        ) : null}
 
         {/* Section label */}
         <p style={{ fontSize: 10, fontWeight: 600, color: "rgba(60,60,67,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6, paddingLeft: 4 }}>
@@ -2257,17 +3078,17 @@ export default function Home() {
         {/* Generate QR button */}
         <button
           onClick={handleGenerateQR}
-          disabled={!selectedCoin || !receiverAddress}
+          disabled={!selectedCoin}
           className="serapay-action-primary serapay-shine-button"
           style={{
             width: "100%", height: 54, borderRadius: 16,
-            background: selectedCoin && receiverAddress
+            background: selectedCoin
               ? "linear-gradient(135deg, #4ECE9A, #3AB882)"
               : "rgba(0,0,0,0.08)",
             border: "none",
-            color: selectedCoin && receiverAddress ? "#fff" : "rgba(60,60,67,0.3)",
-            fontSize: 16, fontWeight: 700, cursor: selectedCoin && receiverAddress ? "pointer" : "not-allowed",
-            boxShadow: selectedCoin && receiverAddress ? "0 4px 12px rgba(78,206,154,0.18)" : "none",
+            color: selectedCoin ? "#fff" : "rgba(60,60,67,0.3)",
+            fontSize: 16, fontWeight: 700, cursor: selectedCoin ? "pointer" : "not-allowed",
+            boxShadow: selectedCoin ? "0 4px 12px rgba(78,206,154,0.18)" : "none",
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             transition: "all 0.2s",
           }}
@@ -2276,7 +3097,7 @@ export default function Home() {
             <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
             <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
           </svg>
-          {!selectedCoin ? "Select a coin first" : "Generate QR & Payment Link"}
+          {!selectedCoin ? "Select a coin first" : "Generate QR"}
         </button>
 
         {/* Info strip */}
@@ -2328,12 +3149,22 @@ export default function Home() {
           qrFgColor={localQrFgColor || merchantProfile?.qrFgColor || "#000000"}
           qrBgColor={localQrBgColor || merchantProfile?.qrBgColor || "#ffffff"}
           qrStyle={localQrStyle || merchantProfile?.qrStyle || "rounded"}
-          onQrPrefsSaved={(fg, bg, style) => { setLocalQrFgColor(fg); setLocalQrBgColor(bg); setLocalQrStyle(style); }}
+          qrMode={localQrMode || merchantProfile?.qrMode || "standard"}
+          onQrPrefsSaved={(fg, bg, style, mode) => { setLocalQrFgColor(fg); setLocalQrBgColor(bg); setLocalQrStyle(style); setLocalQrMode(mode); }}
           accountError={accountSetupError}
           accountLoading={accountSetupLoading}
           onRetryAccount={retryAccountSetup}
         />
       )}
+
+      {showGuestReceiverModal ? (
+        <GuestReceiverModal
+          onClose={() => setShowGuestReceiverModal(false)}
+          onSubmitAddress={handleGuestReceiverSubmit}
+          onConnect={openLoginMethods}
+          onSeraLogin={openSeraGoogleLogin}
+        />
+      ) : null}
 
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');`}</style>
     </div>

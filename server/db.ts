@@ -113,10 +113,12 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "qrFgColor" varchar(9),
       "qrBgColor" varchar(9),
       "qrStyle" varchar(20),
+      "qrMode" varchar(20) DEFAULT 'standard',
       "createdAt" timestamptz NOT NULL DEFAULT now(),
       "updatedAt" timestamptz NOT NULL DEFAULT now()
     );
     ALTER TABLE "merchants" ADD COLUMN IF NOT EXISTS "description" varchar(500);
+    ALTER TABLE "merchants" ADD COLUMN IF NOT EXISTS "qrMode" varchar(20) DEFAULT 'standard';
     CREATE INDEX IF NOT EXISTS "idx_merchants_wallet" ON "merchants" ("walletAddress");
 
     CREATE TABLE IF NOT EXISTS "transactions" (
@@ -465,6 +467,15 @@ export async function getMerchantByWallet(walletAddress: string): Promise<Mercha
   const db = await getDb();
   if (!db) return Array.from(memory.merchants.values()).find((m) => m.walletAddress === walletAddress.toLowerCase());
   const result = await db.select().from(merchants).where(eq(merchants.walletAddress, walletAddress.toLowerCase())).limit(1);
+  return result[0];
+}
+
+export async function getMerchantByStoreAddress(storeAddress: string): Promise<Merchant | undefined> {
+  const pgPool = await getPostgresPool();
+  if (pgPool) return pgSelectOne<Merchant>(pgPool, "merchants", `"storeAddress" = $1`, [storeAddress.toLowerCase()]);
+  const db = await getDb();
+  if (!db) return Array.from(memory.merchants.values()).find((m) => m.storeAddress === storeAddress.toLowerCase());
+  const result = await db.select().from(merchants).where(eq(merchants.storeAddress, storeAddress.toLowerCase())).limit(1);
   return result[0];
 }
 
