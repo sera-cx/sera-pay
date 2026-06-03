@@ -236,6 +236,13 @@
   box-shadow: 0 10px 22px rgba(0, 138, 100, 0.25) !important;
 }
 
+.serapay-no-lift:not(:disabled):hover,
+.serapay-no-lift:not(:disabled):active,
+.serapay-no-lift:not(:disabled):focus-visible {
+  transform: none !important;
+  box-shadow: none !important;
+}
+
 .serapay-shine-button:not(:disabled):hover::after {
   transform: translateX(120%);
 }

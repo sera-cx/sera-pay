@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "wouter";
-import { useLoginWithOAuth, usePrivy, useWallets } from "@privy-io/react-auth";
+import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
-import { ArrowUpDown, ChevronRight, MoreHorizontal, Wallet } from "lucide-react";
+import { ChevronDown, ChevronRight, Wallet } from "lucide-react";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
 import { decodePaymentRequest } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
@@ -250,6 +250,11 @@ function formatTokenAmount(value: number) {
   return formatDecimalAmount(value) || "0.00";
 }
 
+function parseDisplayAmount(value?: string | null) {
+  const parsed = Number(String(value ?? "").replace(/[~,]/g, ""));
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
 class PaymentApiError extends Error {
   errorCode?: string;
   detail?: unknown;
@@ -318,7 +323,7 @@ function paymentFailureMessage(error: any): string {
     return "Please add or switch to the payment network in your wallet, then try again.";
   }
   if (/string did not match the expected pattern|Load failed|URI malformed|invalid url|Failed to construct 'URL'/i.test(message)) {
-    return "Your wallet browser could not open this payment request. Please try Connect with existing wallets, or open the browser payment QR.";
+    return "Your wallet browser could not open this payment request. Please try Connect existing wallet, or open the browser payment QR.";
   }
   if (error?.errorCode === "no_liquidity" || /no liquidity|No liquidity is available/i.test(message)) {
     return "Currently there is no liquidity for this transaction. Please try a different payment coin.";
@@ -567,13 +572,39 @@ function RateChangedModal({ oldAmount, newAmount, coin, onAccept, onCancel }: {
   );
 }
 
+function LeaveCheckoutModal({ onConfirm, onCancel }: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <>
+      <div style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }} onClick={onCancel} />
+      <div style={{ position: "fixed", inset: 0, zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div style={{ background: "#fff", borderRadius: 22, padding: 24, maxWidth: 400, width: "100%", boxShadow: "0 18px 70px rgba(0,0,0,0.22)", textAlign: "center" }}>
+          <h3 style={{ fontSize: 19, fontWeight: 800, color: "#101828", margin: "0 0 8px" }}>Leave checkout?</h3>
+          <p style={{ fontSize: 14, color: "rgba(60,60,67,0.62)", lineHeight: 1.5, margin: "0 0 22px" }}>
+            Your payment has not been completed. Return to the order page?
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <button onClick={onCancel} style={{ height: 48, borderRadius: 14, border: "1px solid rgba(0,0,0,0.08)", background: "#fff", color: "#1C1C1E", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+              Stay here
+            </button>
+            <button onClick={onConfirm} style={{ height: 48, borderRadius: 14, border: "none", background: "#FF3B30", color: "#fff", fontSize: 14, fontWeight: 800, cursor: "pointer", boxShadow: "0 10px 24px rgba(255,59,48,0.22)" }}>
+              Back to order
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 type Phase = "loading" | "connect" | "select-coin" | "paying" | "success" | "failed" | "invalid";
 type PaymentLoginMethod = "wallet" | "google" | "email" | "twitter";
 
 export default function PayPage() {
   const { encoded } = useParams<{ encoded: string }>();
   const { ready, authenticated, login } = usePrivy();
-  const { initOAuth } = useLoginWithOAuth();
   const { wallets } = useWallets();
   const isConnected = authenticated;
 
@@ -581,6 +612,7 @@ export default function PayPage() {
   const [req, setReq] = useState<ReturnType<typeof decodePaymentRequest> | null>(null);
   const [selectedCoin, setSelectedCoin] = useState<Stablecoin | null>(null);
   const [showCoinSheet, setShowCoinSheet] = useState(false);
+  const [showLeaveCheckout, setShowLeaveCheckout] = useState(false);
   const [txHash, setTxHash] = useState("");
   const [txId, setTxId] = useState("");
   const [txError, setTxError] = useState("");
@@ -597,6 +629,7 @@ export default function PayPage() {
   const [rateExpiry, setRateExpiry] = useState<number | null>(null); // timestamp ms when rate expires
   const [countdown, setCountdown] = useState(RATE_TTL_SECONDS);
   const rateRef = useRef<number | null>(null); // raw rate number for comparison
+  const orderPaymentCoinRef = useRef<string | null>(null);
 
   // Rate-changed confirmation
   const [showRateChanged, setShowRateChanged] = useState(false);
@@ -619,13 +652,17 @@ export default function PayPage() {
   const [unifiedCoin, setUnifiedCoin] = useState<string | null>(null);     // e.g. "USDC"
   const [unifiedNote, setUnifiedNote] = useState<string | null>(null);     // e.g. "Includes EURT items converted at live rate"
   const [unifiedLoading, setUnifiedLoading] = useState(false);
+  const [orderMinimumPayAmount, setOrderMinimumPayAmount] = useState<string | null>(null);
   const [rateRefreshKey, setRateRefreshKey] = useState(0);
   const chainId = req?.chainId ?? 1;
+  const hasOrderItems = !!req?.orderItems?.length;
 
   // Compute itemised order total in the currently selected payment coin.
   useEffect(() => {
     if (!req?.orderItems || req.orderItems.length === 0 || !selectedCoin) {
       setUnifiedAmount(null); setUnifiedCoin(null); setUnifiedNote(null); setReceiveAmount(null);
+      setOrderMinimumPayAmount(null);
+      orderPaymentCoinRef.current = null;
       return;
     }
     const orderItems = req.orderItems;
@@ -639,7 +676,15 @@ export default function PayPage() {
           totalOrderItemsInCoin(orderItems, req.receiveCoin, req.receiveCoin, chainId),
         ]);
         if (cancelled) return;
-        setPayAmount(payTotal.amount);
+        const previousCoin = orderPaymentCoinRef.current;
+        orderPaymentCoinRef.current = targetCoin;
+        setOrderMinimumPayAmount(payTotal.amount);
+        setPayAmount(prev => {
+          if (previousCoin !== targetCoin) return payTotal.amount;
+          const prevNum = parseDisplayAmount(prev);
+          const minNum = parseDisplayAmount(payTotal.amount);
+          return prev && Number.isFinite(prevNum) && Number.isFinite(minNum) && prevNum >= minNum ? prev : payTotal.amount;
+        });
         setReceiveAmount(receiveTotal.amount);
         setUnifiedAmount(`${payTotal.convertedCoins.length ? "~" : ""}${payTotal.amount}`);
         setUnifiedCoin(targetCoin);
@@ -661,7 +706,31 @@ export default function PayPage() {
   const requiresSeraSwap = Boolean(req && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
   const selectedCoinSupported = Boolean(selectedCoin && (requiresSeraSwap || COIN_ADDRESSES[selectedCoin.symbol]?.[chainId]));
   // True when the payment request has no fixed amount — customer types their own amount
-  const isOpenAmount = !req?.amount;
+  const isOpenAmount = !hasOrderItems && !req?.amount;
+  const showEditableAmount = isOpenAmount || hasOrderItems;
+
+  useEffect(() => {
+    if (!payAmount) {
+      setAmountError("");
+      return;
+    }
+    const amountNum = parseDisplayAmount(payAmount);
+    if (!Number.isFinite(amountNum)) {
+      setAmountError("Enter a valid amount");
+      return;
+    }
+    if (hasOrderItems && orderMinimumPayAmount) {
+      const minNum = parseDisplayAmount(orderMinimumPayAmount);
+      if (Number.isFinite(minNum) && amountNum < minNum) {
+        setAmountError(`Minimum amount is ${orderMinimumPayAmount} ${selectedCoin?.symbol ?? unifiedCoin ?? ""}`.trim());
+        return;
+      }
+    } else if (isOpenAmount && amountNum < 0.01) {
+      setAmountError("Minimum amount is 0.01");
+      return;
+    }
+    setAmountError("");
+  }, [hasOrderItems, isOpenAmount, orderMinimumPayAmount, payAmount, selectedCoin?.symbol, unifiedCoin]);
 
   // Gas fee estimation
   const [gasUsd, setGasUsd] = useState<string | null>(null);
@@ -997,10 +1066,7 @@ export default function PayPage() {
   }, [login]);
 
   const handleConnectWallet = useCallback(() => openPrivyLogin(["wallet"]), [openPrivyLogin]);
-  const handleGoogleLogin = useCallback(() => {
-    void initOAuth({ provider: "google" });
-  }, [initOAuth]);
-  const handleOtherLogin = useCallback(() => openPrivyLogin(["email", "google", "twitter"]), [openPrivyLogin]);
+  const handleSeraLogin = useCallback(() => openPrivyLogin(["email", "google", "twitter"]), [openPrivyLogin]);
 
   const handlePay = useCallback(async () => {
     if (!req || !selectedCoin || !payAmount) return;
@@ -1012,12 +1078,25 @@ export default function PayPage() {
           totalOrderItemsInCoin(req.orderItems, req.receiveCoin, selectedCoin.symbol, chainId),
           totalOrderItemsInCoin(req.orderItems, req.receiveCoin, req.receiveCoin, chainId),
         ]);
-        setPayAmount(payTotal.amount);
-        setReceiveAmount(receiveTotal.amount);
+        const minimumPayNum = parseDisplayAmount(payTotal.amount);
+        const chosenPayAmount = normalizeDecimalAmountText((payAmount || payTotal.amount).replace(/,/g, ""));
+        const chosenPayNum = parseDisplayAmount(chosenPayAmount);
+        if (!chosenPayAmount || !Number.isFinite(chosenPayNum) || !Number.isFinite(minimumPayNum) || chosenPayNum < minimumPayNum) {
+          setAmountError(`Minimum amount is ${payTotal.amount} ${selectedCoin.symbol}`);
+          return;
+        }
+        const receiveTotalNum = parseDisplayAmount(receiveTotal.amount);
+        const finalReceiveAmount =
+          chosenPayNum > minimumPayNum && minimumPayNum > 0 && Number.isFinite(receiveTotalNum) && receiveTotalNum > 0
+            ? (formatDecimalAmount((chosenPayNum / minimumPayNum) * receiveTotalNum) || receiveTotal.amount)
+            : receiveTotal.amount;
+        setOrderMinimumPayAmount(payTotal.amount);
+        setPayAmount(chosenPayAmount);
+        setReceiveAmount(finalReceiveAmount);
         setUnifiedAmount(`${payTotal.convertedCoins.length ? "~" : ""}${payTotal.amount}`);
         setUnifiedCoin(selectedCoin.symbol);
         setUnifiedNote(payTotal.convertedCoins.length ? `Includes ${payTotal.convertedCoins.join(", ")} converted at live rate` : null);
-        await executePay(payTotal.amount, receiveTotal.amount);
+        await executePay(chosenPayAmount, finalReceiveAmount);
       } catch {
         setTxError("Unable to refresh the currency conversion. Please try again.");
         setPhase("failed");
@@ -1068,7 +1147,7 @@ export default function PayPage() {
     } finally {
       setRateLoading(false);
     }
-  }, [req, selectedCoin, payAmount, executePay]);
+  }, [req, selectedCoin, payAmount, executePay, chainId]);
 
   const handleDownloadReceipt = useCallback(async () => {
     const W = 80;
@@ -1371,9 +1450,19 @@ export default function PayPage() {
   }
 
   const isSameCoin = selectedCoin?.symbol === req?.receiveCoin;
-  const hasOrderItems = !!req?.orderItems?.length;
   const showCountdown = !!rateExpiry && !!selectedCoin && (hasOrderItems || (!isSameCoin && !!req?.amount));
   const isPaymentTestnet = chainId === 11155111;
+  const returnToOrder = () => {
+    if (req?.menuSlug) {
+      window.location.href = `/menu/${req.menuSlug}?chainId=${chainId}`;
+      return;
+    }
+    if (window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    window.location.href = "/menu";
+  };
   const payOptionStyle: React.CSSProperties = {
     width: "100%",
     minHeight: 58,
@@ -1450,7 +1539,7 @@ export default function PayPage() {
                 <p style={{ fontSize: 11, fontWeight: 600, color: "rgba(60,60,67,0.4)", textTransform: "uppercase", letterSpacing: "0.08em", margin: "0 0 8px" }}>
                   {payAmount || req.amount || unifiedAmount ? "Amount Due" : "Open Amount"}
                 </p>
-                {isOpenAmount ? (
+                {showEditableAmount ? (
                   // Open-amount: always show the editable input — never replace it with static display
                   <>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
@@ -1463,12 +1552,6 @@ export default function PayPage() {
                         onChange={e => {
                           const clean = limitDecimalPlaces(e.target.value);
                           setPayAmount(clean || null);
-                          const num = parseFloat(clean);
-                          if (clean && (isNaN(num) || num < 0.01)) {
-                            setAmountError("Minimum amount is 0.01");
-                          } else {
-                            setAmountError("");
-                          }
                         }}
                         onKeyDown={e => {
                           // Prevent Enter from bubbling to any parent handler
@@ -1479,7 +1562,7 @@ export default function PayPage() {
                       />
                       <button onClick={() => setShowCoinSheet(true)} aria-label="Select payment coin" style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin ?? "USDT"}
-                        <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
+                        <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                       </button>
                     </div>
                     {amountError && <p style={{ fontSize: 11, color: "#FF3B30", margin: "6px 0 0", fontWeight: 500 }}>{amountError}</p>}
@@ -1491,7 +1574,7 @@ export default function PayPage() {
                       {unifiedAmount}{" "}
                       <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? unifiedCoin}
-                        <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
+                        <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                       </button>
                     </p>
                     {unifiedNote && (
@@ -1508,7 +1591,7 @@ export default function PayPage() {
                       {payAmount}{" "}
                       <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin}
-                        <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
+                        <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                       </button>
                     </p>
                     {!isSameCoin && req.amount && req.receiveCoin && (
@@ -1526,7 +1609,7 @@ export default function PayPage() {
                     {req.amount}{" "}
                     <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                       {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin}
-                      <ArrowUpDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
+                      <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
                     </button>
                   </p>
                 ) : null}
@@ -1597,32 +1680,24 @@ export default function PayPage() {
               <button onClick={handleConnectWallet} style={{ ...payOptionStyle, borderColor: "rgba(0,168,122,0.28)", background: "#F4FBF8" }}>
                 <span style={{ width: 36, height: 36, borderRadius: 12, background: "#E6FAF5", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><Wallet size={18} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Connect with existing wallets</span>
+                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Connect existing wallet</span>
                   <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Use an EVM wallet to sign and pay</span>
                 </span>
                 <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
               </button>
-              <button onClick={handleGoogleLogin} style={payOptionStyle}>
+              <button onClick={handleSeraLogin} style={payOptionStyle}>
                 <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F4FBF8", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto", overflow: "hidden" }}><img src="/apple-icon-180x180.png" alt="" style={{ width: 28, height: 28, borderRadius: "50%", display: "block" }} /></span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <img src="/sera-logo.svg" alt="Sera.cx" style={{ display: "block", height: 14, width: 82, objectFit: "contain", objectPosition: "left center" }} />
-                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Continue with SeraPay sign-in</span>
-                </span>
-                <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
-              </button>
-              <button onClick={handleOtherLogin} style={payOptionStyle}>
-                <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F9F9FB", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}><MoreHorizontal size={18} /></span>
-                <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ display: "block", fontSize: 14, fontWeight: 750 }}>Other socials</span>
-                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Email, Google and X</span>
+                  <span style={{ display: "block", fontSize: 12, color: "rgba(60,60,67,0.5)", marginTop: 2 }}>Sign in with Sera</span>
                 </span>
                 <ChevronRight size={18} color="rgba(60,60,67,0.35)" />
               </button>
             </div>
-            {req?.menuSlug ? (
-              <a href={`/menu/${req.menuSlug}?chainId=${chainId}`} style={{ display: "block", marginTop: 12, textAlign: "center", color: "#FF3B30", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
-                Back to menu
-              </a>
+            {hasOrderItems ? (
+              <button type="button" onClick={() => setShowLeaveCheckout(true)} className="serapay-back-link" style={{ display: "block", width: "100%", marginTop: 12, textAlign: "center", color: "rgba(60,60,67,0.46)", fontSize: 13, fontWeight: 700, textDecoration: "none", background: "none", border: "none", cursor: "pointer" }}>
+                Back to order
+              </button>
             ) : null}
           </div>
         )}
@@ -1686,10 +1761,10 @@ export default function PayPage() {
             >
               {rateLoading ? t.calculating : t.confirmAndPay}
             </button>
-            {req.menuSlug ? (
-              <a href={`/menu/${req.menuSlug}`} style={{ display: "block", marginTop: 12, textAlign: "center", color: "#FF3B30", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
-                Back to menu
-              </a>
+            {hasOrderItems ? (
+              <button type="button" onClick={() => setShowLeaveCheckout(true)} className="serapay-back-link" style={{ display: "block", width: "100%", marginTop: 12, textAlign: "center", color: "rgba(60,60,67,0.46)", fontSize: 13, fontWeight: 700, textDecoration: "none", background: "none", border: "none", cursor: "pointer" }}>
+                Back to order
+              </button>
             ) : null}
           </div>
         )}
@@ -1728,6 +1803,13 @@ export default function PayPage() {
             setShowRateChanged(false);
             setPhase("select-coin");
           }}
+        />
+      )}
+
+      {showLeaveCheckout && hasOrderItems && (
+        <LeaveCheckoutModal
+          onCancel={() => setShowLeaveCheckout(false)}
+          onConfirm={returnToOrder}
         />
       )}
 

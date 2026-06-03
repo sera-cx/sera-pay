@@ -563,15 +563,15 @@ export function Settings() {
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
                 <QrCode className="w-4 h-4 text-[#00D1A0]" />
-                QR Dot Style
+                Style
               </CardTitle>
               <CardDescription>Choose how the QR code dots look on your payment page.</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+              <div className="grid grid-cols-1 gap-2.5 mb-4">
                 {([
-                  { id: "advanced" as QrMode, label: "Advanced QR Mode", desc: "Auto coloring based on logo" },
-                  { id: "standard" as QrMode, label: "Standard Mode", desc: "Classic QR colors" },
+                  { id: "advanced" as QrMode, label: "Advanced QR", desc: "Auto coloring based on logo" },
+                  { id: "standard" as QrMode, label: "Standard QR", desc: "Classic QR colors" },
                 ]).map((modeOption) => {
                   const active = qrMode === modeOption.id;
                   return (
@@ -579,29 +579,27 @@ export function Settings() {
                       key={modeOption.id}
                       type="button"
                       onClick={() => handleQrModeChange(modeOption.id)}
-                      className={`flex items-center gap-2 rounded-xl border-2 p-3 text-left transition-all ${active ? "border-[#00D1A0] bg-[#F0FAF6]" : "border-border/40 hover:border-[#00D1A0]/50"}`}
+                      className={`flex min-h-[58px] items-center gap-3 rounded-2xl border-2 px-3.5 py-2.5 text-left transition-all ${active ? "border-[#00D1A0] bg-[#F0FAF6]" : "border-border/40 hover:border-[#00D1A0]/50"}`}
                     >
-                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${active ? "bg-[#00D1A0] text-white" : "border border-border/60 bg-white"}`}>
-                        {active ? <Check className="h-3 w-3" /> : null}
+                      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg ${active ? "bg-[#00D1A0] text-white" : "border border-border/60 bg-white"}`}>
+                        {active ? <Check className="h-3.5 w-3.5" /> : null}
                       </span>
                       <span className="min-w-0">
-                        <span className="block text-xs font-semibold text-foreground">{modeOption.label}</span>
-                        <span className="block text-[10px] text-muted-foreground">{modeOption.desc}</span>
+                        <span className="block text-xs font-extrabold text-foreground">{modeOption.label}</span>
+                        <span className="block text-[11px] text-muted-foreground">{modeOption.desc}</span>
                       </span>
                     </button>
                   );
                 })}
               </div>
+              <label className="text-sm font-semibold text-foreground block mb-2">QR Design</label>
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                 {QR_STYLES.map(s => (
                   <button
                     key={s.id}
-                    onClick={() => { if (qrMode !== "advanced") handleStyleChange(s.id); }}
-                    disabled={qrMode === "advanced"}
+                    onClick={() => handleStyleChange(s.id)}
                     className={`flex flex-col items-center gap-2 p-2.5 rounded-xl border-2 transition-all ${
-                      qrMode === "advanced"
-                        ? "border-border/30 bg-muted/30 opacity-60 cursor-default"
-                        : qrStyle === s.id
+                      qrStyle === s.id
                         ? "border-[#00D1A0] bg-[#F0FAF6] shadow-sm"
                         : "border-border/40 hover:border-[#00D1A0]/50"
                     }`}
@@ -625,7 +623,7 @@ export function Settings() {
               {/* Color pickers */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
                 <div>
-                  <label className={`text-xs font-semibold uppercase tracking-wide block mb-1.5 ${qrMode === "advanced" ? "text-muted-foreground/50" : "text-muted-foreground"}`}>Dot Color</label>
+                  <label className={`text-xs font-semibold uppercase tracking-wide block mb-1.5 ${qrMode === "advanced" ? "text-muted-foreground/50" : "text-muted-foreground"}`}>QR Color</label>
                   <div className={`flex items-center gap-2 border rounded-xl px-3 py-2.5 ${qrMode === "advanced" ? "bg-muted/40 border-border/30 opacity-60 cursor-default" : "bg-background border-border/60 cursor-pointer"}`} onClick={() => { if (qrMode !== "advanced") document.getElementById('settings-fg-picker')?.click(); }}>
                     <span className="w-5 h-5 rounded-md border border-border/40 shrink-0" style={{ background: qrFgColor }} />
                     <span className={`text-sm font-mono ${qrMode === "advanced" ? "text-muted-foreground" : "text-foreground"}`}>{qrFgColor.toUpperCase()}</span>

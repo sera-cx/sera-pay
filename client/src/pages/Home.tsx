@@ -1,4 +1,4 @@
-import { useLoginWithOAuth, usePrivy } from "@privy-io/react-auth";
+import { usePrivy } from "@privy-io/react-auth";
 import { useState, useRef, useCallback, useEffect } from "react";
 import jsQR from "jsqr";
 import { useLocation } from "wouter";
@@ -11,7 +11,7 @@ import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ArrowUpDown, Copy, Download, Mail, QrCode, Wallet } from "lucide-react";
+import { ArrowRight, ArrowUpDown, ChevronDown, Download, QrCode, Wallet } from "lucide-react";
 import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal } from "@/components/NetworkSwitcher";
@@ -742,93 +742,6 @@ function QRStylePicker({
   );
 }
 
-function ColorField({
-  label,
-  value,
-  onChange,
-  disabled = false,
-}: {
-  label: string;
-  value: string;
-  onChange: (color: string) => void;
-  disabled?: boolean;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState(value.toUpperCase());
-
-  useEffect(() => setDraft(value.toUpperCase()), [value]);
-
-  const commitColor = (nextValue: string) => {
-    const normalized = nextValue.startsWith("#") ? nextValue : `#${nextValue}`;
-    if (!disabled && /^#[0-9a-fA-F]{6}$/.test(normalized)) onChange(normalized.toUpperCase());
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
-      <span style={{ fontSize: 11, color: disabled ? "rgba(60,60,67,0.32)" : "rgba(60,60,67,0.5)", fontWeight: 650 }}>{label}</span>
-      <div style={{
-        height: 54,
-        borderRadius: 16,
-        border: disabled ? "1.5px solid rgba(60,60,67,0.08)" : "1.5px solid rgba(60,60,67,0.1)",
-        background: disabled ? "#F2F2F4" : "linear-gradient(180deg, #FFFFFF 0%, #F8FBFA 100%)",
-        boxShadow: disabled ? "none" : "0 1px 4px rgba(10,31,26,0.04)",
-        padding: "8px 10px",
-        display: "flex",
-        alignItems: "center",
-        gap: 9,
-        boxSizing: "border-box",
-        minWidth: 0,
-        opacity: disabled ? 0.66 : 1,
-      }}>
-        <button
-          type="button"
-          onClick={() => { if (!disabled) inputRef.current?.click(); }}
-          disabled={disabled}
-          aria-label={`Choose ${label.toLowerCase()}`}
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: 12,
-            border: value.toLowerCase() === "#ffffff" ? "1.5px solid rgba(60,60,67,0.16)" : "1.5px solid rgba(255,255,255,0.9)",
-            background: value,
-            boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.06), 0 3px 8px rgba(10,31,26,0.12)",
-            cursor: disabled ? "default" : "pointer",
-            flexShrink: 0,
-          }}
-        />
-        <input
-          value={draft}
-          onChange={(event) => setDraft(event.target.value.toUpperCase().slice(0, 7))}
-          onBlur={() => commitColor(draft)}
-          onKeyDown={(event) => { if (event.key === "Enter") (event.currentTarget as HTMLInputElement).blur(); }}
-          disabled={disabled}
-          spellCheck={false}
-          style={{
-            minWidth: 0,
-            width: "100%",
-            border: "none",
-            outline: "none",
-            background: "transparent",
-            color: disabled ? "rgba(60,60,67,0.45)" : "#1C1C1E",
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-            fontSize: 12,
-            fontWeight: 750,
-          }}
-        />
-        <input
-          ref={inputRef}
-          type="color"
-          value={value}
-          onChange={(event) => { const nextColor = event.target.value.toUpperCase(); setDraft(nextColor); onChange(nextColor); }}
-          disabled={disabled}
-          style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
-          tabIndex={-1}
-        />
-      </div>
-    </div>
-  );
-}
-
 // ── Settings Modal ─────────────────────────────────────────────────────────
 function SettingsModal({
   onClose,
@@ -1107,13 +1020,13 @@ function SettingsModal({
             disabled={logoSaving}
           />
         </div>
-        {/* QR Style + Colors */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-          <label style={{ fontSize: 12, fontWeight: 600, color: "rgba(60,60,67,0.5)", textTransform: "uppercase", letterSpacing: "0.08em" }}>QR Style &amp; Colors</label>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {/* QR design */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <label style={{ fontSize: 16, fontWeight: 650, color: "#111", letterSpacing: 0 }}>QR Design</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
             {([
-              { id: "advanced" as QrMode, label: "Advanced QR Mode", desc: "Auto coloring based on logo" },
-              { id: "standard" as QrMode, label: "Standard Mode", desc: "Classic QR colors" },
+              { id: "advanced" as QrMode, label: "Advanced QR", desc: "Auto coloring based on logo" },
+              { id: "standard" as QrMode, label: "Standard QR", desc: "Classic QR colors" },
             ]).map((modeOption) => {
               const active = selectedQrMode === modeOption.id;
               return (
@@ -1122,41 +1035,35 @@ function SettingsModal({
                   type="button"
                   onClick={() => { setSelectedQrMode(modeOption.id); setError(""); setSaved(false); }}
                   style={{
-                    minHeight: 62,
-                    borderRadius: 14,
+                    minHeight: 58,
+                    borderRadius: 16,
                     border: active ? "1.5px solid #3EBE8A" : "1.5px solid rgba(60,60,67,0.12)",
                     background: active ? "#F0FAF6" : "#fff",
                     color: "#1C1C1E",
                     cursor: "pointer",
-                    padding: "10px 11px",
+                    padding: "9px 14px",
                     display: "flex",
                     alignItems: "center",
-                    gap: 9,
+                    gap: 12,
                     textAlign: "left",
                     boxSizing: "border-box",
+                    boxShadow: active ? "0 1px 0 rgba(62,190,138,0.08)" : "none",
                   }}
                 >
-                  <span style={{ width: 18, height: 18, borderRadius: 5, border: active ? "none" : "1.5px solid rgba(60,60,67,0.24)", background: active ? "#3EBE8A" : "#fff", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <span style={{ width: 24, height: 24, borderRadius: 7, border: active ? "none" : "1.5px solid rgba(60,60,67,0.18)", background: active ? "#3EBE8A" : "#fff", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     {active ? (
-                      <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                      <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                     ) : null}
                   </span>
                   <span style={{ minWidth: 0 }}>
-                    <span style={{ display: "block", fontSize: 12, fontWeight: 800, lineHeight: 1.15 }}>{modeOption.label}</span>
-                    <span style={{ display: "block", marginTop: 3, fontSize: 10, color: "rgba(60,60,67,0.45)", lineHeight: 1.2 }}>{modeOption.desc}</span>
+                    <span style={{ display: "block", fontSize: 13, fontWeight: 850, lineHeight: 1.15 }}>{modeOption.label}</span>
+                    <span style={{ display: "block", marginTop: 2, fontSize: 11, color: "rgba(60,60,67,0.45)", lineHeight: 1.2 }}>{modeOption.desc}</span>
                   </span>
                 </button>
               );
             })}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-            <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 5 }}>
-              <span style={{ fontSize: 11, color: selectedQrMode === "advanced" ? "rgba(60,60,67,0.32)" : "rgba(60,60,67,0.5)", fontWeight: 650 }}>Style</span>
-              <QRStylePicker value={selectedStyle} onChange={(style) => { setSelectedStyle(style); setError(""); setSaved(false); }} disabled={selectedQrMode === "advanced"} />
-            </div>
-            <ColorField label="Dot Color" value={dotColor} onChange={(color) => { setDotColor(color); setError(""); setSaved(false); }} disabled={selectedQrMode === "advanced"} />
-            <ColorField label="Background" value={bgColor} onChange={(color) => { setBgColor(color); setError(""); setSaved(false); }} />
-          </div>
+          <QRStylePicker value={selectedStyle} onChange={(style) => { setSelectedStyle(style); setError(""); setSaved(false); }} />
         </div>
 
         {/* Live QR preview — always visible, reflects logo + live colors */}
@@ -1348,7 +1255,7 @@ function WalletQrScannerModal({
         <div style={{ width: "min(420px, calc(100vw - 32px))", borderRadius: 22, background: "#fff", boxShadow: "0 24px 70px rgba(10,31,26,0.2)", padding: 18, boxSizing: "border-box", pointerEvents: "auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
             <div>
-              <h3 style={{ margin: 0, color: "#0A1F1A", fontSize: 18, fontWeight: 850 }}>Scan wallet QR</h3>
+              <h3 style={{ margin: 0, color: "#0A1F1A", fontSize: 18, fontWeight: 850 }}>Scan with wallet</h3>
               <p style={{ margin: "4px 0 0", color: "rgba(60,60,67,0.58)", fontSize: 12 }}>{message}</p>
             </div>
             <button type="button" onClick={onClose} aria-label="Close" style={{ width: 34, height: 34, borderRadius: "50%", border: "none", background: "#F2F2F7", color: "rgba(60,60,67,0.55)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -1459,7 +1366,7 @@ function GuestReceiverModal({
               <button
                 type="button"
                 onClick={() => setShowScanner(true)}
-                aria-label="Scan wallet QR"
+                aria-label="Scan with wallet"
                 style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", width: 34, height: 34, borderRadius: 12, border: "1px solid rgba(10,31,26,0.08)", background: "#fff", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
               >
                 <QrCode size={17} />
@@ -1482,21 +1389,14 @@ function GuestReceiverModal({
               <span style={{ width: 36, height: 36, borderRadius: 12, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}><img src="/apple-icon-180x180.png" alt="" style={{ width: 28, height: 28, borderRadius: "50%", display: "block" }} /></span>
               <span style={{ flex: 1, minWidth: 0 }}>
                 <img src="/sera-logo.svg" alt="Sera.cx" style={{ display: "block", height: 14, width: 82, objectFit: "contain", objectPosition: "left center" }} />
-                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Fast sign-in with SeraPay</span>
+                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Sign in with Sera</span>
               </span>
             </button>
             <button type="button" onClick={() => onConnect(["wallet"])} style={optionStyle}>
               <span style={{ width: 36, height: 36, borderRadius: 12, background: "#E6FAF5", color: "#00A87A", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Wallet size={18} /></span>
               <span style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>Existing wallets</span>
+                <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>Connect existing wallet</span>
                 <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>MetaMask, OKX, Trust Wallet and more</span>
-              </span>
-            </button>
-            <button type="button" onClick={() => onConnect(["email", "google", "twitter"])} style={optionStyle}>
-              <span style={{ width: 36, height: 36, borderRadius: 12, background: "#F4F5F8", color: "#667085", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Mail size={17} /></span>
-              <span style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>Other socials</span>
-                <span style={{ display: "block", marginTop: 2, color: "rgba(60,60,67,0.52)", fontSize: 12 }}>Email, Google and X</span>
               </span>
             </button>
           </div>
@@ -1699,7 +1599,6 @@ function TransactionHistory({ apiKey, chainId }: { apiKey: string; chainId: numb
 // ── Main Home Page ─────────────────────────────────────────────────────────
 export default function Home() {
   const { login, authenticated, ready, user } = usePrivy();
-  const { initOAuth } = useLoginWithOAuth();
   const { apiKey: dashboardApiKey, walletAddress: authWalletAddress, logout: authLogout, retry: retryAccountSetup, error: accountSetupError, isLoading: accountSetupLoading } = useAuth();
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
@@ -1811,10 +1710,7 @@ export default function Home() {
     } catch {}
   }, [login]);
 
-  const openSeraGoogleLogin = useCallback(() => {
-    setShowGuestReceiverModal(false);
-    void initOAuth({ provider: "google" });
-  }, [initOAuth]);
+  const openSeraLogin = useCallback(() => openLoginMethods(["email", "google", "twitter"]), [openLoginMethods]);
 
   useEffect(() => {
     const normalizedAmount = normalizeDecimalAmountText(amount);
@@ -2465,7 +2361,7 @@ export default function Home() {
           <div style={{
             background: "#fff", borderRadius: 24, padding: "24px 16px",
             boxShadow: "0 2px 24px rgba(0,0,0,0.07)", textAlign: "center", marginBottom: 16,
-            overflow: "hidden",
+            overflow: "visible",
           }}>
             {/* Customer pays label */}
             <p style={{ fontSize: 12, fontWeight: 600, color: "rgba(60,60,67,0.4)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
@@ -2477,7 +2373,7 @@ export default function Home() {
                 <span style={{ fontSize: 14, color: "rgba(60,60,67,0.4)", fontWeight: 500 }}>Calculating…</span>
               </div>
             ) : displayAmount ? (
-              <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8, margin: "0 0 4px" }}>
+              <div style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "center", gap: 8, margin: "0 0 12px", flexWrap: "wrap" }}>
                 <span style={{ fontSize: 28, fontWeight: 800, color: "#0A1F1A", letterSpacing: "-0.5px" }}>
                   {parseFloat(displayAmount).toLocaleString(undefined, { maximumFractionDigits: 6 })}
                 </span>
@@ -2500,12 +2396,12 @@ export default function Home() {
                   }}
                 >
                   {displayCoin?.symbol}
-                  <ArrowUpDown size={16} strokeWidth={2.6} />
+                  <ChevronDown size={16} strokeWidth={2.6} />
                 </button>
               </div>
             ) : (
               // No amount set (open-amount QR) — still show the coin so merchant knows what's configured
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
+              <div style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
                 <button
                   type="button"
                   onClick={() => setShowQrCoinSheet(true)}
@@ -2513,94 +2409,67 @@ export default function Home() {
                   style={{ border: "none", background: "transparent", color: "#00D1A0", display: "inline-flex", alignItems: "center", gap: 6, padding: 0, fontSize: 28, fontWeight: 800, cursor: "pointer", fontFamily: font, letterSpacing: "-0.5px" }}
                 >
                   {displayCoin?.symbol ?? selectedCoin?.symbol}
-                  <ArrowUpDown size={16} strokeWidth={2.6} />
+                  <ChevronDown size={16} strokeWidth={2.6} />
                 </button>
               </div>
             )}
             {/* Spacer — receiveLabel moved below QR */}
             {/* QR Code */}
-            <div id="serapay-qr-wrapper" style={{
-              display: "inline-block",
-              background: activeQrBgColor,
-              borderRadius: 16,
-              overflow: "hidden",
-              maxWidth: "100%", boxSizing: "border-box" as const,
-            }}>
-              <QRStyled
-                value={activeQrValue}
-                size={Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320)}
-                fgColor={activeQrFgColor}
-                bgColor={activeQrBgColor}
-                style={localQrStyle || (merchantProfile?.qrStyle as QrStyle) || "rounded"}
-                logo={activeQrLogo}
-                mode={activeQrRenderMode}
-                className="qr-step2-container"
-              />
+            <div style={{ display: "block", position: "relative", width: "fit-content", maxWidth: "100%", margin: "0 auto", paddingBottom: activeQrMode === "browser" ? 30 : 0 }}>
+              <div id="serapay-qr-wrapper" onClick={activeQrMode === "browser" ? handleCopyLink : undefined} title={activeQrMode === "browser" ? "Click to copy payment link" : undefined} style={{
+                display: "block",
+                background: activeQrBgColor,
+                borderRadius: 16,
+                overflow: "hidden",
+                maxWidth: "100%", boxSizing: "border-box" as const,
+                cursor: activeQrMode === "browser" ? "copy" : "default",
+              }}>
+                <QRStyled
+                  value={activeQrValue}
+                  size={Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320)}
+                  fgColor={activeQrFgColor}
+                  bgColor={activeQrBgColor}
+                  style={localQrStyle || (merchantProfile?.qrStyle as QrStyle) || "rounded"}
+                  logo={activeQrLogo}
+                  mode={activeQrRenderMode}
+                  className="qr-step2-container"
+                />
+              </div>
+              {activeQrMode === "browser" ? (
+                <button
+                  type="button"
+                  onClick={handleCopyLink}
+                  aria-label="Copy payment link"
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    bottom: 0,
+                    borderRadius: 12,
+                    background: "#fff",
+                    border: "1px solid rgba(10,31,26,0.08)",
+                    color: copied ? "#00A87A" : "rgba(10,31,26,0.68)",
+                    fontSize: 10,
+                    fontWeight: 850,
+                    lineHeight: 1.1,
+                    padding: "6px 10px",
+                    boxShadow: "0 8px 22px rgba(10,31,26,0.1)",
+                    cursor: "pointer",
+                    zIndex: 2,
+                  }}
+                >
+                  {copied ? "Copied" : <>Click to<br />Copy Link</>}
+                </button>
+              ) : null}
             </div>
             {/* Wallet address — subtle */}
             <p style={{ fontSize: 10, color: "rgba(60,60,67,0.2)", marginTop: 10, marginBottom: 0, wordBreak: "break-all", lineHeight: 1.4 }}>
               {receiverAddress}
             </p>
-            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(10,31,26,0.06)" }}>
-              <p style={{ margin: "0 0 8px", color: "rgba(60,60,67,0.42)", fontSize: 11, fontWeight: 750 }}>Supported with</p>
-              <div style={{ display: "flex", justifyContent: "center", gap: 7, flexWrap: "wrap" }}>
-                {SUPPORTED_WALLETS.map((wallet) => (
-                  <span key={wallet.name} title={wallet.name} style={{ width: 30, height: 30, borderRadius: "50%", background: "#fff", border: "1px solid rgba(10,31,26,0.08)", display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 5px rgba(10,31,26,0.05)", overflow: "hidden" }}>
-                    <img src={wallet.logo} alt={wallet.name} style={{ width: 23, height: 23, borderRadius: "50%", objectFit: "cover", display: "block" }} />
-                  </span>
-                ))}
-              </div>
+            <div style={{ display: "grid", gridTemplateColumns: directWalletQrValue ? "1fr 1fr" : "1fr", gap: 8, marginTop: 14 }}>
               {directWalletQrValue ? (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>
-                  <button
-                    type="button"
-                    onClick={() => setQrMode("wallet")}
-                    className={activeQrMode === "wallet" ? "serapay-action-primary" : "serapay-action-secondary"}
-                    style={{
-                      minHeight: 40,
-                      borderRadius: 13,
-                      border: activeQrMode === "wallet" ? "none" : "1px solid rgba(10,31,26,0.08)",
-                      background: activeQrMode === "wallet" ? "linear-gradient(135deg, #00C896, #00A87A, #008A64)" : "#fff",
-                      color: activeQrMode === "wallet" ? "#fff" : "#0A1F1A",
-                      fontSize: 12,
-                      fontWeight: 800,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Scan wallet QR
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQrMode("browser")}
-                    style={{
-                      minHeight: 40,
-                      borderRadius: 13,
-                      border: activeQrMode === "browser" ? "none" : "1px solid rgba(10,31,26,0.08)",
-                      background: activeQrMode === "browser" ? "#0A1F1A" : "#fff",
-                      color: activeQrMode === "browser" ? "#fff" : "#0A1F1A",
-                      fontSize: 12,
-                      fontWeight: 800,
-                      cursor: "pointer",
-                    }}
-                  >
-                    No wallets?
-                  </button>
-                </div>
-              ) : (
-                <p style={{ margin: "10px 0 0", color: "rgba(60,60,67,0.48)", fontSize: 11, lineHeight: 1.45 }}>
-                  Scan with a browser to choose Sera.cx, existing wallets, or socials.
-                </p>
-              )}
-              {directWalletQrValue ? (
-                <p style={{ margin: "9px 0 0", color: "rgba(60,60,67,0.46)", fontSize: 11, lineHeight: 1.45 }}>
-                  {activeQrMode === "wallet" ? "Wallet apps can open this same-coin token transfer directly." : "Browser QR opens the SeraPay checkout page."}
-                </p>
-              ) : null}
-              <div style={{ display: "grid", gridTemplateColumns: activeQrMode === "browser" ? "1fr 1fr" : "1fr", gap: 8, marginTop: 12 }}>
                 <button
                   type="button"
-                  onClick={handleDownloadQR}
-                  disabled={qrDownloading}
+                  onClick={() => setQrMode(activeQrMode === "wallet" ? "browser" : "wallet")}
                   className="serapay-action-secondary"
                   style={{
                     minHeight: 40,
@@ -2610,41 +2479,55 @@ export default function Home() {
                     color: "#0A1F1A",
                     fontSize: 12,
                     fontWeight: 800,
-                    cursor: qrDownloading ? "default" : "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
+                    cursor: "pointer",
                   }}
                 >
-                  <Download size={14} />
-                  {qrDownloading ? "Downloading..." : "Download QR"}
+                  {activeQrMode === "wallet" ? "No wallets?" : "Scan with wallet"}
                 </button>
-                {activeQrMode === "browser" ? (
-                  <button
-                    type="button"
-                    onClick={handleCopyLink}
-                    className="serapay-action-primary"
-                    style={{
-                      minHeight: 40,
-                      borderRadius: 13,
-                      border: "none",
-                      background: copied ? "linear-gradient(135deg, #4ECE9A, #3AB882)" : "linear-gradient(135deg, #00C896, #00A87A, #008A64)",
-                      color: "#fff",
-                      fontSize: 12,
-                      fontWeight: 800,
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 6,
-                    }}
-                  >
-                    <Copy size={14} />
-                    {copied ? "Copied" : "Copy Link"}
-                  </button>
-                ) : null}
+              ) : null}
+              <button
+                type="button"
+                onClick={handleDownloadQR}
+                disabled={qrDownloading}
+                className="serapay-action-secondary"
+                style={{
+                  minHeight: 40,
+                  borderRadius: 13,
+                  border: "1px solid rgba(10,31,26,0.08)",
+                  background: "#fff",
+                  color: "#0A1F1A",
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: qrDownloading ? "default" : "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                }}
+              >
+                <Download size={14} />
+                {qrDownloading ? "Downloading..." : "Download QR"}
+              </button>
+            </div>
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(10,31,26,0.06)" }}>
+              <p style={{ margin: "0 0 8px", color: "rgba(60,60,67,0.42)", fontSize: 11, fontWeight: 750 }}>Recommended Wallets</p>
+              <div style={{ display: "flex", justifyContent: "center", gap: 7, flexWrap: "wrap" }}>
+                {SUPPORTED_WALLETS.map((wallet) => (
+                  <span key={wallet.name} title={wallet.name} style={{ width: 30, height: 30, borderRadius: "50%", background: "#fff", border: "1px solid rgba(10,31,26,0.08)", display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 5px rgba(10,31,26,0.05)", overflow: "hidden" }}>
+                    <img src={wallet.logo} alt={wallet.name} style={{ width: 23, height: 23, borderRadius: "50%", objectFit: "cover", display: "block" }} />
+                  </span>
+                ))}
               </div>
+              {!directWalletQrValue ? (
+                <p style={{ margin: "10px 0 0", color: "rgba(60,60,67,0.48)", fontSize: 11, lineHeight: 1.45 }}>
+                  Scan with a browser to choose Sera.cx or an existing wallet.
+                </p>
+              ) : null}
+              {directWalletQrValue ? (
+                <p style={{ margin: "9px 0 0", color: "rgba(60,60,67,0.46)", fontSize: 11, lineHeight: 1.45 }}>
+                  {activeQrMode === "wallet" ? "Wallet apps can open this same-coin token transfer directly." : "Browser QR opens the SeraPay checkout page."}
+                </p>
+              ) : null}
             </div>
           </div>
           {/* Merchant receives line — directly above action buttons */}
@@ -3162,7 +3045,7 @@ export default function Home() {
           onClose={() => setShowGuestReceiverModal(false)}
           onSubmitAddress={handleGuestReceiverSubmit}
           onConnect={openLoginMethods}
-          onSeraLogin={openSeraGoogleLogin}
+          onSeraLogin={openSeraLogin}
         />
       ) : null}
 

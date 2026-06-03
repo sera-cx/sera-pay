@@ -489,12 +489,12 @@ function ItemEditDialog({
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
-              <Input value={price} onChange={e => { setPrice(limitDecimalPlaces(e.target.value)); setError(""); }} placeholder="0.00" type="text" inputMode="decimal" />
+              <Input className="h-10" value={price} onChange={e => { setPrice(limitDecimalPlaces(e.target.value)); setError(""); }} placeholder="0.00" type="text" inputMode="decimal" />
             </div>
             <div className="w-32">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
               <Select value={coin} onValueChange={(value) => { setCoin(value); setError(""); }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-10"><SelectValue /></SelectTrigger>
                 <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
               </Select>
             </div>
@@ -589,12 +589,12 @@ function AddItemDialog({
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
-              <Input value={price} onChange={e => { setPrice(limitDecimalPlaces(e.target.value)); setError(""); }} placeholder="0.00" type="text" inputMode="decimal" />
+              <Input className="h-10" value={price} onChange={e => { setPrice(limitDecimalPlaces(e.target.value)); setError(""); }} placeholder="0.00" type="text" inputMode="decimal" />
             </div>
             <div className="w-32">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
               <Select value={coin} onValueChange={(value) => { setCoin(value); setError(""); }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-10"><SelectValue /></SelectTrigger>
                 <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
               </Select>
             </div>
@@ -843,6 +843,7 @@ function CartSidebar({
       merchantIcon: merchantProfile.logoData || undefined,
       orderItems,
       menuName: activeMenu?.name,
+      menuSlug: activeMenu?.slug,
     });
     navigate(getClientAppPath(url));
   };
@@ -1364,7 +1365,7 @@ function POSView({
             <Button
               onClick={() => setAddingItem(true)}
               size="sm"
-              className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white gap-1.5 shrink-0"
+              className="serapay-green-button serapay-no-lift bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white gap-1.5 shrink-0 shadow-none"
             >
               <Plus className="w-3.5 h-3.5" /> Add Item
             </Button>
@@ -1431,7 +1432,7 @@ function POSView({
                   <UtensilsCrossed className="w-10 h-10 text-gray-200 mb-3" />
                   <p className="font-medium text-gray-500">No items yet</p>
                   <p className="text-sm text-gray-400 mt-1 mb-4">Add your first item to start taking orders</p>
-                  <Button onClick={() => setAddingItem(true)} className="serapay-green-button bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white gap-1.5">
+                  <Button onClick={() => setAddingItem(true)} className="serapay-green-button serapay-no-lift bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white gap-1.5 shadow-none">
                     <Plus className="w-4 h-4" /> Add Item
                   </Button>
                 </>

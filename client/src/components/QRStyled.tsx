@@ -378,6 +378,7 @@ function drawAdvancedQrCanvas({
   value,
   size,
   bgColor,
+  style,
   palette,
   imageData,
   logoImage,
@@ -386,6 +387,7 @@ function drawAdvancedQrCanvas({
   value: string;
   size: number;
   bgColor: string;
+  style: QrStyle;
   palette: AutoQrPalette;
   imageData: ImageData | null;
   logoImage?: HTMLImageElement;
@@ -433,13 +435,27 @@ function drawAdvancedQrCanvas({
       const contrasted = ensureQrContrast(sampledColor, backgroundRgb, reserved ? 4.2 : 3.35);
       const seed = (row * 31 + col * 17) % 13;
       const brandPresence = Math.min(1, logoSample.alpha + saturated * 0.35);
-      const dotSize = moduleSize * Math.min(0.9, (reserved ? 0.82 : 0.66) + brandPresence * 0.16 + (seed === 0 ? 0.05 : 0));
+      const baseScale = style === "classic" ? 0.84 : style === "dots" ? 0.7 : style === "classy" ? 0.76 : style === "classy-rounded" ? 0.78 : 0.8;
+      const dotSize = moduleSize * Math.min(0.92, (reserved ? 0.84 : baseScale) + brandPresence * 0.1 + (seed === 0 ? 0.04 : 0));
       const x = offset + col * moduleSize + (moduleSize - dotSize) / 2;
       const y = offset + row * moduleSize + (moduleSize - dotSize) / 2;
-      const radius = reserved ? dotSize * 0.34 : dotSize * (seed % 5 === 0 ? 0.36 : 0.5);
 
       context.fillStyle = rgba(contrasted.red, contrasted.green, contrasted.blue, reserved ? 0.98 : 0.91);
-      fillRoundedRect(context, x, y, dotSize, dotSize, radius);
+      if (style === "dots") {
+        context.beginPath();
+        context.arc(x + dotSize / 2, y + dotSize / 2, dotSize / 2, 0, Math.PI * 2);
+        context.fill();
+      } else if (style === "classic") {
+        context.fillRect(x, y, dotSize, dotSize);
+      } else if (style === "classy") {
+        roundedRectPath(context, x, y, dotSize, dotSize, dotSize * 0.2);
+        context.transform(1, 0, seed % 2 === 0 ? 0.12 : -0.12, 1, 0, 0);
+        context.fill();
+        context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      } else {
+        const radius = reserved ? dotSize * 0.34 : dotSize * (style === "classy-rounded" ? 0.28 : seed % 5 === 0 ? 0.34 : 0.48);
+        fillRoundedRect(context, x, y, dotSize, dotSize, radius);
+      }
     }
   }
 
@@ -579,7 +595,7 @@ export function QRStyled({
     if (!advancedMode || !logo || !canvasRef.current) return;
     let cancelled = false;
     const canvas = canvasRef.current;
-    drawAdvancedQrCanvas({ canvas, value, size, bgColor, palette: FALLBACK_AUTO_PALETTE, imageData: null });
+    drawAdvancedQrCanvas({ canvas, value, size, bgColor, style, palette: FALLBACK_AUTO_PALETTE, imageData: null });
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.onload = () => {
@@ -592,14 +608,14 @@ export function QRStyled({
       } catch {
         imageData = null;
       }
-      drawAdvancedQrCanvas({ canvas, value, size, bgColor, palette, imageData, logoImage: image });
+      drawAdvancedQrCanvas({ canvas, value, size, bgColor, style, palette, imageData, logoImage: image });
     };
     image.onerror = () => {
-      if (!cancelled) drawAdvancedQrCanvas({ canvas, value, size, bgColor, palette: FALLBACK_AUTO_PALETTE, imageData: null });
+      if (!cancelled) drawAdvancedQrCanvas({ canvas, value, size, bgColor, style, palette: FALLBACK_AUTO_PALETTE, imageData: null });
     };
     image.src = logo;
     return () => { cancelled = true; };
-  }, [advancedMode, bgColor, logo, size, value]);
+  }, [advancedMode, bgColor, logo, size, style, value]);
 
   return (
     <div
