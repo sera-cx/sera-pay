@@ -259,6 +259,58 @@
   box-shadow: 0 0 0 4px rgba(0, 168, 122, 0.2), 0 10px 22px rgba(0, 138, 100, 0.2) !important;
 }
 
+.serapay-settings-name-input:focus {
+  border-color: #00C853 !important;
+  box-shadow: 0 0 0 4px rgba(0, 200, 83, 0.12) !important;
+  background: #fff !important;
+}
+
+.serapay-hidden-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  scrollbar-gutter: stable;
+}
+
+.serapay-hidden-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.serapay-hidden-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.serapay-hidden-scrollbar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.serapay-hidden-scrollbar:hover,
+.serapay-hidden-scrollbar:focus-within {
+  scrollbar-color: rgba(60, 60, 67, 0.26) transparent;
+}
+
+.serapay-hidden-scrollbar:hover::-webkit-scrollbar-thumb,
+.serapay-hidden-scrollbar:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(60, 60, 67, 0.26);
+  background-clip: padding-box;
+}
+
+.serapay-cancel-danger:not(:disabled) {
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, 0.25) !important;
+}
+
+.serapay-cancel-danger:not(:disabled):hover,
+.serapay-cancel-danger:not(:disabled):focus-visible {
+  background: #ef4444 !important;
+  color: #fff !important;
+  border-color: #ef4444 !important;
+  box-shadow: 0 8px 20px rgba(239, 68, 68, 0.18) !important;
+}
+
 .serapay-payment-field {
   border: 1px solid transparent;
   transition: border-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
@@ -272,6 +324,14 @@
 .serapay-action-secondary:not(:disabled):hover {
   border-color: rgba(0, 209, 160, 0.28) !important;
   box-shadow: 0 8px 22px rgba(10, 31, 26, 0.09) !important;
+}
+
+.serapay-hover-green:not(:disabled):hover {
+  background: linear-gradient(135deg, #00C896 0%, #00A87A 48%, #008A64 100%) !important;
+  border-color: transparent !important;
+  color: #fff !important;
+  box-shadow: 0 10px 22px rgba(0, 138, 100, 0.22) !important;
+  transform: translateY(-1px);
 }
 
 .serapay-action-danger:not(:disabled):hover,

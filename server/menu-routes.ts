@@ -62,6 +62,11 @@ function normalizePriceAmount(value: unknown): string | null {
   return num.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function normalizeItemCode(value: unknown): string | null {
+  const text = String(value ?? "").trim();
+  return text ? text.slice(0, 64) : null;
+}
+
 function validateMenuItemInput(input: any, { partial = false } = {}) {
   const errors: string[] = [];
   const has = (key: string) => Object.prototype.hasOwnProperty.call(input, key);
@@ -200,7 +205,7 @@ menuRouter.post("/menus/:menuId/items", requireApiKey as any, async (req: any, r
     const { menuId } = req.params;
     const [menu] = await db.select().from(menus).where(and(eq(menus.id, menuId), eq(menus.merchantId, merchant.id)));
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
-    const { name, description, price, coin, imageUrl, sortOrder, category } = req.body;
+    const { name, description, price, coin, imageUrl, sortOrder, category, itemCode } = req.body;
     const missing = validateMenuItemInput(req.body);
     if (missing.length) { res.status(400).json({ error: `Required fields: ${missing.join(", ")}` }); return; }
     const normalizedPrice = normalizePriceAmount(price);
@@ -211,6 +216,7 @@ menuRouter.post("/menus/:menuId/items", requireApiKey as any, async (req: any, r
       menuId,
       name: name.trim(),
       description: description?.trim()?.slice(0, 500) || null,
+      itemCode: normalizeItemCode(itemCode),
       price: normalizedPrice,
       coin: coin.trim().slice(0, 20).toUpperCase(),
       imageUrl: imageUrl?.slice(0, 512) || null,
@@ -235,12 +241,13 @@ menuRouter.put("/menus/:menuId/items/:itemId", requireApiKey as any, async (req:
     if (!menu) { res.status(404).json({ error: "Menu not found" }); return; }
     const [item] = await db.select().from(menuItems).where(and(eq(menuItems.id, itemId), eq(menuItems.menuId, menuId)));
     if (!item) { res.status(404).json({ error: "Item not found" }); return; }
-    const { name, description, price, coin, imageUrl, sortOrder, isActive, category, soldOutUntil } = req.body;
+    const { name, description, price, coin, imageUrl, sortOrder, isActive, category, soldOutUntil, itemCode } = req.body;
     const updates: Record<string, any> = {};
     const missing = validateMenuItemInput(req.body, { partial: true });
     if (missing.length) { res.status(400).json({ error: `Required fields: ${missing.join(", ")}` }); return; }
     if (name !== undefined) updates.name = name.trim().slice(0, 120);
     if (description !== undefined) updates.description = description?.trim()?.slice(0, 500) || null;
+    if (itemCode !== undefined) updates.itemCode = normalizeItemCode(itemCode);
     if (price !== undefined) {
       const normalizedPrice = normalizePriceAmount(price);
       if (!normalizedPrice) { res.status(400).json({ error: "Invalid price" }); return; }
@@ -321,6 +328,7 @@ menuRouter.post("/menus/:menuId/items/batch", requireApiKey as any, async (req: 
       menuId,
       name: String(item.name || "").trim().slice(0, 200),
       description: item.description ? String(item.description).trim().slice(0, 500) : null,
+      itemCode: normalizeItemCode(item.itemCode),
       price: normalizePriceAmount(item.price) || "0.000001",
       coin: String(item.coin).trim().slice(0, 20).toUpperCase(),
       imageUrl: null as string | null,

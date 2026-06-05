@@ -1,15 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useState } from "react";
 import { AppLayout } from "@/components/AppLayout";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Skeleton } from "@/components/dashboard-ui";
 import { useCreateSubWallet, useDeleteSubWallet, useSetDefaultWallet, useSeraApiConfig, useWallets } from "@/hooks/use-gateway";
 import { useMerchantStats } from "@/hooks/use-stats";
 import { formatAmount } from "@/lib/dashboard-utils";
 import { useToast } from "@/components/toast-system";
-import { CurrencySelectModal } from "@/components/CurrencySelectModal";
-import { loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { resolvePaymentChainId } from "@/lib/payment";
-import { STABLECOINS } from "@/lib/stablecoins";
-import { AlertTriangle, CheckCircle2, ChevronDown, Copy, Landmark, Plus, Trash2, Wallet, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Copy, Landmark, Plus, Trash2, Wallet, X } from "lucide-react";
 import { useChainId } from "wagmi";
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -26,20 +23,8 @@ export function Wallets() {
   const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [label, setLabel] = useState("");
   const [address, setAddress] = useState("");
-  const [receiveCoin, setReceiveCoin] = useState("USDC");
-  const [chainId, setChainId] = useState(1);
   const [showAddWallet, setShowAddWallet] = useState(false);
-  const [showCoinPicker, setShowCoinPicker] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string } | null>(null);
-  const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
-  const currencyList = useMemo(
-    () => currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const })),
-    [currencyOptions],
-  );
-
-  useEffect(() => {
-    loadSeraCurrencies(paymentChainId).then(setCurrencyOptions).catch(() => setCurrencyOptions([]));
-  }, [paymentChainId]);
 
   const copy = async (value: string) => {
     await navigator.clipboard.writeText(value);
@@ -50,7 +35,7 @@ export function Wallets() {
     event.preventDefault();
     const trimmedLabel = label.trim();
     const trimmedAddress = address.trim();
-    const trimmedCoin = receiveCoin.trim().toUpperCase();
+    const inheritedCoin = (data?.masterWallet?.receiveCoin || "USDC").trim().toUpperCase();
     if (!trimmedLabel) {
       toast({ title: "Label is required", description: "Add a clear name for this wallet.", type: "error" });
       return;
@@ -63,22 +48,12 @@ export function Wallets() {
       toast({ title: "Invalid address", description: "Enter a controlled EVM address.", type: "error" });
       return;
     }
-    if (!trimmedCoin) {
-      toast({ title: "Coin is required", description: "Choose the receive coin for this wallet.", type: "error" });
-      return;
-    }
-    if (!Number.isInteger(chainId) || chainId <= 0) {
-      toast({ title: "Chain ID is required", description: "Enter a valid positive chain ID.", type: "error" });
-      return;
-    }
     createSubWallet.mutate(
-      { label: trimmedLabel, address: trimmedAddress, receiveCoin: trimmedCoin, chainId },
+      { label: trimmedLabel, address: trimmedAddress, receiveCoin: inheritedCoin, chainId: paymentChainId },
       {
         onSuccess: () => {
           setLabel("");
           setAddress("");
-          setReceiveCoin("USDC");
-          setChainId(1);
           setShowAddWallet(false);
           toast({ title: "Sub-wallet added", type: "success" });
         },
@@ -137,10 +112,9 @@ export function Wallets() {
                 <Skeleton className="h-28 w-full" />
               ) : data?.masterWallet ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <Metric label="Successful volume" value={`$${formatAmount(stats?.totalVolume || "0")}`} />
                     <Metric label="Transactions" value={(stats?.totalCount || 0).toString()} />
-                    <Metric label="Preferred coin" value={data.masterWallet.receiveCoin || "USDC"} />
                   </div>
                   <div className="rounded-xl border border-border p-4">
                     <div className="flex items-start justify-between gap-3">
@@ -237,10 +211,6 @@ export function Wallets() {
                       ) : (
                         <CheckCircle2 className="hidden h-4 w-4 text-[#00B88A] sm:block" />
                       )}
-                      <div className="text-right">
-                        <p className="text-xs font-semibold">{wallet.receiveCoin || "USDC"}</p>
-                        <p className="text-[11px] text-muted-foreground">Chain {wallet.chainId}</p>
-                      </div>
                       <button
                         type="button"
                         onClick={() => copy(wallet.address)}
@@ -304,23 +274,6 @@ export function Wallets() {
                 <Label>Address</Label>
                 <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="0x..." className="font-mono text-xs" required />
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1.5">
-                  <Label>Coin</Label>
-                  <button
-                    type="button"
-                    onClick={() => setShowCoinPicker(true)}
-                    className="flex h-10 w-full items-center justify-between rounded-xl border border-border bg-background px-3 py-2 text-left text-sm transition-all hover:border-[#00C853] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/10"
-                  >
-                    <span className="font-semibold">{receiveCoin}</span>
-                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                  </button>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Chain ID</Label>
-                  <Input type="number" value={chainId} min={1} step={1} required onChange={(e) => setChainId(Number(e.target.value))} />
-                </div>
-              </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
                 SeraPay never generates or stores private keys. Only add addresses controlled by your business.
               </p>
@@ -334,19 +287,6 @@ export function Wallets() {
             </form>
           </div>
         </div>
-      )}
-
-      {showCoinPicker && (
-        <CurrencySelectModal
-          title="Choose Coin"
-          subtitle="Sera-supported currencies are loaded from the Sera token list."
-          currencies={currencyList}
-          selectedSymbol={receiveCoin}
-          onSelect={setReceiveCoin}
-          onClose={() => setShowCoinPicker(false)}
-          onConfirm={() => setShowCoinPicker(false)}
-          confirmLabel={`Use ${receiveCoin}`}
-        />
       )}
 
       {deleteTarget && (

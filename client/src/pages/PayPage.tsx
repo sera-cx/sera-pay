@@ -1542,7 +1542,7 @@ export default function PayPage() {
                 {showEditableAmount ? (
                   // Open-amount: always show the editable input — never replace it with static display
                   <>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
                       <input
                         type="text"
                         inputMode="decimal"
@@ -1570,8 +1570,8 @@ export default function PayPage() {
                 ) : unifiedAmount && unifiedCoin ? (
                   // Itemised order: show the recalculated amount in the selected payment coin.
                   <>
-                    <p style={{ fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
-                      {unifiedAmount}{" "}
+                    <p style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8, flexWrap: "wrap", fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
+                      <span>{unifiedAmount}</span>
                       <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? unifiedCoin}
                         <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
@@ -1587,8 +1587,8 @@ export default function PayPage() {
                 ) : payAmount ? (
                   // Fixed-amount with calculated pay amount
                   <>
-                    <p style={{ fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
-                      {payAmount}{" "}
+                    <p style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8, flexWrap: "wrap", fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: "0 0 4px", letterSpacing: "-0.5px" }}>
+                      <span>{payAmount}</span>
                       <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                         {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin}
                         <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />
@@ -1605,8 +1605,8 @@ export default function PayPage() {
                   </>
                 ) : req.amount ? (
                   // Fixed-amount, no pay coin selected yet — show receive amount
-                  <p style={{ fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: 0, letterSpacing: "-0.5px" }}>
-                    {req.amount}{" "}
+                  <p style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8, flexWrap: "wrap", fontSize: 32, fontWeight: 800, color: "#0A1F1A", margin: 0, letterSpacing: "-0.5px" }}>
+                    <span>{req.amount}</span>
                     <button onClick={() => setShowCoinSheet(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#00D1A0", fontSize: 32, fontWeight: 800, letterSpacing: "-0.5px", display: "inline-flex", alignItems: "center", gap: 4 }}>
                       {selectedCoin?.symbol ?? req.payCoin ?? req.receiveCoin}
                       <ChevronDown size={16} strokeWidth={2.6} style={{ marginTop: -2 }} />

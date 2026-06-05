@@ -565,7 +565,7 @@ export function QRStyled({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const advancedMode = mode === "advanced" && Boolean(logo);
+  const advancedMode = mode === "advanced";
 
   useEffect(() => {
     if (!containerRef.current || advancedMode) return;
@@ -592,10 +592,11 @@ export function QRStyled({
   }, [value, size, fgColor, bgColor, style, logo, advancedMode]);
 
   useEffect(() => {
-    if (!advancedMode || !logo || !canvasRef.current) return;
+    if (!advancedMode || !canvasRef.current) return;
     let cancelled = false;
     const canvas = canvasRef.current;
     drawAdvancedQrCanvas({ canvas, value, size, bgColor, style, palette: FALLBACK_AUTO_PALETTE, imageData: null });
+    if (!logo) return () => { cancelled = true; };
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.onload = () => {

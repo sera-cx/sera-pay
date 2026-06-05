@@ -68,6 +68,12 @@ function transactionToJson(tx: Transaction) {
   };
 }
 
+function getTransactionVolumeValue(tx: Transaction): number {
+  const preferredValue = tx.amountUsd ?? tx.amount;
+  const parsed = Number(preferredValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 paymentRouter.get("/storage/objects/*", async (req, res) => {
   try {
     const key = String((req.params as Record<string, string | undefined>)[0] || "").replace(/^\/+/, "");
@@ -603,8 +609,8 @@ paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res)
     const unverifiedCount = txs.filter(t => t.verified === 0 && t.status !== "failed" && t.status !== "canceled").length;
     const totalVolume = txs
       .filter(t => t.status === "confirmed")
-      .reduce((sum, t) => sum + parseFloat(t.amount as any || "0"), 0)
-      .toFixed(2);
+      .reduce((sum, t) => sum + getTransactionVolumeValue(t), 0)
+      .toFixed(6);
     // Daily volume for last 14 days
     const now = new Date();
     const dailyMap = new Map<string, number>();
@@ -615,9 +621,9 @@ paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res)
     for (const t of txs) {
       if (t.status !== "confirmed") continue;
       const day = new Date(t.createdAt).toISOString().slice(0, 10);
-      if (dailyMap.has(day)) dailyMap.set(day, (dailyMap.get(day) || 0) + parseFloat(t.amount as any || "0"));
+      if (dailyMap.has(day)) dailyMap.set(day, (dailyMap.get(day) || 0) + getTransactionVolumeValue(t));
     }
-    const dailyVolume = Array.from(dailyMap.entries()).map(([date, volume]) => ({ date, volume: volume.toFixed(2) }));
+    const dailyVolume = Array.from(dailyMap.entries()).map(([date, volume]) => ({ date, volume: volume.toFixed(6) }));
     res.json({ totalCount, confirmedCount, pendingCount, unverifiedCount, totalVolume, dailyVolume });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
 });

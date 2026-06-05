@@ -16,6 +16,7 @@ function run(command, args, env = {}) {
 
 await run("vite", ["build"], {
   NODE_OPTIONS: "--max-old-space-size=4096",
+  NODE_ENV: "production",
 });
 
 await run("esbuild", [
@@ -25,4 +26,6 @@ await run("esbuild", [
   "--bundle",
   "--format=esm",
   "--outdir=dist",
-]);
+], {
+  NODE_ENV: "production",
+});

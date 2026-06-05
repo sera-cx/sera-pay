@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Receipt, Settings, LogOut, Menu, X, Code2, ChevronLeft, ChevronRight, QrCode, UtensilsCrossed, ChevronDown, Copy, Check, WalletCards } from "lucide-react";
+import { LayoutDashboard, Receipt, Settings, LogOut, Menu, X, Code2, ChevronLeft, ChevronRight, QrCode, UtensilsCrossed, ChevronDown, Copy, Check, WalletCards, ArrowUpDown, Download } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { cn, shortenAddress } from "@/lib/dashboard-utils";
 import { useMerchantProfile } from "@/hooks/use-merchant";
@@ -8,6 +8,10 @@ import { useEvents } from "@/hooks/use-events";
 import { motion, AnimatePresence } from "framer-motion";
 import { SeraLogo } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal, useActiveNetworkMode } from "@/components/NetworkSwitcher";
+import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { STABLECOINS } from "@/lib/stablecoins";
+import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
+import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 
 const navItems = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -19,9 +23,72 @@ const navItems = [
 ];
 
 const LS_SIDEBAR = "serapay_sidebar_collapsed";
+const DASHBOARD_QR_STYLE_IDS = new Set(QR_STYLES.map((styleOption) => styleOption.id));
+
+function normalizeDashboardQrStyle(value: unknown, fallback: QrStyle = "rounded"): QrStyle {
+  if (value === "classy") return "classy-rounded";
+  return DASHBOARD_QR_STYLE_IDS.has(value as QrStyle) ? (value as QrStyle) : fallback;
+}
+
+function normalizeDashboardQrMode(value: unknown): QrMode {
+  return value === "advanced" ? "advanced" : "standard";
+}
+
+function DashboardCoinDropdown({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const options = React.useMemo(() => [
+    { symbol: "", label: "Any coin" },
+    ...STABLECOINS.map((coin) => ({ symbol: coin.symbol, label: coin.symbol })),
+  ], []);
+  const selected = options.find((option) => option.symbol === value) || options[0];
+
+  React.useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative w-32 shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-full min-h-12 w-full items-center justify-between gap-2 border-r border-gray-100 bg-[#F0FCF8] px-3 text-left text-sm font-bold text-gray-950 outline-none transition-colors hover:bg-[#E8FAF4]"
+      >
+        <span className="min-w-0 truncate">{selected.label}</span>
+        <ChevronDown className={cn("h-4 w-4 shrink-0 text-gray-500 transition-transform", open && "rotate-180")} />
+      </button>
+      {open ? (
+        <div className="serapay-hidden-scrollbar absolute left-0 top-[calc(100%+8px)] z-[90] max-h-64 w-44 overflow-y-auto rounded-2xl border border-gray-200 bg-white p-1.5 shadow-[0_18px_48px_rgba(10,31,26,0.16)]">
+          {options.map((option) => {
+            const active = option.symbol === value;
+            return (
+              <button
+                key={option.symbol || "any"}
+                type="button"
+                onClick={() => { onChange(option.symbol); setOpen(false); }}
+                className={cn(
+                  "flex min-h-9 w-full items-center justify-between rounded-xl px-3 text-left text-sm font-semibold transition-colors",
+                  active ? "bg-[#ECFFF7] text-[#00795C]" : "text-gray-800 hover:bg-gray-50",
+                )}
+              >
+                <span>{option.label}</span>
+                {active ? <Check className="h-3.5 w-3.5" /> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 // ── Wallet Dropdown ──────────────────────────────────────────────────────────
-function WalletDropdown({ address, onLogout }: { address: string; onLogout: () => void }) {
+function WalletDropdown({ address, onLogout, onNewPayment }: { address: string; onLogout: () => void; onNewPayment: () => void }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const dropdownRef = React.useRef<HTMLDivElement>(null);
@@ -86,14 +153,14 @@ function WalletDropdown({ address, onLogout }: { address: string; onLogout: () =
 
             {/* Actions */}
             <div>
-              <Link
-                href="/"
-                onClick={() => setOpen(false)}
+              <button
+                type="button"
+                onClick={() => { setOpen(false); onNewPayment(); }}
                 className="flex min-h-[52px] w-full items-center justify-center gap-2.5 border-b border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-[#F4FFFA]"
               >
                 <QrCode className="w-4 h-4 text-muted-foreground" />
                 Generate Payment QR
-              </Link>
+              </button>
               <button
                 onClick={() => { setOpen(false); onLogout(); }}
                 className="flex min-h-[52px] w-full items-center justify-center gap-2.5 px-4 text-sm font-bold text-red-600 transition-colors hover:bg-red-50"
@@ -110,6 +177,173 @@ function WalletDropdown({ address, onLogout }: { address: string; onLogout: () =
 }
 
 // ── Main Layout ───────────────────────────────────────────────────────────────
+function DashboardPaymentModal({
+  profile,
+  walletAddress,
+  chainId,
+  onClose,
+}: {
+  profile: any;
+  walletAddress: string;
+  chainId: number;
+  onClose: () => void;
+}) {
+  const [receiveCoin, setReceiveCoin] = useState("");
+  const [payCoin, setPayCoin] = useState("");
+  const [amount, setAmount] = useState("");
+  const [payAmount, setPayAmount] = useState("");
+  const [rateLoading, setRateLoading] = useState(false);
+  const [generated, setGenerated] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const receiverAddress = profile?.storeAddress || profile?.walletAddress || walletAddress;
+  const merchantName = profile?.name || "SeraPay";
+  const logo = profile?.logoData || undefined;
+  const qrMode = normalizeDashboardQrMode(profile?.qrMode);
+  const qrStyle = normalizeDashboardQrStyle(profile?.qrStyle);
+  const qrFg = profile?.qrFgColor || "#000000";
+  const qrBg = profile?.qrBgColor || "#ffffff";
+  const receiveAmount = normalizeDecimalAmountText(amount);
+  const displayPayAmount = normalizeDecimalAmountText(payAmount || amount);
+  const resolvedReceiveCoin = receiveCoin || "XSGD";
+  const resolvedPayCoin = payCoin || resolvedReceiveCoin;
+  const paymentUrl = React.useMemo(() => receiverAddress ? buildPaymentUrl({
+    receiverAddress,
+    receiveCoin: resolvedReceiveCoin,
+    amount: receiveAmount || undefined,
+    payCoin: resolvedPayCoin,
+    payAmount: displayPayAmount || undefined,
+    chainId,
+    merchantName,
+  }) : "", [chainId, displayPayAmount, merchantName, receiveAmount, receiverAddress, resolvedPayCoin, resolvedReceiveCoin]);
+
+  React.useEffect(() => {
+    if (!receiveAmount) {
+      setPayAmount("");
+      return;
+    }
+    if (resolvedReceiveCoin === resolvedPayCoin) {
+      setPayAmount(receiveAmount);
+      return;
+    }
+    let cancelled = false;
+    setRateLoading(true);
+    fetch(`/api/rates?from=${resolvedReceiveCoin}&to=${resolvedPayCoin}&chainId=${chainId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (cancelled) return;
+        const rate = Number(data?.rate);
+        if (Number.isFinite(rate) && rate > 0) setPayAmount(formatDecimalAmount(Number(receiveAmount) * rate));
+      })
+      .catch(() => undefined)
+      .finally(() => { if (!cancelled) setRateLoading(false); });
+    return () => { cancelled = true; };
+  }, [amount, chainId, receiveAmount, resolvedPayCoin, resolvedReceiveCoin]);
+
+  const copyLink = async () => {
+    if (!paymentUrl) return;
+    try {
+      await navigator.clipboard.writeText(paymentUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {}
+  };
+
+  const downloadQr = () => {
+    const wrapper = document.getElementById("dashboard-payment-qr");
+    const svg = wrapper?.querySelector("svg");
+    const canvas = wrapper?.querySelector("canvas");
+    let href = "";
+    if (canvas instanceof HTMLCanvasElement) {
+      href = canvas.toDataURL("image/png");
+    } else if (svg) {
+      const clone = svg.cloneNode(true) as SVGElement;
+      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      href = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" }));
+    }
+    if (!href) return;
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = `serapay-${resolvedReceiveCoin}-${resolvedPayCoin}-qr.${href.startsWith("blob:") ? "svg" : "png"}`;
+    a.click();
+    if (href.startsWith("blob:")) URL.revokeObjectURL(href);
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm" onClick={onClose}>
+        <div onClick={(event) => event.stopPropagation()} className="serapay-hidden-scrollbar max-h-[calc(100dvh-32px)] w-full max-w-[520px] overflow-y-auto rounded-3xl bg-white p-5 shadow-[0_30px_90px_rgba(10,31,26,0.22)]">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-950">Generate QR code</h2>
+              <p className="mt-1 text-sm text-gray-500">Create a payment QR without leaving the dashboard.</p>
+            </div>
+            <button onClick={onClose} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-400 hover:text-gray-700">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            <div>
+              <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">I receive</p>
+              <div className="flex overflow-visible rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-[#00C853] focus-within:ring-4 focus-within:ring-[#00C853]/10">
+                <DashboardCoinDropdown value={receiveCoin} onChange={setReceiveCoin} />
+                <input value={amount} onChange={(e) => setAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-center">
+              <button type="button" onClick={() => { setReceiveCoin(payCoin); setPayCoin(receiveCoin); setAmount(displayPayAmount || amount); }} className="flex h-8 w-8 items-center justify-center rounded-full border border-[#00D1A0]/30 bg-white text-[#00A87A] shadow-sm">
+                {rateLoading ? <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0]" /> : <ArrowUpDown className="h-4 w-4" />}
+              </button>
+            </div>
+
+            <div>
+              <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
+              <div className="flex overflow-visible rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-[#00C853] focus-within:ring-4 focus-within:ring-[#00C853]/10">
+                <DashboardCoinDropdown value={payCoin} onChange={setPayCoin} />
+                <input value={payAmount} onChange={(e) => setPayAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
+              </div>
+            </div>
+          </div>
+
+          {generated && paymentUrl ? (
+            <div className="mt-5 rounded-3xl border border-gray-100 bg-[#F8FAFB] p-4 text-center">
+              <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
+              <p className="mt-1 text-2xl font-extrabold text-gray-950">
+                {(displayPayAmount || amount) ? `${displayPayAmount || amount} ` : ""}<span className="text-[#00C896]">{resolvedPayCoin}</span>
+              </p>
+              <div id="dashboard-payment-qr" onClick={copyLink} className="mx-auto mt-2 w-fit cursor-copy rounded-2xl bg-white p-2">
+                <QRStyled value={paymentUrl} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
+              </div>
+              <button type="button" onClick={copyLink} className="mt-0 text-xs font-bold leading-tight text-gray-500 hover:text-[#00A87A]">
+                {copied ? "Link Copied" : "Click QR to copy link"}
+              </button>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <button onClick={downloadQr} className="serapay-action-secondary serapay-hover-green flex min-h-11 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-950">
+                  <Download className="h-4 w-4" /> Download QR
+                </button>
+                <button onClick={() => { window.open(paymentUrl, "_blank", "noopener,noreferrer"); }} className="serapay-action-secondary serapay-hover-green min-h-11 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-950">
+                  Pay now
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={() => setGenerated(true)}
+            disabled={!receiverAddress}
+            className="serapay-green-button serapay-shine-button mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-sm font-bold text-white disabled:opacity-45"
+          >
+            <QrCode className="h-4 w-4" />
+            {generated ? "Update QR code" : "Generate QR code"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function AppLayout({ children, pendingCount = 0, noPadding = false }: { children: React.ReactNode; pendingCount?: number; noPadding?: boolean }) {
   const { logout, walletAddress, apiKey, isAuthenticated, isLoading, login, retry, error } = useAuth();
   const [location] = useLocation();
@@ -119,10 +353,17 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
     try { return localStorage.getItem(LS_SIDEBAR) === "1"; } catch { return false; }
   });
   const [showNetworkModal, setShowNetworkModal] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
 
   const { activeMode, networkInfo } = useActiveNetworkMode();
 
   useEvents();
+
+  React.useEffect(() => {
+    const open = () => setShowPaymentModal(true);
+    window.addEventListener("serapay:new-payment", open);
+    return () => window.removeEventListener("serapay:new-payment", open);
+  }, []);
 
   if (isLoading) {
     return (
@@ -208,6 +449,8 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
   const sidebarW = collapsed ? "w-[60px]" : "w-60";
   const mainPl = collapsed ? "md:pl-[60px]" : "md:pl-60";
 
+  const paymentChainId = activeMode === "live" ? LIVE_PAYMENT_CHAIN_ID : TEST_PAYMENT_CHAIN_ID;
+
   return (
     <div className="h-dvh overflow-hidden bg-background flex w-full">
       {/* Desktop sidebar */}
@@ -236,8 +479,9 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
         {/* Nav */}
         <div className="p-2 flex-1 flex flex-col gap-0.5 overflow-hidden">
           {/* New Payment shortcut — always at top */}
-          <Link
-            href="/"
+          <button
+            type="button"
+            onClick={() => setShowPaymentModal(true)}
             className={cn(
               "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-semibold transition-colors overflow-hidden mb-1",
               collapsed ? "justify-center px-2" : "",
@@ -247,7 +491,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
           >
             <QrCode className="w-4 h-4 shrink-0" />
             {!collapsed && <span className="whitespace-nowrap">New Payment</span>}
-          </Link>
+          </button>
           {/* Divider */}
           <div className="border-t border-border my-1" />
           {navItems.map((item) => {
@@ -351,14 +595,14 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
               </div>
               <div className="p-3 flex-1 flex flex-col gap-0.5">
                 {/* New Payment shortcut */}
-                <Link
-                  href="/"
-                  onClick={() => setIsMobileMenuOpen(false)}
+                <button
+                  type="button"
+                  onClick={() => { setIsMobileMenuOpen(false); setShowPaymentModal(true); }}
                   className="serapay-green-button flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-semibold bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white mb-1"
                 >
                   <QrCode className="w-4 h-4" />
                   New Payment
-                </Link>
+                </button>
                 <div className="border-t border-border my-1" />
                 {navItems.map((item) => {
                   const isActive = location === item.href;
@@ -410,7 +654,7 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
           </div>
 
           {/* Wallet address dropdown */}
-          <WalletDropdown address={displayAddress} onLogout={logout} />
+          <WalletDropdown address={displayAddress} onLogout={logout} onNewPayment={() => setShowPaymentModal(true)} />
         </header>
         <div className={noPadding ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "p-4 md:p-6 flex-1 min-h-0 overflow-y-auto w-full max-w-6xl mx-auto"}>
           {children}
@@ -419,6 +663,14 @@ export function AppLayout({ children, pendingCount = 0, noPadding = false }: { c
 
       {/* Network switcher modal */}
       {showNetworkModal && <NetworkSwitcherModal onClose={() => setShowNetworkModal(false)} />}
+      {showPaymentModal && (
+        <DashboardPaymentModal
+          profile={profile}
+          walletAddress={displayAddress}
+          chainId={paymentChainId}
+          onClose={() => setShowPaymentModal(false)}
+        />
+      )}
     </div>
   );
 }

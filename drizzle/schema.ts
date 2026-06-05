@@ -112,6 +112,7 @@ export const menuItems = pgTable(
     menuId: varchar("menuId", { length: 36 }).notNull().references(() => menus.id, { onDelete: "cascade" }),
     name: varchar("name", { length: 120 }).notNull(),
     description: varchar("description", { length: 500 }),
+    itemCode: varchar("itemCode", { length: 64 }),
     price: numeric("price", { precision: 20, scale: 6 }).notNull(),
     coin: varchar("coin", { length: 20 }).notNull().default("USDC"),
     imageUrl: varchar("imageUrl", { length: 512 }),

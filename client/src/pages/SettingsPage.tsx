@@ -14,6 +14,17 @@ import { useChainId } from "wagmi";
 
 const LS_LOGO = "serapay_store_logo";
 type CurrencyGroup = { region: string; coins: SeraCurrency[] };
+const SETTINGS_QR_STYLES = QR_STYLES.filter((styleOption) => styleOption.id !== "classy");
+const SETTINGS_QR_STYLE_IDS = new Set(QR_STYLES.map((styleOption) => styleOption.id));
+
+function normalizeSettingsQrStyle(value: string | null | undefined, fallback: QrStyle = "rounded"): QrStyle {
+  if (value === "classy") return "classy-rounded";
+  return SETTINGS_QR_STYLE_IDS.has(value as QrStyle) ? (value as QrStyle) : fallback;
+}
+
+function normalizeSettingsQrMode(value: string | null | undefined): QrMode {
+  return value === "advanced" ? "advanced" : "standard";
+}
 
 function CurrencyMark({ coin, fallbackSymbol, className = "w-7 h-7" }: { coin?: Pick<SeraCurrency, "symbol" | "icon" | "logoUri">; fallbackSymbol?: string; className?: string }) {
   const label = (coin?.symbol || fallbackSymbol || "?").slice(0, 4).toUpperCase();
@@ -242,7 +253,7 @@ export function Settings() {
   const [storeDescription, setStoreDescription] = useState("");
   const [storeAddress, setStoreAddress] = useState("");
   const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem(LS_LOGO) || "");
-  const [qrStyle, setQrStyle] = useState<QrStyle>("classic");
+  const [qrStyle, setQrStyle] = useState<QrStyle>("rounded");
   const [qrFgColor, setQrFgColor] = useState("#000000");
   const [qrBgColor, setQrBgColor] = useState("#ffffff");
   const [qrMode, setQrMode] = useState<QrMode>("standard");
@@ -253,6 +264,8 @@ export function Settings() {
   const [currencyGroups, setCurrencyGroups] = useState<CurrencyGroup[]>([]);
   const [currencyLoading, setCurrencyLoading] = useState(true);
   const [previewTab, setPreviewTab] = useState<"qr" | "receipt">("qr");
+  const [receiptZoomOpen, setReceiptZoomOpen] = useState(false);
+  const [receiptZoom, setReceiptZoom] = useState(1);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -280,10 +293,10 @@ export function Settings() {
     if (profile) {
       setStoreName(profile.name || "");
       setStoreDescription((profile as any).description || "");
-      if ((profile as any).qrStyle) setQrStyle((profile as any).qrStyle as QrStyle);
+      if ((profile as any).qrStyle) setQrStyle(normalizeSettingsQrStyle((profile as any).qrStyle));
       if ((profile as any).qrFgColor) setQrFgColor((profile as any).qrFgColor);
       if ((profile as any).qrBgColor) setQrBgColor((profile as any).qrBgColor);
-      if ((profile as any).qrMode === "advanced" || (profile as any).qrMode === "standard") setQrMode((profile as any).qrMode);
+      if ((profile as any).qrMode) setQrMode(normalizeSettingsQrMode((profile as any).qrMode));
       const profileLogo = typeof (profile as any).logoData === "string" ? (profile as any).logoData : "";
       if (profileLogo) {
         setLogoUrl(profileLogo);
@@ -449,8 +462,6 @@ export function Settings() {
                     </div>
                   </div>
 
-                  <p className="text-[11px] text-muted-foreground">PNG, JPG or WebP · Max 10 MB · Optimised before upload</p>
-
                   <Button
                     type="submit"
                     disabled={updateProfile.isPending}
@@ -458,7 +469,7 @@ export function Settings() {
                     className="bg-gradient-to-r from-[#00D1A0] to-[#00B88A] hover:from-[#00C196] hover:to-[#00A87E] text-white border-0"
                   >
                     <Save className="w-3.5 h-3.5 mr-1.5" />
-                    {updateProfile.isPending ? "Saving..." : "Save Info"}
+                    {updateProfile.isPending ? "Saving..." : "Save Changes"}
                   </Button>
                 </form>
               )}
@@ -568,7 +579,7 @@ export function Settings() {
               <CardDescription>Choose how the QR code dots look on your payment page.</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 gap-2.5 mb-4">
+              <div className="grid grid-cols-2 gap-1 rounded-2xl bg-muted/50 p-1 mb-4">
                 {([
                   { id: "advanced" as QrMode, label: "Advanced QR", desc: "Auto coloring based on logo" },
                   { id: "standard" as QrMode, label: "Standard QR", desc: "Classic QR colors" },
@@ -579,22 +590,22 @@ export function Settings() {
                       key={modeOption.id}
                       type="button"
                       onClick={() => handleQrModeChange(modeOption.id)}
-                      className={`flex min-h-[58px] items-center gap-3 rounded-2xl border-2 px-3.5 py-2.5 text-left transition-all ${active ? "border-[#00D1A0] bg-[#F0FAF6]" : "border-border/40 hover:border-[#00D1A0]/50"}`}
+                      className={`flex min-h-[46px] items-center justify-center gap-2 rounded-xl px-3 text-center transition-all ${active ? "bg-white text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
                     >
-                      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-lg ${active ? "bg-[#00D1A0] text-white" : "border border-border/60 bg-white"}`}>
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${active ? "bg-[#00D1A0] text-white" : "border border-border/60 bg-white"}`}>
                         {active ? <Check className="h-3.5 w-3.5" /> : null}
                       </span>
                       <span className="min-w-0">
                         <span className="block text-xs font-extrabold text-foreground">{modeOption.label}</span>
-                        <span className="block text-[11px] text-muted-foreground">{modeOption.desc}</span>
+                        <span className="hidden sm:block text-[11px] text-muted-foreground">{modeOption.desc}</span>
                       </span>
                     </button>
                   );
                 })}
               </div>
               <label className="text-sm font-semibold text-foreground block mb-2">QR Design</label>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                {QR_STYLES.map(s => (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {SETTINGS_QR_STYLES.map(s => (
                   <button
                     key={s.id}
                     onClick={() => handleStyleChange(s.id)}
@@ -608,8 +619,8 @@ export function Settings() {
                       <QRStyled
                         value="https://serapay.io"
                         size={68}
-                        fgColor={(profile as any)?.qrFgColor || "#000000"}
-                        bgColor={(profile as any)?.qrBgColor || "#ffffff"}
+                        fgColor={qrFgColor}
+                        bgColor={qrBgColor}
                         style={s.id}
                         logo={logoUrl || undefined}
                         mode={qrMode}
@@ -718,7 +729,7 @@ export function Settings() {
 
                   <p className="text-[10px] font-mono break-all leading-relaxed text-center">
                     {profile?.walletAddress
-                      ? <><span className="font-bold text-[#1C1C1E]">{profile.walletAddress.slice(0, 6)}</span><span className="text-[#3C3C43]/35">{profile.walletAddress.slice(6, -4)}</span><span className="font-bold text-[#1C1C1E]">{profile.walletAddress.slice(-4)}</span></>
+                      ? <><span className="font-bold text-[#1C1C1E]">{profile.walletAddress.slice(0, 6)}</span><span className="text-[#3C3C43]/35">{profile.walletAddress.slice(6, -6)}</span><span className="font-bold text-[#1C1C1E]">{profile.walletAddress.slice(-6)}</span></>
                       : <span className="text-[#3C3C43]/35">Connect wallet to see address</span>
                     }
                   </p>
@@ -732,7 +743,12 @@ export function Settings() {
 
             {/* Receipt Preview */}
             {previewTab === "receipt" && (
-              <div className="mx-auto w-fit max-w-full overflow-x-auto">
+              <button
+                type="button"
+                onClick={() => setReceiptZoomOpen(true)}
+                className="mx-auto block w-fit max-w-full overflow-x-auto rounded-2xl border-0 bg-transparent p-0 text-left transition-transform duration-150 hover:scale-[1.01] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00D1A0]/30"
+                aria-label="Open receipt preview"
+              >
                 <ReceiptPreview
                   storeName={storeName}
                   storeAddress={storeAddress}
@@ -741,7 +757,7 @@ export function Settings() {
                   walletAddress={profile?.walletAddress}
                   networkName={paymentNetworkName}
                 />
-              </div>
+              </button>
             )}
 
             <p className="text-[10px] text-muted-foreground text-center">Updates live as you edit</p>
@@ -750,6 +766,58 @@ export function Settings() {
 
       </div>
       </div>
+      {receiptZoomOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-50 bg-black/35 backdrop-blur-sm"
+            onClick={() => setReceiptZoomOpen(false)}
+          />
+          <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+            <div className="relative max-h-[calc(100dvh-2rem)] w-full max-w-[min(96vw,720px)] overflow-auto rounded-3xl bg-white p-4 shadow-2xl pointer-events-auto">
+              <button
+                type="button"
+                onClick={() => setReceiptZoomOpen(false)}
+                className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground"
+                aria-label="Close receipt preview"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              <div className="mb-3 flex items-center gap-2 pr-12">
+                <p className="flex-1 text-sm font-semibold text-foreground">Receipt Preview</p>
+                <button
+                  type="button"
+                  onClick={() => setReceiptZoom((current) => Math.max(0.8, Number((current - 0.1).toFixed(1))))}
+                  className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-white text-sm font-bold text-muted-foreground hover:border-[#00D1A0]/50 hover:text-foreground"
+                  aria-label="Zoom out"
+                >
+                  -
+                </button>
+                <span className="w-12 text-center text-xs font-semibold text-muted-foreground">{Math.round(receiptZoom * 100)}%</span>
+                <button
+                  type="button"
+                  onClick={() => setReceiptZoom((current) => Math.min(1.6, Number((current + 0.1).toFixed(1))))}
+                  className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-white text-sm font-bold text-muted-foreground hover:border-[#00D1A0]/50 hover:text-foreground"
+                  aria-label="Zoom in"
+                >
+                  +
+                </button>
+              </div>
+              <div className="flex min-h-[520px] items-start justify-center overflow-auto rounded-2xl bg-muted/20 p-5">
+                <div style={{ transform: `scale(${receiptZoom})`, transformOrigin: "top center" }}>
+                  <ReceiptPreview
+                    storeName={storeName}
+                    storeAddress={storeAddress}
+                    logoUrl={logoUrl}
+                    receiveCoin={receiveCoin}
+                    walletAddress={profile?.walletAddress}
+                    networkName={paymentNetworkName}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </AppLayout>
   );
 }

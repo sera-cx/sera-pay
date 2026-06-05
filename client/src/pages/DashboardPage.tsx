@@ -20,7 +20,7 @@ type ChartRange = "7d" | "30d" | "90d";
 export function Dashboard() {
   const { activeMode } = useActiveNetworkMode();
   const activeChainId = activeMode === "live" ? 1 : 11155111;
-  const { data: txData, isLoading: txLoading } = useTransactions(10, 0, activeChainId);
+  const { data: txData, isLoading: txLoading } = useTransactions(500, 0, activeChainId);
   const { data: stats, isLoading: statsLoading } = useMerchantStats(activeChainId);
   const [chartRange, setChartRange] = useState<ChartRange>("7d");
   const [showNetworkModal, setShowNetworkModal] = useState(false);
@@ -30,11 +30,38 @@ export function Dashboard() {
   const isLoading = txLoading || statsLoading;
   const recentTransactions = txData?.transactions ?? [];
   const pendingQueue = recentTransactions.filter((tx) => tx.status === "pending" || tx.status === "confirming");
-  const pendingQueueCount = stats?.pendingCount ?? pendingQueue.length;
+  const confirmedTransactions = useMemo(() => recentTransactions.filter((tx) => tx.status === "confirmed"), [recentTransactions]);
+  const localTotalVolume = useMemo(() => confirmedTransactions.reduce((sum, tx) => {
+    const parsed = Number(tx.amountUsd ?? tx.amount ?? 0);
+    return Number.isFinite(parsed) && parsed > 0 ? sum + parsed : sum;
+  }, 0), [confirmedTransactions]);
+  const localDailyVolume = useMemo(() => {
+    const dailyMap = new Map<string, number>();
+    const now = new Date();
+    for (let i = 13; i >= 0; i--) {
+      const d = subDays(now, i);
+      dailyMap.set(format(d, "yyyy-MM-dd"), 0);
+    }
+    for (const tx of confirmedTransactions) {
+      const day = format(parseISO(tx.createdAt), "yyyy-MM-dd");
+      if (dailyMap.has(day)) {
+        const parsed = Number(tx.amountUsd ?? tx.amount ?? 0);
+        dailyMap.set(day, (dailyMap.get(day) || 0) + (Number.isFinite(parsed) && parsed > 0 ? parsed : 0));
+      }
+    }
+    return Array.from(dailyMap.entries()).map(([date, volume]) => ({ date, volume: volume.toFixed(6) }));
+  }, [confirmedTransactions]);
+  const backendVolume = Number(stats?.totalVolume ?? 0);
+  const displayTotalVolume = (Number.isFinite(backendVolume) && backendVolume > 0 ? stats?.totalVolume : localTotalVolume.toFixed(6)) || "0";
+  const displayTotalCount = stats?.totalCount ?? recentTransactions.length;
+  const displayConfirmedCount = Math.max(stats?.confirmedCount ?? 0, confirmedTransactions.length);
+  const displayPendingCount = Math.max(stats?.pendingCount ?? 0, pendingQueue.length);
+  const pendingQueueCount = displayPendingCount;
+  const displayDailyVolume = (stats?.dailyVolume || []).some((day) => Number(day.volume) > 0) ? (stats?.dailyVolume || []) : localDailyVolume;
 
   // Build chart data from all daily volume, filtered by selected range
   const chartData = useMemo(() => {
-    const allDaily = (stats?.dailyVolume || []).map((d) => ({
+    const allDaily = displayDailyVolume.map((d) => ({
       date: format(parseISO(d.date), "MMM dd"),
       isoDate: d.date,
       amount: parseFloat(d.volume),
@@ -60,7 +87,7 @@ export function Dashboard() {
     }
 
     return filtered;
-  }, [stats?.dailyVolume, chartRange]);
+  }, [displayDailyVolume, chartRange]);
 
   return (
     <AppLayout>
@@ -101,24 +128,25 @@ export function Dashboard() {
               <QrCode className="w-5 h-5 text-[#00B88A]" />
             </div>
             <div className="min-w-0">
-              <p className="font-semibold text-sm text-foreground">Generate a Payment QR Code</p>
+              <p className="font-semibold text-sm text-foreground">Generate QR code</p>
               <p className="text-xs text-muted-foreground mt-0.5 truncate">Use SeraPay to create a QR code and start accepting stablecoin payments</p>
             </div>
           </div>
-          <a
-            href="/"
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new Event("serapay:new-payment"))}
             className="shrink-0 flex items-center gap-1.5 bg-[#00D1A0] hover:bg-[#00B88A] text-white text-xs font-semibold px-3.5 py-2 rounded-lg transition-colors whitespace-nowrap"
           >
-            Open SeraPay
-          </a>
+            Generate QR code
+          </button>
         </div>
 
         {/* Stat cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <StatCard title="Volume" value={`$${formatAmount(stats?.totalVolume || "0")}`} icon={TrendingUp} loading={isLoading} />
-          <StatCard title="Transactions" value={(stats?.totalCount || 0).toString()} icon={Activity} loading={isLoading} />
-          <StatCard title="Successful" value={(stats?.confirmedCount || 0).toString()} icon={CheckCircle2} loading={isLoading} valueColor="text-[#00D1A0]" />
-          <StatCard title="Pending" value={(stats?.pendingCount || 0).toString()} icon={Clock} loading={isLoading} valueColor="text-amber-600" />
+          <StatCard title="Volume" value={`$${formatAmount(displayTotalVolume)}`} icon={TrendingUp} loading={isLoading} />
+          <StatCard title="Transactions" value={displayTotalCount.toString()} icon={Activity} loading={isLoading} />
+          <StatCard title="Successful" value={displayConfirmedCount.toString()} icon={CheckCircle2} loading={isLoading} valueColor="text-[#00D1A0]" />
+          <StatCard title="Pending" value={displayPendingCount.toString()} icon={Clock} loading={isLoading} valueColor="text-amber-600" />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

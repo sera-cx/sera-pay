@@ -168,6 +168,7 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "menuId" varchar(36) NOT NULL REFERENCES "menus" ("id") ON DELETE CASCADE,
       "name" varchar(120) NOT NULL,
       "description" varchar(500),
+      "itemCode" varchar(64),
       "price" numeric(20, 6) NOT NULL,
       "coin" varchar(20) NOT NULL DEFAULT 'USDC',
       "imageUrl" varchar(512),
@@ -178,6 +179,7 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "createdAt" timestamptz NOT NULL DEFAULT now(),
       "updatedAt" timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE "menu_items" ADD COLUMN IF NOT EXISTS "itemCode" varchar(64);
     ALTER TABLE "menu_items" ADD COLUMN IF NOT EXISTS "soldOutUntil" timestamptz;
     CREATE INDEX IF NOT EXISTS "idx_menu_items_menu" ON "menu_items" ("menuId");
 

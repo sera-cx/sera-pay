@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { buildPaymentUrl, resolvePaymentChainId, OrderItem } from "@/lib/payment";
-import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
+import { buildClientAppUrl } from "@/lib/app-url";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig, useSetDefaultWallet, useWallets } from "@/hooks/use-gateway";
@@ -22,7 +22,7 @@ import { MENU_TEMPLATES } from "@/lib/menuTemplates";
 import { STABLECOINS } from "@/lib/stablecoins";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { CurrencySelectModal } from "@/components/CurrencySelectModal";
-import { QRStyled, buildQrOptions, type QrStyle } from "@/components/QRStyled";
+import { QRStyled, buildQrOptions, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 
@@ -56,6 +56,7 @@ interface MenuItem {
   menuId: string;
   name: string;
   description: string | null;
+  itemCode: string | null;
   price: string;
   coin: string;
   imageUrl: string | null;
@@ -362,12 +363,13 @@ function ItemEditDialog({
 }: {
   item: MenuItem;
   menuId: string;
-  onSave: (data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => void;
+  onSave: (data: { name: string; description: string; itemCode?: string | null; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => void;
   onCancel: () => void;
   loading: boolean;
 }) {
   const [name, setName] = useState(item.name);
   const [description, setDescription] = useState(item.description || "");
+  const [itemCode, setItemCode] = useState(item.itemCode || "");
   const [price, setPrice] = useState(item.price);
   const [coin, setCoin] = useState(item.coin);
   const [category, setCategory] = useState(item.category || "");
@@ -376,6 +378,7 @@ function ItemEditDialog({
   const [uploadingImage, setUploadingImage] = useState(false);
   const [cropSource, setCropSource] = useState<CropSource | null>(null);
   const [error, setError] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(Boolean(item.itemCode));
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -430,6 +433,7 @@ function ItemEditDialog({
     onSave({
       name: name.trim(),
       description: description.trim(),
+      itemCode: itemCode.trim() || null,
       price: normalizeDecimalAmountText(price),
       coin,
       imageUrl: imageUrl || undefined,
@@ -486,6 +490,20 @@ function ItemEditDialog({
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Category</label>
             <Input value={category} onChange={e => { setCategory(e.target.value); setError(""); }} placeholder="e.g. Mains, Drinks, Services" maxLength={60} />
           </div>
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((open) => !open)}
+            className="flex w-full items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-700 transition-colors hover:border-[#00C853]/50"
+          >
+            Advanced
+            <ChevronDown className={`h-4 w-4 transition-transform ${advancedOpen ? "rotate-180" : ""}`} />
+          </button>
+          {advancedOpen ? (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Menu Item ID</label>
+              <Input value={itemCode} onChange={e => setItemCode(e.target.value.slice(0, 64))} placeholder="e.g. DRINK-KOPI-O" maxLength={64} />
+            </div>
+          ) : null}
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
@@ -545,16 +563,18 @@ function AddItemDialog({
   loading,
 }: {
   menuId: string;
-  onSave: (data: { name: string; description: string; price: string; coin: string; category?: string }) => void;
+  onSave: (data: { name: string; description: string; itemCode?: string | null; price: string; coin: string; category?: string }) => void;
   onCancel: () => void;
   loading: boolean;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [itemCode, setItemCode] = useState("");
   const [price, setPrice] = useState("");
   const [coin, setCoin] = useState("USDC");
   const [category, setCategory] = useState("");
   const [error, setError] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const handleSubmit = () => {
     const validation = validateItemForm({ name, price, coin, category });
@@ -562,7 +582,7 @@ function AddItemDialog({
       setError(validation);
       return;
     }
-    onSave({ name: name.trim(), description: description.trim(), price: normalizeDecimalAmountText(price), coin, category: category.trim() });
+    onSave({ name: name.trim(), description: description.trim(), itemCode: itemCode.trim() || null, price: normalizeDecimalAmountText(price), coin, category: category.trim() });
   };
 
   return (
@@ -586,6 +606,20 @@ function AddItemDialog({
             <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Category</label>
             <Input value={category} onChange={e => { setCategory(e.target.value); setError(""); }} placeholder="e.g. Drinks, Mains, Add-ons" maxLength={60} />
           </div>
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((open) => !open)}
+            className="flex w-full items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-semibold text-gray-700 transition-colors hover:border-[#00C853]/50"
+          >
+            Advanced
+            <ChevronDown className={`h-4 w-4 transition-transform ${advancedOpen ? "rotate-180" : ""}`} />
+          </button>
+          {advancedOpen ? (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Menu Item ID</label>
+              <Input value={itemCode} onChange={e => setItemCode(e.target.value.slice(0, 64))} placeholder="e.g. ADDON-COOKIE" maxLength={64} />
+            </div>
+          ) : null}
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Price</label>
@@ -788,6 +822,134 @@ function MenuWalletSelector() {
   );
 }
 
+function CartPaymentModal({
+  paymentUrl,
+  amount,
+  coin,
+  merchantProfile,
+  apiKey,
+  chainId,
+  startedAt,
+  onCancel,
+  onContinue,
+}: {
+  paymentUrl: string;
+  amount: string;
+  coin: string;
+  merchantProfile: any;
+  apiKey: string | null;
+  chainId: number;
+  startedAt: number;
+  onCancel: () => void;
+  onContinue: () => void;
+}) {
+  const [paidTx, setPaidTx] = useState<any | null>(null);
+  const [copied, setCopied] = useState(false);
+  const qrMode = (merchantProfile?.qrMode as QrMode) || "standard";
+  const qrStyle = (merchantProfile?.qrStyle as QrStyle) || "rounded";
+  const qrFg = merchantProfile?.qrFgColor || "#000000";
+  const qrBg = merchantProfile?.qrBgColor || "#ffffff";
+  const logo = merchantProfile?.logoData || undefined;
+
+  useEffect(() => {
+    if (!apiKey || paidTx) return;
+    let stopped = false;
+    const expected = Number(amount);
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/merchant/transactions?limit=50&chainId=${chainId}`, { headers: { "X-Api-Key": apiKey } });
+        if (!res.ok) return;
+        const data = await res.json();
+        const txs: any[] = data.transactions ?? [];
+        const matched = txs.find((tx) => {
+          if (tx.status !== "confirmed") return false;
+          if (String(tx.coin || "").toUpperCase() !== coin.toUpperCase()) return false;
+          if (new Date(tx.createdAt).getTime() < startedAt - 30_000) return false;
+          const received = Number(tx.amount);
+          return Number.isFinite(received) && Number.isFinite(expected) && Math.abs(received - expected) < 0.000001;
+        });
+        if (matched && !stopped) setPaidTx(matched);
+      } catch {}
+    };
+    void poll();
+    const id = window.setInterval(poll, 5000);
+    return () => { stopped = true; window.clearInterval(id); };
+  }, [amount, apiKey, chainId, coin, paidTx, startedAt]);
+
+  const shareInvoice = async () => {
+    const txId = paidTx?.txId || paidTx?.id;
+    const invoiceUrl = txId ? new URL(`/wallet/receipt/${txId}`, window.location.origin).toString() : paymentUrl;
+    const text = `SeraPay receipt: ${amount} ${coin}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "SeraPay E-Invoice", text, url: invoiceUrl });
+        return;
+      }
+      await navigator.clipboard.writeText(invoiceUrl);
+      toast.success("E-invoice link copied");
+    } catch {}
+  };
+
+  const copyPaymentLink = async () => {
+    try {
+      await navigator.clipboard.writeText(paymentUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {}
+  };
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-[0_30px_90px_rgba(10,31,26,0.22)]">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-950">{paidTx ? "Payment received" : "Scan and pay"}</h3>
+            <p className="mt-1 text-sm text-gray-500">{paidTx ? "The order payment has been confirmed." : "Keep this open while the customer scans the QR."}</p>
+          </div>
+          <button onClick={paidTx ? onContinue : onCancel} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-100 text-gray-400 hover:text-gray-700">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="mt-5 rounded-3xl border border-gray-100 bg-[#F8FAFB] p-5 text-center">
+          {paidTx ? (
+            <div className="flex min-h-[260px] flex-col items-center justify-center">
+              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-[#E6FAF5] text-[#00A87A]">
+                <Check className="h-10 w-10" />
+              </div>
+              <p className="mt-4 text-xl font-extrabold text-gray-950">Successful</p>
+              <p className="mt-1 text-sm font-semibold text-gray-500">Paid with {Number(paidTx.amount || amount).toLocaleString(undefined, { maximumFractionDigits: 6 })} {paidTx.coin || coin}</p>
+            </div>
+          ) : (
+            <>
+              <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Amount due</p>
+              <p className="mt-1 text-2xl font-extrabold text-gray-950">{Number(amount).toLocaleString(undefined, { maximumFractionDigits: 6 })} <span className="text-[#00C896]">{coin}</span></p>
+              <button id="pos-payment-qr" type="button" onClick={copyPaymentLink} className="mx-auto mt-4 block w-fit cursor-copy rounded-2xl bg-white p-2">
+                <QRStyled value={paymentUrl} size={260} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
+              </button>
+              <p className={`mt-2 text-xs font-bold ${copied ? "text-[#00A87A]" : "text-gray-500"}`}>
+                {copied ? "Link Copied!" : "Click QR to copy link"}
+              </p>
+            </>
+          )}
+        </div>
+
+        {paidTx ? (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <Button type="button" variant="outline" onClick={onContinue} className="h-11 bg-white">Continue Order</Button>
+            <Button type="button" onClick={shareInvoice} className="serapay-green-button h-11 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white">Share E-Invoice</Button>
+          </div>
+        ) : (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <Button type="button" variant="outline" onClick={onCancel} className="serapay-cancel-danger h-11 bg-white">Cancel Payment</Button>
+            <Button type="button" onClick={() => window.open(paymentUrl, "_blank", "noopener,noreferrer")} className="serapay-green-button h-11 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white">Pay Now</Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CartSidebar({
   cart,
   activeMenu,
@@ -805,11 +967,12 @@ function CartSidebar({
   variant?: "sidebar" | "drawer";
   onClose?: () => void;
 }) {
-  const [, navigate] = useLocation();
+  const { apiKey } = useAuth();
   const walletChainId = useChainId();
   const { data: seraConfig } = useSeraApiConfig();
   const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [paymentModal, setPaymentModal] = useState<{ url: string; amount: string; coin: string; startedAt: number } | null>(null);
   const totalQty = cart.reduce((s, e) => s + e.qty, 0);
 
   // Per-currency totals for mixed-currency carts
@@ -834,10 +997,11 @@ function CartSidebar({
       q: e.qty,
       c: e.item.coin || undefined,
     }));
+    const paymentAmount = formatDecimalAmount(dominantTotal) || dominantTotal.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
     const url = buildPaymentUrl({
       receiverAddress,
       receiveCoin: dominantCoin,
-      amount: dominantTotal.toFixed(2),
+      amount: paymentAmount,
       chainId: paymentChainId,
       merchantName: merchantProfile.name,
       merchantIcon: merchantProfile.logoData || undefined,
@@ -845,7 +1009,7 @@ function CartSidebar({
       menuName: activeMenu?.name,
       menuSlug: activeMenu?.slug,
     });
-    navigate(getClientAppPath(url));
+    setPaymentModal({ url, amount: paymentAmount, coin: dominantCoin, startedAt: Date.now() });
   };
 
   const rootClass = variant === "drawer"
@@ -965,6 +1129,19 @@ function CartSidebar({
             </div>
           </div>
         </div>
+      )}
+      {paymentModal && (
+        <CartPaymentModal
+          paymentUrl={paymentModal.url}
+          amount={paymentModal.amount}
+          coin={paymentModal.coin}
+          merchantProfile={merchantProfile}
+          apiKey={apiKey}
+          chainId={paymentChainId}
+          startedAt={paymentModal.startedAt}
+          onCancel={() => setPaymentModal(null)}
+          onContinue={() => { onClear(); setPaymentModal(null); onClose?.(); }}
+        />
       )}
     </div>
   );
@@ -1182,7 +1359,7 @@ function POSView({
     return cats.length > 0 ? ["All", ...cats] : [];
   }, [items]);
 
-  const handleAddItem = async (data: { name: string; description: string; price: string; coin: string; category?: string }) => {
+  const handleAddItem = async (data: { name: string; description: string; itemCode?: string | null; price: string; coin: string; category?: string }) => {
     const validation = validateItemForm(data);
     if (validation) {
       toast.error(validation);
@@ -1204,7 +1381,7 @@ function POSView({
     }
   };
 
-  const handleUpdateItem = async (item: MenuItem, data: { name: string; description: string; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => {
+  const handleUpdateItem = async (item: MenuItem, data: { name: string; description: string; itemCode?: string | null; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => {
     const validation = validateItemForm(data);
     if (validation) {
       toast.error(validation);

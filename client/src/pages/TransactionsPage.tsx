@@ -18,6 +18,7 @@ import { toast } from "sonner";
 
 // ── Date Range Types ──────────────────────────────────────────────────────────
 type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
+type StatusFilter = "all" | "paid" | "pending" | "cancelled";
 
 interface DateRange {
   preset: DatePreset;
@@ -57,6 +58,20 @@ const PRESETS: { key: DatePreset; label: string }[] = [
   { key: "month", label: "This month" },
   { key: "custom", label: "Custom range" },
 ];
+
+const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "paid", label: "Paid" },
+  { key: "pending", label: "Pending" },
+  { key: "cancelled", label: "Cancelled" },
+];
+
+function matchesStatusFilter(tx: Transaction, filter: StatusFilter) {
+  if (filter === "all") return true;
+  if (filter === "paid") return tx.status === "confirmed";
+  if (filter === "pending") return tx.status === "pending" || tx.status === "confirming";
+  return tx.status === "canceled" || tx.status === "failed" || tx.status === "unverified";
+}
 
 function getPresetRange(preset: DatePreset): { from: Date | null; to: Date | null } {
   const now = new Date();
@@ -455,15 +470,16 @@ export function Transactions() {
   const [qrTx, setQrTx] = useState<{ amount: string; coin: string; url: string } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [dateRange, setDateRange] = useState<DateRange>({ preset: "all", from: null, to: null });
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [localNotes, setLocalNotes] = useState<Record<string, string>>({});
   const queryClient = useQueryClient();
 
   const handleExportCSV = () => {
-    if (!filteredByDate.length) return;
+    if (!filtered.length) return;
     setExporting(true);
     try {
-      exportToCSV(filteredByDate, profile?.name, dateRange);
+      exportToCSV(filtered, profile?.name, dateRange);
     } finally {
       setTimeout(() => setExporting(false), 1500);
     }
@@ -476,17 +492,28 @@ export function Transactions() {
     return txs.filter(tx => inRange(tx, dateRange.from, dateRange.to));
   }, [data?.transactions, dateRange]);
 
+  const filteredByStatus = useMemo(() => {
+    return filteredByDate.filter((tx) => matchesStatusFilter(tx, statusFilter));
+  }, [filteredByDate, statusFilter]);
+
+  const statusCounts = useMemo(() => {
+    return STATUS_FILTERS.reduce<Record<StatusFilter, number>>((acc, filter) => {
+      acc[filter.key] = filteredByDate.filter((tx) => matchesStatusFilter(tx, filter.key)).length;
+      return acc;
+    }, { all: 0, paid: 0, pending: 0, cancelled: 0 });
+  }, [filteredByDate]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return filteredByDate;
-    return filteredByDate.filter((tx) =>
+    if (!q) return filteredByStatus;
+    return filteredByStatus.filter((tx) =>
       tx.txHash?.toLowerCase().includes(q) ||
       (tx.fromAddress ?? tx.from ?? "").toLowerCase().includes(q) ||
       tx.coin?.toLowerCase().includes(q) ||
       tx.status?.toLowerCase().includes(q) ||
       tx.memo?.toLowerCase().includes(q)
     );
-  }, [filteredByDate, query]);
+  }, [filteredByStatus, query]);
 
   const pendingCount = useMemo(() => (data?.transactions ?? []).filter(t => t.status === "pending" || t.status === "confirming").length, [data?.transactions]);
 
@@ -541,45 +568,75 @@ export function Transactions() {
     <AppLayout pendingCount={pendingCount}>
       <div className="space-y-6">
         {/* Header row */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight mb-0.5">Transactions</h1>
-            <p className="text-muted-foreground text-sm">
-              {filteredByDate.length} transaction{filteredByDate.length !== 1 ? "s" : ""}
-              {dateRange.preset !== "all" && <span className="ml-1 text-[#00A87A]">· filtered</span>}
-              {pendingCount > 0 && <span className="ml-1 text-amber-500">· {pendingCount} pending</span>}
-            </p>
-          </div>
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight mb-0.5">Transactions</h1>
+          <p className="text-muted-foreground text-sm">
+            {filtered.length} transaction{filtered.length !== 1 ? "s" : ""}
+            {dateRange.preset !== "all" && <span className="ml-1 text-[#00A87A]">- filtered</span>}
+            {statusFilter !== "all" && <span className="ml-1 text-[#00A87A]">- {STATUS_FILTERS.find((item) => item.key === statusFilter)?.label}</span>}
+            {pendingCount > 0 && <span className="ml-1 text-amber-500">- {pendingCount} pending</span>}
+          </p>
+        </div>
 
-          {/* Controls row */}
-          <div className="flex flex-wrap items-center gap-2">
-            <DateRangePicker range={dateRange} onChange={setDateRange} />
-            <button
-              onClick={handleExportCSV}
-              disabled={exporting || isLoading || !filteredByDate.length}
-              className="h-9 px-3 flex items-center gap-1.5 rounded-lg border border-border bg-background text-sm font-medium text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-              title="Export filtered transactions as CSV"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">{exporting ? "Exporting…" : "Export CSV"}</span>
-            </button>
-            <div className="relative w-full sm:w-64">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search tx hash, address, coin..."
-                className="w-full h-9 pl-9 pr-8 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring/10 transition-all placeholder:text-muted-foreground font-mono"
-              />
-              {query && (
-                <button onClick={() => setQuery("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
+        <div className="rounded-2xl border border-border/70 bg-white/95 p-2.5 shadow-[0_12px_32px_rgba(10,31,26,0.05)]">
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              {STATUS_FILTERS.map((filter) => {
+                const active = statusFilter === filter.key;
+                return (
+                  <button
+                    key={filter.key}
+                    type="button"
+                    onClick={() => setStatusFilter(filter.key)}
+                    className={cn(
+                      "inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-all",
+                      active
+                        ? "border-[#00D1A0] bg-[#E6FAF5] text-[#00795C] shadow-[0_6px_16px_rgba(0,209,160,0.12)]"
+                        : "border-border bg-background text-muted-foreground hover:border-[#00D1A0]/45 hover:bg-[#F7FFFC] hover:text-foreground"
+                    )}
+                  >
+                    {filter.label}
+                    <span className={cn(
+                      "rounded-full px-1.5 py-0.5 text-[10px]",
+                      active ? "bg-white/85 text-[#00795C]" : "bg-muted text-muted-foreground"
+                    )}>
+                      {statusCounts[filter.key]}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <DateRangePicker range={dateRange} onChange={setDateRange} />
+              <button
+                onClick={handleExportCSV}
+                disabled={exporting || isLoading || !filtered.length}
+                className="h-9 px-3 flex items-center justify-center gap-1.5 rounded-lg border border-border bg-background text-sm font-medium text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                title="Export filtered transactions as CSV"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{exporting ? "Exporting..." : "Export CSV"}</span>
+              </button>
+              <div className="relative w-full sm:w-72">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search tx hash, address, coin..."
+                  className="w-full h-9 pl-9 pr-8 rounded-lg border border-border bg-background text-sm focus:outline-none focus:ring-2 focus:ring-[#00D1A0]/15 focus:border-[#00D1A0]/60 transition-all placeholder:text-muted-foreground font-mono"
+                />
+                {query && (
+                  <button onClick={() => setQuery("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
+
 
         <Card className="overflow-hidden">
           <Table>
@@ -670,6 +727,8 @@ export function Transactions() {
                   <TableCell colSpan={6} className="h-40 text-center text-muted-foreground">
                     {query
                       ? `No transactions matching "${query}"`
+                      : statusFilter !== "all"
+                        ? `No ${STATUS_FILTERS.find((item) => item.key === statusFilter)?.label.toLowerCase()} transactions found.`
                       : dateRange.preset !== "all"
                         ? "No transactions in this date range."
                         : "No transactions found."}
