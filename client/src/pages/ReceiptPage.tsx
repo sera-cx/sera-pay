@@ -167,8 +167,8 @@ export default function ReceiptPage() {
           <div className="mx-4 border-t border-dashed border-gray-300" />
           <div className="px-5 py-4 text-center">
             <p className="text-xs text-gray-700">Thank you for your purchase!</p>
-            <p className="mt-1 text-xs font-bold text-[#00795C]">Powered by SeraPay - Sera Protocol</p>
-            <p className="mt-1 text-[11px] text-gray-400">Zero fees - Instant settlement - Self-custody</p>
+            <p className="mt-1 text-xs font-bold text-[#00795C]">Powered by SeraPay · Sera Protocol</p>
+            <p className="mt-1 text-[11px] text-gray-400">Zero fees · Instant settlement · Self-custody</p>
           </div>
         </div>
 

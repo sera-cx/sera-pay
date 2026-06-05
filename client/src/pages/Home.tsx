@@ -4,7 +4,7 @@ import jsQR from "jsqr";
 import { useLocation } from "wouter";
 import { useChainId } from "wagmi";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId } from "@/lib/payment";
+import { buildPaymentUrl, buildWalletPaymentUri, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId } from "@/lib/payment";
 import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { useMerchantProfile } from "@/hooks/use-merchant";
@@ -15,14 +15,15 @@ import { ArrowRight, ArrowUpDown, ChevronDown, Copy, Download, QrCode, Wallet } 
 import { SeoFooter } from "./SeoPages";
 import { SeraLogo, SeraPayHeader } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal } from "@/components/NetworkSwitcher";
-import { MAX_IMAGE_UPLOAD_BYTES, loadImage, prepareImageForUpload, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
+import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
+import { downloadPaymentQrCard } from "@/lib/qrDownload";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 const SERAPAY_LOGO_URL = "/icon-512.png";
 const QR_PREVIEW_URL = buildClientAppUrl("/pay/preview");
 const EDITABLE_QR_STYLES = QR_STYLES.filter((styleOption) => styleOption.id !== "classy");
-const QR_STYLE_IDS = new Set(QR_STYLES.map((styleOption) => styleOption.id));
+const QR_STYLE_IDS = new Set(EDITABLE_QR_STYLES.map((styleOption) => styleOption.id));
 type PaymentMode = "test" | "live";
 
 function normalizeQrStyleValue(value: string | null | undefined, fallback: QrStyle = "rounded"): QrStyle {
@@ -381,6 +382,7 @@ function LogoAvatar({
   const [uploading, setUploading] = useState(false);
   const [avatarError, setAvatarError] = useState("");
   const [avatarSuccess, setAvatarSuccess] = useState(false);
+  const [logoCropSource, setLogoCropSource] = useState<LogoCropSource | null>(null);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -392,32 +394,56 @@ function LogoAvatar({
       e.target.value = "";
       return;
     }
-    setUploading(true);
     try {
-      const prepared = await prepareImageForUpload(file, { maxDimension: 1024, quality: 0.88 });
-        // Use a non-empty name: fall back to wallet-derived placeholder if merchantName is empty
-        const safeName = merchantName.trim() || "My Store";
-        const res = await fetch("/api/merchant/settings", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", "X-Api-Key": apiKey },
-          body: JSON.stringify({ name: safeName, logoData: prepared.dataUrl }),
-        });
-        if (!res.ok) {
-          const d = await res.json().catch(() => ({}));
-          setAvatarError((d as any).error || "Upload failed");
-        } else {
-          const saved = await res.json().catch(() => null);
-          const savedLogo = typeof saved?.logoData === "string" ? saved.logoData : prepared.dataUrl;
-          setAvatarSuccess(true);
-          setTimeout(() => setAvatarSuccess(false), 2000);
-          onLogoSaved(savedLogo);
-        }
+      if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error("Use a PNG, JPG, or WebP image.");
+      if (file.size > MAX_IMAGE_UPLOAD_BYTES) throw new Error("Image must be 10 MB or smaller.");
+      const dataUrl = await readFileAsDataUrl(file);
+      const image = await loadImage(dataUrl);
+      setLogoCropSource({
+        dataUrl,
+        width: image.naturalWidth || image.width,
+        height: image.naturalHeight || image.height,
+        fileName: file.name,
+      });
     } catch (err) {
       setAvatarError(err instanceof Error ? err.message : "Upload failed");
     }
-    setUploading(false);
     // Reset input so same file can be re-selected
     e.target.value = "";
+  };
+
+  const uploadLogoData = async (dataUrl: string) => {
+    if (!apiKey) {
+      setAvatarError("Account syncing");
+      return;
+    }
+    setUploading(true);
+    setAvatarError("");
+    setAvatarSuccess(false);
+    try {
+      // Use a non-empty name: fall back to wallet-derived placeholder if merchantName is empty
+      const safeName = merchantName.trim() || "My Store";
+      const res = await fetch("/api/merchant/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Api-Key": apiKey },
+        body: JSON.stringify({ name: safeName, logoData: dataUrl }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setAvatarError((d as any).error || "Upload failed");
+        return;
+      }
+      const saved = await res.json().catch(() => null);
+      const savedLogo = typeof saved?.logoData === "string" ? saved.logoData : dataUrl;
+      setAvatarSuccess(true);
+      setTimeout(() => setAvatarSuccess(false), 2000);
+      onLogoSaved(savedLogo);
+      setLogoCropSource(null);
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const initials = merchantName
@@ -481,6 +507,18 @@ function LogoAvatar({
           {avatarError || "✓ Saved"}
         </span>
       )}
+      {logoCropSource ? (
+        <LogoCropModal
+          source={logoCropSource}
+          uploading={uploading}
+          onCancel={() => {
+            if (!uploading) setLogoCropSource(null);
+          }}
+          onConfirm={(dataUrl) => {
+            void uploadLogoData(dataUrl);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1969,189 +2007,36 @@ export default function Home() {
     } catch {}
   }, [paymentUrl]);
 
-  const handleDownloadQR = useCallback(() => {
+  const handleDownloadQR = useCallback(async () => {
+    if (!paymentUrl || !receiverAddress) return;
     setQrDownloading(true);
-    setTimeout(async () => {
-      try {
-        const qrWrapper = document.getElementById("serapay-qr-wrapper");
-        if (!qrWrapper) { setQrDownloading(false); return; }
-        const qrSvg = qrWrapper.querySelector("svg");
-        const qrCanvas = qrWrapper.querySelector("canvas");
-        const loadCanvasImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
-          const image = new Image();
-          image.crossOrigin = "anonymous";
-          image.onload = () => resolve(image);
-          image.onerror = reject;
-          image.src = src;
-        });
-        const loadCanvasImageOrNull = async (src: string) => {
-          try { return await loadCanvasImage(src); } catch { return null; }
-        };
-
-        let qrObjectUrl = "";
-        let qrSource = "";
-        if (qrSvg) {
-          const clone = qrSvg.cloneNode(true) as SVGElement;
-          clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-          qrSource = new XMLSerializer().serializeToString(clone);
-          qrObjectUrl = URL.createObjectURL(new Blob([qrSource], { type: "image/svg+xml;charset=utf-8" }));
-        } else if (qrCanvas instanceof HTMLCanvasElement) {
-          qrSource = qrCanvas.toDataURL("image/png");
-        }
-        if (!qrSource) throw new Error("QR image is not ready yet");
-        const qrImg = await loadCanvasImage(qrObjectUrl || qrSource);
-
-        const W = 600, H = 920;
-        const canvas = document.createElement("canvas");
-        canvas.width = W; canvas.height = H;
-        const ctx = canvas.getContext("2d")!;
-
-        // Background
-        ctx.fillStyle = "#F2FAF6";
-        ctx.fillRect(0, 0, W, H);
-
-        // White card
-        const cardX = 32, cardY = 60, cardW = W - 64, cardH = H - 140;
-        ctx.shadowColor = "rgba(0,0,0,0.08)";
-        ctx.shadowBlur = 24;
-        ctx.shadowOffsetY = 4;
-        ctx.fillStyle = "#ffffff";
-        const r = 28;
-        ctx.beginPath();
-        ctx.moveTo(cardX + r, cardY);
-        ctx.lineTo(cardX + cardW - r, cardY);
-        ctx.quadraticCurveTo(cardX + cardW, cardY, cardX + cardW, cardY + r);
-        ctx.lineTo(cardX + cardW, cardY + cardH - r);
-        ctx.quadraticCurveTo(cardX + cardW, cardY + cardH, cardX + cardW - r, cardY + cardH);
-        ctx.lineTo(cardX + r, cardY + cardH);
-        ctx.quadraticCurveTo(cardX, cardY + cardH, cardX, cardY + cardH - r);
-        ctx.lineTo(cardX, cardY + r);
-        ctx.quadraticCurveTo(cardX, cardY, cardX + r, cardY);
-        ctx.closePath();
-        ctx.fill();
-        ctx.shadowColor = "transparent";
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetY = 0;
-
-        // Merchant logo or initials circle
-        const logoData = localLogoData || merchantProfile?.logoData;
-        const logoSize = 72;
-        const logoX = W / 2 - logoSize / 2;
-        const logoY = cardY + 36;
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(W / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
-        ctx.clip();
-        if (logoData) {
-          try {
-            const logoImg = await loadCanvasImage(logoData);
-            ctx.drawImage(logoImg, logoX, logoY, logoSize, logoSize);
-          } catch {
-            ctx.fillStyle = "#E8F9F2";
-            ctx.fillRect(logoX, logoY, logoSize, logoSize);
-          }
-        } else {
-          // Initials circle
-          ctx.fillStyle = "#E8F9F2";
-          ctx.fillRect(logoX, logoY, logoSize, logoSize);
-          ctx.fillStyle = "#3AB882";
-          ctx.font = "bold 26px -apple-system, BlinkMacSystemFont, sans-serif";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          const initials = (merchantName || "?").split(" ").map((w: string) => w[0]).slice(0, 2).join("").toUpperCase();
-          ctx.fillText(initials, W / 2, logoY + logoSize / 2);
-        }
-        ctx.restore();
-
-        // Merchant name
-        ctx.fillStyle = "#0A1F1A";
-        ctx.font = "bold 24px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "alphabetic";
-        ctx.fillText(merchantName || "Payment", W / 2, logoY + logoSize + 28);
-
-        // "Pay" label
-        ctx.fillStyle = "rgba(60,60,67,0.4)";
-        ctx.font = "500 14px -apple-system, BlinkMacSystemFont, sans-serif";
-        ctx.fillText("Scan to pay", W / 2, logoY + logoSize + 52);
-
-        // QR code
-        const qrSize = 360;
-        const qrX = W / 2 - qrSize / 2;
-        const qrY = logoY + logoSize + 72;
-        ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
-
-        // Amount line (if set)
-        const _displayCoin = customerCoin ?? selectedCoin;
-        const _displayAmount = customerAmount || amount;
-        if (_displayAmount && _displayCoin) {
-          const amtY = qrY + qrSize + 28;
-          ctx.fillStyle = "#0A1F1A";
-          ctx.font = "bold 28px -apple-system, BlinkMacSystemFont, sans-serif";
-          ctx.fillText(
-            `${parseFloat(_displayAmount).toLocaleString(undefined, { maximumFractionDigits: 6 })} ${_displayCoin.symbol}`,
-            W / 2, amtY
-          );
-          if (customerCoin && selectedCoin && customerCoin.symbol !== selectedCoin.symbol) {
-            ctx.fillStyle = "rgba(60,60,67,0.4)";
-            ctx.font = "500 13px -apple-system, BlinkMacSystemFont, sans-serif";
-            ctx.fillText(`Customer pays in ${customerCoin.symbol}`, W / 2, amtY + 24);
-          }
-        }
-
-        // Wallet address below QR
-        const addrY = qrY + qrSize + (_displayAmount && _displayCoin ? 60 : 28);
-        drawHighlightedAddress(ctx, receiverAddress, W / 2, addrY, cardW - 84, 13);
-
-        // Footer branding
-        const footerY = H - 58;
-        const [seraPayIcon, seraCxLogo] = await Promise.all([
-          loadCanvasImageOrNull("/favicon-32x32.png"),
-          loadCanvasImageOrNull("/sera-logo.svg"),
-        ]);
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillStyle = "rgba(60,60,67,0.38)";
-        ctx.font = "700 12px -apple-system, BlinkMacSystemFont, sans-serif";
-        const leftTextBefore = "QR Generated by ";
-        const leftTextBrand = "SeraPay";
-        const rightText = "Powered by";
-        const separator = "|";
-        const iconSize = 16;
-        const seraCxLogoW = 58;
-        const seraCxLogoH = 11;
-        const gap = 6;
-        const leftW = ctx.measureText(leftTextBefore).width + iconSize + 4 + ctx.measureText(leftTextBrand).width;
-        const sepW = ctx.measureText(separator).width;
-        const rightW = ctx.measureText(rightText).width + gap + seraCxLogoW;
-        const totalW = leftW + 12 + sepW + 12 + rightW;
-        let footerX = W / 2 - totalW / 2;
-        ctx.fillText(leftTextBefore, footerX, footerY);
-        footerX += ctx.measureText(leftTextBefore).width;
-        if (seraPayIcon) ctx.drawImage(seraPayIcon, footerX, footerY - iconSize / 2, iconSize, iconSize);
-        footerX += iconSize + 4;
-        ctx.fillText(leftTextBrand, footerX, footerY);
-        footerX += ctx.measureText(leftTextBrand).width + 12;
-        ctx.fillStyle = "rgba(60,60,67,0.24)";
-        ctx.fillText(separator, footerX, footerY);
-        footerX += sepW + 12;
-        ctx.fillStyle = "rgba(60,60,67,0.38)";
-        ctx.fillText(rightText, footerX, footerY);
-        footerX += ctx.measureText(rightText).width + gap;
-        if (seraCxLogo) ctx.drawImage(seraCxLogo, footerX, footerY - seraCxLogoH / 2, seraCxLogoW, seraCxLogoH);
-
-        // Download
-        const a = document.createElement("a");
-        a.href = canvas.toDataURL("image/png");
-        a.download = `serapay-payment-${merchantName ? merchantName.replace(/\s+/g, "-").toLowerCase() : "card"}-${_displayCoin?.symbol ?? "qr"}.png`;
-        a.click();
-        if (qrObjectUrl) URL.revokeObjectURL(qrObjectUrl);
-      } catch (e) {
-        console.error("QR card download failed:", e);
-      }
+    try {
+      const displayCoin = customerCoin ?? selectedCoin;
+      const displayAmount = customerAmount || amount;
+      const walletQrValue = buildWalletPaymentUri({
+        receiverAddress,
+        coin: displayCoin?.symbol,
+        amount: displayAmount || undefined,
+        chainId: paymentChainId,
+      }) || paymentUrl;
+      await downloadPaymentQrCard({
+        qrValue: walletQrValue,
+        receiverAddress,
+        amount: displayAmount,
+        coin: displayCoin?.symbol,
+        merchantName,
+        merchantLogo: localLogoData || merchantProfile?.logoData || null,
+        fgColor: normalizeQrColor(localQrFgColor || merchantProfile?.qrFgColor, "#000000"),
+        bgColor: normalizeQrColor(localQrBgColor || merchantProfile?.qrBgColor, "#ffffff"),
+        qrStyle: normalizeQrStyleValue(localQrStyle || merchantProfile?.qrStyle),
+        qrMode: localQrMode || merchantProfile?.qrMode || "standard",
+      });
+    } catch (e) {
+      console.error("QR card download failed:", e);
+    } finally {
       setQrDownloading(false);
-    }, 150);
-  }, [selectedCoin, customerCoin, customerAmount, amount, merchantName, localLogoData, merchantProfile, receiverAddress]);
+    }
+  }, [amount, customerAmount, customerCoin, localLogoData, localQrBgColor, localQrFgColor, localQrMode, localQrStyle, merchantName, merchantProfile, paymentChainId, paymentUrl, receiverAddress, selectedCoin]);
 
   const handleReset = useCallback(() => {
     setStep(1);
@@ -2295,7 +2180,12 @@ export default function Home() {
     // Determine display values: show what customer pays
     const displayCoin = customerCoin ?? selectedCoin;
     const displayAmount = customerAmount || amount;
-    const activeQrValue = paymentUrl;
+    const activeQrValue = buildWalletPaymentUri({
+      receiverAddress,
+      coin: displayCoin?.symbol,
+      amount: displayAmount || undefined,
+      chainId: paymentChainId,
+    }) || paymentUrl;
     const activeQrRenderMode = localQrMode || (merchantProfile?.qrMode as QrMode) || "standard";
     const activeQrLogo = localLogoData || merchantProfile?.logoData || undefined;
     const activeQrFgColor = normalizeQrColor(localQrFgColor || merchantProfile?.qrFgColor, "#000000");
@@ -2474,7 +2364,7 @@ export default function Home() {
                 cursor: "pointer",
               }}
             >
-              {copied ? "Link Copied" : "Click QR to copy link"}
+              {copied ? "Link Copied!" : "Click QR to copy link"}
             </button>
             {/* Wallet address — subtle */}
             <div style={{ width: "min(380px, calc(100vw - 64px))", margin: "9px auto 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 10.5, color: "rgba(60,60,67,0.32)", lineHeight: 1.2, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", whiteSpace: "nowrap", overflow: "hidden" }}>
@@ -2620,7 +2510,7 @@ export default function Home() {
                   background: "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none",
                   fontSize: 15, fontWeight: 700, color: "#fff", cursor: "pointer",
                   boxShadow: "0 4px 16px rgba(78,206,154,0.28)",
-                }}>Update QR</button>
+                }}>Done</button>
               </div>
             </div>
           </>

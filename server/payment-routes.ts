@@ -65,6 +65,14 @@ function transactionToJson(tx: Transaction) {
   return {
     ...tx,
     paymentUrl: typeof meta?.paymentUrl === "string" ? meta.paymentUrl : null,
+    orderId: typeof meta?.orderId === "string" ? meta.orderId : null,
+    paymentIntentId: typeof meta?.paymentIntentId === "string" ? meta.paymentIntentId : null,
+    quoteUuid: typeof meta?.quoteUuid === "string" ? meta.quoteUuid : null,
+    paymentSource: typeof meta?.source === "string"
+      ? meta.source
+      : typeof meta?.type === "string"
+        ? meta.type
+        : null,
   };
 }
 

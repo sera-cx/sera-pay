@@ -10,21 +10,21 @@ import {
   ChevronDown, UtensilsCrossed, Search, WalletCards,
 } from "lucide-react";
 import { toast } from "sonner";
-import { buildPaymentUrl, resolvePaymentChainId, OrderItem } from "@/lib/payment";
+import { buildPaymentUrl, buildWalletPaymentUri, resolvePaymentChainId, OrderItem } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig, useSetDefaultWallet, useWallets } from "@/hooks/use-gateway";
-import QRCodeStyling from "qr-code-styling";
 import { useLocation, useSearch } from "wouter";
 import { useChainId } from "wagmi";
 import { MENU_TEMPLATES } from "@/lib/menuTemplates";
 import { STABLECOINS } from "@/lib/stablecoins";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { CurrencySelectModal } from "@/components/CurrencySelectModal";
-import { QRStyled, buildQrOptions, type QrMode, type QrStyle } from "@/components/QRStyled";
+import { QRStyled, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
+import { downloadPaymentQrCard } from "@/lib/qrDownload";
 
 // Build a name→category lookup from all templates for backfill
 const TEMPLATE_CATEGORY_MAP: Record<string, string> = {};
@@ -660,15 +660,17 @@ function QRSaveModal({ url, menuName, merchantProfile, onClose }: { url: string;
   const logo = merchantProfile?.logoData || undefined;
 
   const handleDownload = async () => {
-    const qr = new QRCodeStyling(buildQrOptions(url, 720, fgColor, bgColor, qrStyle, logo));
-    const raw = await qr.getRawData("png");
-    const blob = raw instanceof Blob ? raw : new Blob([raw as BlobPart], { type: "image/png" });
-    const objectUrl = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.download = `${menuName.replace(/\s+/g, "-").toLowerCase()}-qr.png`;
-    link.href = objectUrl;
-    link.click();
-    URL.revokeObjectURL(objectUrl);
+    await downloadPaymentQrCard({
+      qrValue: url,
+      receiverAddress: merchantProfile?.storeAddress || merchantProfile?.walletAddress || code,
+      merchantName: menuName || merchantProfile?.name || "SeraPay Menu",
+      merchantLogo: logo || null,
+      fgColor,
+      bgColor,
+      qrStyle,
+      qrMode: merchantProfile?.qrMode || "standard",
+      filename: `${menuName.replace(/\s+/g, "-").toLowerCase()}-qr.png`,
+    });
   };
 
   return (
@@ -850,6 +852,8 @@ function CartPaymentModal({
   const qrFg = merchantProfile?.qrFgColor || "#000000";
   const qrBg = merchantProfile?.qrBgColor || "#ffffff";
   const logo = merchantProfile?.logoData || undefined;
+  const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress || "";
+  const walletQrValue = buildWalletPaymentUri({ receiverAddress, coin, amount, chainId }) || paymentUrl;
 
   useEffect(() => {
     if (!apiKey || paidTx) return;
@@ -925,7 +929,7 @@ function CartPaymentModal({
               <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Amount due</p>
               <p className="mt-1 text-2xl font-extrabold text-gray-950">{Number(amount).toLocaleString(undefined, { maximumFractionDigits: 6 })} <span className="text-[#00C896]">{coin}</span></p>
               <button id="pos-payment-qr" type="button" onClick={copyPaymentLink} className="mx-auto mt-4 block w-fit cursor-copy rounded-2xl bg-white p-2">
-                <QRStyled value={paymentUrl} size={260} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
+                <QRStyled value={walletQrValue} size={260} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
               </button>
               <p className={`mt-2 text-xs font-bold ${copied ? "text-[#00A87A]" : "text-gray-500"}`}>
                 {copied ? "Link Copied!" : "Click QR to copy link"}

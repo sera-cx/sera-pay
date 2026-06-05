@@ -5,7 +5,7 @@ import { useMerchantProfile, useUpdateProfile } from "@/hooks/use-merchant";
 import { useToast } from "@/components/toast-system";
 import { Save, ImageIcon, Upload, X, QrCode, Coins, Search, Check, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
-import { prepareImageForUpload } from "@/lib/imageUpload";
+import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 import { groupCurrenciesByRegion, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { resolvePaymentChainId, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
@@ -15,7 +15,7 @@ import { useChainId } from "wagmi";
 const LS_LOGO = "serapay_store_logo";
 type CurrencyGroup = { region: string; coins: SeraCurrency[] };
 const SETTINGS_QR_STYLES = QR_STYLES.filter((styleOption) => styleOption.id !== "classy");
-const SETTINGS_QR_STYLE_IDS = new Set(QR_STYLES.map((styleOption) => styleOption.id));
+const SETTINGS_QR_STYLE_IDS = new Set(SETTINGS_QR_STYLES.map((styleOption) => styleOption.id));
 
 function normalizeSettingsQrStyle(value: string | null | undefined, fallback: QrStyle = "rounded"): QrStyle {
   if (value === "classy") return "classy-rounded";
@@ -35,6 +35,160 @@ function CurrencyMark({ coin, fallbackSymbol, className = "w-7 h-7" }: { coin?: 
     <span className={`${className} rounded-full bg-muted border border-border/40 flex items-center justify-center text-[10px] font-bold text-muted-foreground leading-none`}>
       {coin?.icon || label.slice(0, 2)}
     </span>
+  );
+}
+
+type SettingsLogoCropSource = {
+  dataUrl: string;
+  width: number;
+  height: number;
+};
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function SettingsLogoCropModal({
+  source,
+  saving,
+  onCancel,
+  onConfirm,
+}: {
+  source: SettingsLogoCropSource;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: (dataUrl: string) => void;
+}) {
+  const frameSize = 300;
+  const baseScale = Math.max(frameSize / source.width, frameSize / source.height);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [error, setError] = useState("");
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
+  const displayW = source.width * baseScale * zoom;
+  const displayH = source.height * baseScale * zoom;
+  const maxOffsetX = Math.max(0, (displayW - frameSize) / 2);
+  const maxOffsetY = Math.max(0, (displayH - frameSize) / 2);
+  const safeOffset = {
+    x: clampNumber(offset.x, -maxOffsetX, maxOffsetX),
+    y: clampNumber(offset.y, -maxOffsetY, maxOffsetY),
+  };
+
+  useEffect(() => {
+    setOffset((current) => ({
+      x: clampNumber(current.x, -maxOffsetX, maxOffsetX),
+      y: clampNumber(current.y, -maxOffsetY, maxOffsetY),
+    }));
+  }, [maxOffsetX, maxOffsetY]);
+
+  const handleConfirm = async () => {
+    try {
+      setError("");
+      const scale = baseScale * zoom;
+      const drawnX = (frameSize - displayW) / 2 + safeOffset.x;
+      const drawnY = (frameSize - displayH) / 2 + safeOffset.y;
+      const prepared = await renderCroppedImageForUpload({
+        source: source.dataUrl,
+        crop: {
+          x: clampNumber(-drawnX / scale, 0, source.width),
+          y: clampNumber(-drawnY / scale, 0, source.height),
+          width: Math.min(frameSize / scale, source.width),
+          height: Math.min(frameSize / scale, source.height),
+        },
+        outputWidth: 1024,
+        outputHeight: 1024,
+        quality: 0.9,
+      });
+      onConfirm(prepared.dataUrl);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to prepare image.");
+    }
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[80] bg-black/45 backdrop-blur-sm" />
+      <div className="fixed inset-0 z-[81] flex items-center justify-center p-4">
+        <div className="w-full max-w-[420px] rounded-3xl bg-white p-5 shadow-2xl">
+          <div className="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-extrabold text-[#0A1F1A]">Crop logo</h3>
+              <p className="mt-1 text-sm leading-relaxed text-muted-foreground">Drag to reposition, then adjust the scale.</p>
+            </div>
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={saving}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground transition-colors hover:bg-muted/80 hover:text-foreground disabled:opacity-60"
+              aria-label="Cancel crop"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div
+            className="relative mx-auto aspect-square w-full max-w-[300px] touch-none overflow-hidden rounded-[22px] border-2 border-[#00C896] bg-[#E6FAF5] shadow-inner"
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, startX: safeOffset.x, startY: safeOffset.y };
+            }}
+            onPointerMove={(event) => {
+              const drag = dragRef.current;
+              if (!drag || drag.pointerId !== event.pointerId) return;
+              setOffset({
+                x: clampNumber(drag.startX + event.clientX - drag.x, -maxOffsetX, maxOffsetX),
+                y: clampNumber(drag.startY + event.clientY - drag.y, -maxOffsetY, maxOffsetY),
+              });
+            }}
+            onPointerUp={() => { dragRef.current = null; }}
+            onPointerCancel={() => { dragRef.current = null; }}
+          >
+            <img
+              src={source.dataUrl}
+              alt=""
+              draggable={false}
+              className="absolute left-1/2 top-1/2 max-w-none select-none"
+              style={{
+                width: displayW,
+                height: displayH,
+                transform: `translate(calc(-50% + ${safeOffset.x}px), calc(-50% + ${safeOffset.y}px))`,
+              }}
+            />
+          </div>
+
+          <div className="mt-5">
+            <div className="mb-2 flex items-center justify-between text-xs font-bold text-muted-foreground">
+              <span>Scale</span>
+              <span>{Math.round(zoom * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min="1"
+              max="3"
+              step="0.01"
+              value={zoom}
+              onChange={(event) => setZoom(Number(event.target.value))}
+              className="w-full accent-[#00C853]"
+            />
+          </div>
+          {error ? <p className="mt-3 text-sm font-semibold text-red-500">{error}</p> : null}
+
+          <div className="mt-5 grid grid-cols-[1fr_1.35fr] gap-2.5">
+            <Button type="button" variant="outline" onClick={onCancel} disabled={saving} className="h-12 rounded-2xl">
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleConfirm()}
+              disabled={saving}
+              className="serapay-green-button h-12 rounded-2xl border-0 bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-white"
+            >
+              {saving ? "Saving..." : "Confirm"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -253,6 +407,7 @@ export function Settings() {
   const [storeDescription, setStoreDescription] = useState("");
   const [storeAddress, setStoreAddress] = useState("");
   const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem(LS_LOGO) || "");
+  const [logoCropSource, setLogoCropSource] = useState<SettingsLogoCropSource | null>(null);
   const [qrStyle, setQrStyle] = useState<QrStyle>("rounded");
   const [qrFgColor, setQrFgColor] = useState("#000000");
   const [qrBgColor, setQrBgColor] = useState("#ffffff");
@@ -352,11 +507,19 @@ export function Settings() {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const prepared = await prepareImageForUpload(file, { maxDimension: 1024, quality: 0.88 });
-      setLogoUrl(prepared.dataUrl);
-      try { localStorage.setItem(LS_LOGO, prepared.dataUrl); } catch {}
-      updateProfile.mutate({ logoData: prepared.dataUrl });
-      toast({ title: "Logo saved", description: `Optimised to ${prepared.width}×${prepared.height}`, type: "success" });
+      if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+        throw new Error("Use a PNG, JPG, or WebP image.");
+      }
+      if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+        throw new Error("Image must be 10 MB or smaller.");
+      }
+      const dataUrl = await readFileAsDataUrl(file);
+      const image = await loadImage(dataUrl);
+      setLogoCropSource({
+        dataUrl,
+        width: image.naturalWidth || image.width,
+        height: image.naturalHeight || image.height,
+      });
     } catch (error: any) {
       toast({ title: "Logo upload failed", description: error.message || "Use a PNG, JPG, or WebP up to 10 MB", type: "error" });
     } finally {
@@ -364,8 +527,23 @@ export function Settings() {
     }
   };
 
+  const saveLogoData = (dataUrl: string) => {
+    updateProfile.mutate({ logoData: dataUrl } as any, {
+      onSuccess: () => {
+        setLogoUrl(dataUrl);
+        try { localStorage.setItem(LS_LOGO, dataUrl); } catch {}
+        setLogoCropSource(null);
+        toast({ title: "Logo saved", type: "success" });
+      },
+      onError: (error: any) => {
+        toast({ title: "Logo upload failed", description: error.message || "Please try again.", type: "error" });
+      },
+    });
+  };
+
   const removeLogo = () => {
     setLogoUrl("");
+    setLogoCropSource(null);
     localStorage.removeItem(LS_LOGO);
     updateProfile.mutate({ logoData: null });
   };
@@ -405,9 +583,9 @@ export function Settings() {
                 <form onSubmit={handleSaveStoreInfo} className="space-y-4">
                   <div className="flex flex-col sm:flex-row gap-4 items-start">
                     <div className="relative shrink-0 group">
-                      <div className="w-20 h-20 rounded-2xl border-2 border-dashed border-border overflow-hidden bg-muted/20 flex items-center justify-center">
+                      <div className="w-24 h-24 rounded-2xl border-2 border-dashed border-[#00D1A0]/45 overflow-hidden bg-[#F0FAF6] flex items-center justify-center">
                         {logoUrl
-                          ? <img src={logoUrl} alt="Store logo" className="w-full h-full object-contain" />
+                          ? <img src={logoUrl} alt="Store logo" className="w-full h-full object-cover" />
                           : <ImageIcon className="w-6 h-6 text-muted-foreground/40" />
                         }
                       </div>
@@ -422,9 +600,10 @@ export function Settings() {
                         <button
                           type="button"
                           onClick={removeLogo}
-                          className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-600 transition-colors"
+                          className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-red-500 text-white shadow-[0_4px_12px_rgba(255,59,48,0.25)] transition-colors hover:bg-red-600"
+                          aria-label="Remove logo"
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-3.5 h-3.5" />
                         </button>
                       )}
                       <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={handleLogoFile} />
@@ -818,6 +997,16 @@ export function Settings() {
           </div>
         </>
       )}
+      {logoCropSource ? (
+        <SettingsLogoCropModal
+          source={logoCropSource}
+          saving={updateProfile.isPending}
+          onCancel={() => {
+            if (!updateProfile.isPending) setLogoCropSource(null);
+          }}
+          onConfirm={saveLogoData}
+        />
+      ) : null}
     </AppLayout>
   );
 }

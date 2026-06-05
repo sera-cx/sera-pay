@@ -4,7 +4,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
 import { ChevronDown, ChevronRight, Wallet } from "lucide-react";
 import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { decodePaymentRequest } from "@/lib/payment";
+import { decodePaymentRequest, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { getCurrencyRate } from "@/lib/currencyCalculator";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
@@ -654,7 +654,7 @@ export default function PayPage() {
   const [unifiedLoading, setUnifiedLoading] = useState(false);
   const [orderMinimumPayAmount, setOrderMinimumPayAmount] = useState<string | null>(null);
   const [rateRefreshKey, setRateRefreshKey] = useState(0);
-  const chainId = req?.chainId ?? 1;
+  const chainId = req?.chainId ?? TEST_PAYMENT_CHAIN_ID;
   const hasOrderItems = !!req?.orderItems?.length;
 
   // Compute itemised order total in the currently selected payment coin.
@@ -922,7 +922,7 @@ export default function PayPage() {
       const wallet = wallets?.[0];
       if (!wallet) throw new Error("No wallet connected");
       const provider = await wallet.getEthereumProvider();
-      const cid = req.chainId ?? 1;
+      const cid = req.chainId ?? TEST_PAYMENT_CHAIN_ID;
 
       await switchPaymentChain(provider, cid);
       const activeWalletAddress = await getActiveWalletAddress(provider, wallet.address);
@@ -1159,7 +1159,7 @@ export default function PayPage() {
     const paidCoin = selectedCoin?.symbol || req?.payCoin || req?.receiveCoin || "";
     const receivedAmount = req?.amount || paidAmount;
     const receivedCoin = req?.receiveCoin || paidCoin;
-    const chainName = CHAIN_NAMES[req?.chainId ?? 1] || "Ethereum";
+    const chainName = CHAIN_NAMES[chainId] || "Ethereum";
     const addrShort = req?.receiverAddress ? `${req.receiverAddress.slice(0,6)}...${req.receiverAddress.slice(-4)}` : "";
     const isCrossToken = paidCoin !== receivedCoin;
 
@@ -1714,7 +1714,7 @@ export default function PayPage() {
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between" }}>
                   <span style={{ fontSize: 12, color: "rgba(60,60,67,0.5)" }}>Network</span>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "#1C1C1E" }}>{CHAIN_NAMES[req.chainId ?? 1] || "Ethereum"}</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#1C1C1E" }}>{CHAIN_NAMES[chainId] || "Ethereum"}</span>
                 </div>
               </div>
             )}

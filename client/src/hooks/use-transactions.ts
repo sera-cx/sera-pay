@@ -19,6 +19,10 @@ export interface Transaction {
   verified: boolean | number;
   chainId?: number;
   paymentUrl?: string | null;
+  orderId?: string | null;
+  paymentIntentId?: string | null;
+  quoteUuid?: string | null;
+  paymentSource?: string | null;
   merchantId?: string;
   webhookSent?: boolean;
   webhookSentAt?: string | null;

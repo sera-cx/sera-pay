@@ -3,13 +3,30 @@ import { AppLayout } from "@/components/AppLayout";
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Skeleton } from "@/components/dashboard-ui";
 import { useCreateSubWallet, useDeleteSubWallet, useSetDefaultWallet, useSeraApiConfig, useWallets } from "@/hooks/use-gateway";
 import { useMerchantStats } from "@/hooks/use-stats";
-import { formatAmount } from "@/lib/dashboard-utils";
+import { cn, formatAmount } from "@/lib/dashboard-utils";
 import { useToast } from "@/components/toast-system";
 import { resolvePaymentChainId } from "@/lib/payment";
 import { AlertTriangle, CheckCircle2, Copy, Landmark, Plus, Trash2, Wallet, X } from "lucide-react";
 import { useChainId } from "wagmi";
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+function HighlightedWalletAddress({ address, className }: { address: string; className?: string }) {
+  const value = String(address || "");
+  if (value.length <= 12) {
+    return <span className={cn("font-mono text-[#0A1F1A]", className)}>{value}</span>;
+  }
+  const start = value.slice(0, 6);
+  const middle = value.slice(6, -6);
+  const end = value.slice(-6);
+  return (
+    <span className={cn("font-mono break-all", className)}>
+      <span className="font-semibold text-[#0A1F1A]">{start}</span>
+      <span className="text-muted-foreground">{middle}</span>
+      <span className="font-semibold text-[#0A1F1A]">{end}</span>
+    </span>
+  );
+}
 
 export function Wallets() {
   const { data, isLoading, error } = useWallets();
@@ -123,7 +140,9 @@ export function Wallets() {
                           <p className="text-xs text-muted-foreground">Master address</p>
                           {data.masterWallet.isDefault ? <Badge variant="success">Default</Badge> : null}
                         </div>
-                        <p className="font-mono text-sm break-all">{data.masterWallet.settlementAddress}</p>
+                        <p className="text-sm">
+                          <HighlightedWalletAddress address={data.masterWallet.settlementAddress} />
+                        </p>
                         {data.masterWallet.settlementAddress.toLowerCase() !== data.masterWallet.address.toLowerCase() ? (
                           <p className="mt-1 text-xs text-muted-foreground">Receiving through selected default wallet.</p>
                         ) : null}
@@ -194,7 +213,9 @@ export function Wallets() {
                         <Badge variant={wallet.status === "active" ? "success" : "secondary"}>{wallet.status}</Badge>
                         {wallet.isDefault ? <Badge variant="warning">Default</Badge> : null}
                       </div>
-                      <p className="font-mono text-xs text-muted-foreground break-all">{wallet.address}</p>
+                      <p className="text-xs">
+                        <HighlightedWalletAddress address={wallet.address} />
+                      </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-2 self-end sm:self-auto">
                       {!wallet.isDefault ? (

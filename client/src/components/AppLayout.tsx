@@ -8,10 +8,11 @@ import { useEvents } from "@/hooks/use-events";
 import { motion, AnimatePresence } from "framer-motion";
 import { SeraLogo } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal, useActiveNetworkMode } from "@/components/NetworkSwitcher";
-import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { buildPaymentUrl, buildWalletPaymentUri, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { STABLECOINS } from "@/lib/stablecoins";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
+import { downloadPaymentQrCard } from "@/lib/qrDownload";
 
 const navItems = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -24,6 +25,22 @@ const navItems = [
 
 const LS_SIDEBAR = "serapay_sidebar_collapsed";
 const DASHBOARD_QR_STYLE_IDS = new Set(QR_STYLES.map((styleOption) => styleOption.id));
+type DashboardExpiryOption = "none" | "15m" | "1h" | "24h" | "7d";
+const DASHBOARD_EXPIRY_OPTIONS: Array<{ value: DashboardExpiryOption; label: string }> = [
+  { value: "none", label: "No expiry" },
+  { value: "15m", label: "15 min" },
+  { value: "1h", label: "1 hour" },
+  { value: "24h", label: "24 hours" },
+  { value: "7d", label: "7 days" },
+];
+
+function getDashboardExpiryMs(value: DashboardExpiryOption) {
+  if (value === "15m") return 15 * 60 * 1000;
+  if (value === "1h") return 60 * 60 * 1000;
+  if (value === "24h") return 24 * 60 * 60 * 1000;
+  if (value === "7d") return 7 * 24 * 60 * 60 * 1000;
+  return 0;
+}
 
 function normalizeDashboardQrStyle(value: unknown, fallback: QrStyle = "rounded"): QrStyle {
   if (value === "classy") return "classy-rounded";
@@ -57,7 +74,7 @@ function DashboardCoinDropdown({ value, onChange }: { value: string; onChange: (
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="flex h-full min-h-12 w-full items-center justify-between gap-2 border-r border-gray-100 bg-[#F0FCF8] px-3 text-left text-sm font-bold text-gray-950 outline-none transition-colors hover:bg-[#E8FAF4]"
+        className="flex h-full min-h-12 w-full items-center justify-between gap-2 rounded-l-2xl border-r border-gray-100 bg-[#F0FCF8] px-3 text-left text-sm font-bold text-gray-950 outline-none transition-colors hover:bg-[#E8FAF4]"
       >
         <span className="min-w-0 truncate">{selected.label}</span>
         <ChevronDown className={cn("h-4 w-4 shrink-0 text-gray-500 transition-transform", open && "rotate-180")} />
@@ -193,8 +210,12 @@ function DashboardPaymentModal({
   const [amount, setAmount] = useState("");
   const [payAmount, setPayAmount] = useState("");
   const [rateLoading, setRateLoading] = useState(false);
-  const [generated, setGenerated] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [description, setDescription] = useState("");
+  const [expiryOption, setExpiryOption] = useState<DashboardExpiryOption>("none");
+  const [singleUse, setSingleUse] = useState(false);
+  const [expiryNow, setExpiryNow] = useState(() => Date.now());
   const receiverAddress = profile?.storeAddress || profile?.walletAddress || walletAddress;
   const merchantName = profile?.name || "SeraPay";
   const logo = profile?.logoData || undefined;
@@ -206,6 +227,10 @@ function DashboardPaymentModal({
   const displayPayAmount = normalizeDecimalAmountText(payAmount || amount);
   const resolvedReceiveCoin = receiveCoin || "XSGD";
   const resolvedPayCoin = payCoin || resolvedReceiveCoin;
+  const expiresAt = React.useMemo(() => {
+    const duration = getDashboardExpiryMs(expiryOption);
+    return duration > 0 ? expiryNow + duration : undefined;
+  }, [expiryNow, expiryOption]);
   const paymentUrl = React.useMemo(() => receiverAddress ? buildPaymentUrl({
     receiverAddress,
     receiveCoin: resolvedReceiveCoin,
@@ -214,7 +239,17 @@ function DashboardPaymentModal({
     payAmount: displayPayAmount || undefined,
     chainId,
     merchantName,
-  }) : "", [chainId, displayPayAmount, merchantName, receiveAmount, receiverAddress, resolvedPayCoin, resolvedReceiveCoin]);
+    merchantIcon: logo,
+    description: description.trim() || undefined,
+    expiresAt,
+    singleUse: singleUse || undefined,
+  }) : "", [chainId, description, displayPayAmount, expiresAt, logo, merchantName, receiveAmount, receiverAddress, resolvedPayCoin, resolvedReceiveCoin, singleUse]);
+  const walletQrValue = React.useMemo(() => receiverAddress ? buildWalletPaymentUri({
+    receiverAddress,
+    coin: resolvedPayCoin,
+    amount: displayPayAmount || undefined,
+    chainId,
+  }) : "", [chainId, displayPayAmount, receiverAddress, resolvedPayCoin]);
 
   React.useEffect(() => {
     if (!receiveAmount) {
@@ -239,6 +274,13 @@ function DashboardPaymentModal({
     return () => { cancelled = true; };
   }, [amount, chainId, receiveAmount, resolvedPayCoin, resolvedReceiveCoin]);
 
+  React.useEffect(() => {
+    setExpiryNow(Date.now());
+    if (expiryOption === "none") return;
+    const id = window.setInterval(() => setExpiryNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, [expiryOption, receiveAmount, displayPayAmount, resolvedPayCoin, resolvedReceiveCoin]);
+
   const copyLink = async () => {
     if (!paymentUrl) return;
     try {
@@ -248,24 +290,20 @@ function DashboardPaymentModal({
     } catch {}
   };
 
-  const downloadQr = () => {
-    const wrapper = document.getElementById("dashboard-payment-qr");
-    const svg = wrapper?.querySelector("svg");
-    const canvas = wrapper?.querySelector("canvas");
-    let href = "";
-    if (canvas instanceof HTMLCanvasElement) {
-      href = canvas.toDataURL("image/png");
-    } else if (svg) {
-      const clone = svg.cloneNode(true) as SVGElement;
-      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-      href = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: "image/svg+xml;charset=utf-8" }));
-    }
-    if (!href) return;
-    const a = document.createElement("a");
-    a.href = href;
-    a.download = `serapay-${resolvedReceiveCoin}-${resolvedPayCoin}-qr.${href.startsWith("blob:") ? "svg" : "png"}`;
-    a.click();
-    if (href.startsWith("blob:")) URL.revokeObjectURL(href);
+  const downloadQr = async () => {
+    if (!paymentUrl || !receiverAddress) return;
+    await downloadPaymentQrCard({
+      qrValue: walletQrValue || paymentUrl,
+      receiverAddress,
+      amount: displayPayAmount,
+      coin: resolvedPayCoin,
+      merchantName,
+      merchantLogo: logo || null,
+      fgColor: qrFg,
+      bgColor: qrBg,
+      qrStyle,
+      qrMode,
+    });
   };
 
   return (
@@ -304,19 +342,89 @@ function DashboardPaymentModal({
                 <input value={payAmount} onChange={(e) => setPayAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
               </div>
             </div>
+
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((value) => !value)}
+                className="flex items-center gap-1.5 px-1 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400 transition-colors hover:text-[#00A87A]"
+              >
+                <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", showAdvanced && "rotate-180")} />
+                Advanced options
+              </button>
+              {showAdvanced ? (
+                <div className="mt-2 rounded-2xl border border-gray-100 bg-white p-4 shadow-sm">
+                  <div>
+                    <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.1em] text-gray-400">Description (optional)</p>
+                    <input
+                      value={description}
+                      onChange={(event) => setDescription(event.target.value.slice(0, 120))}
+                      maxLength={120}
+                      placeholder="e.g. Table 5 order, Invoice #1234..."
+                      className="h-11 w-full rounded-xl border border-gray-100 bg-gray-50 px-3 text-sm font-medium text-gray-950 outline-none transition-all focus:border-[#00C853] focus:bg-white focus:ring-4 focus:ring-[#00C853]/10"
+                    />
+                  </div>
+                  <div className="mt-4">
+                    <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.1em] text-gray-400">Link expiry</p>
+                    <div className="flex flex-wrap gap-2">
+                      {DASHBOARD_EXPIRY_OPTIONS.map((option) => {
+                        const active = expiryOption === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setExpiryOption(option.value)}
+                            className={cn(
+                              "min-h-8 rounded-full border px-3 text-xs font-bold transition-all",
+                              active
+                                ? "border-transparent bg-[#00D1A0] text-white"
+                                : "border-gray-200 bg-white text-gray-500 hover:border-[#00D1A0]/45 hover:text-[#00A87A]",
+                            )}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="mt-4 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-bold text-gray-950">Single-use link</p>
+                      <p className="mt-0.5 text-xs text-gray-500">Link becomes invalid after one payment</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={singleUse}
+                      onClick={() => setSingleUse((value) => !value)}
+                      className={cn("relative h-7 w-12 rounded-full transition-colors", singleUse ? "bg-[#00D1A0]" : "bg-gray-200")}
+                    >
+                      <span className={cn("absolute top-1 h-5 w-5 rounded-full bg-white shadow-sm transition-all", singleUse ? "left-6" : "left-1")} />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
 
-          {generated && paymentUrl ? (
+          {paymentUrl ? (
             <div className="mt-5 rounded-3xl border border-gray-100 bg-[#F8FAFB] p-4 text-center">
               <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
               <p className="mt-1 text-2xl font-extrabold text-gray-950">
                 {(displayPayAmount || amount) ? `${displayPayAmount || amount} ` : ""}<span className="text-[#00C896]">{resolvedPayCoin}</span>
               </p>
               <div id="dashboard-payment-qr" onClick={copyLink} className="mx-auto mt-2 w-fit cursor-copy rounded-2xl bg-white p-2">
-                <QRStyled value={paymentUrl} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
+                <QRStyled value={walletQrValue || paymentUrl} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
               </div>
-              <button type="button" onClick={copyLink} className="mt-0 text-xs font-bold leading-tight text-gray-500 hover:text-[#00A87A]">
-                {copied ? "Link Copied" : "Click QR to copy link"}
+              <button
+                type="button"
+                onClick={copyLink}
+                className={cn(
+                  "mt-0 text-xs font-bold leading-tight",
+                  copied ? "text-[#00A87A]" : "text-gray-500 hover:text-[#00A87A]",
+                )}
+              >
+                {copied ? "Link Copied!" : "Click QR to copy link"}
               </button>
               <div className="mt-4 grid grid-cols-2 gap-2">
                 <button onClick={downloadQr} className="serapay-action-secondary serapay-hover-green flex min-h-11 items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white text-sm font-bold text-gray-950">
@@ -329,15 +437,6 @@ function DashboardPaymentModal({
             </div>
           ) : null}
 
-          <button
-            type="button"
-            onClick={() => setGenerated(true)}
-            disabled={!receiverAddress}
-            className="serapay-green-button serapay-shine-button mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-[#00C896] via-[#00A87A] to-[#008A64] text-sm font-bold text-white disabled:opacity-45"
-          >
-            <QrCode className="h-4 w-4" />
-            {generated ? "Update QR code" : "Generate QR code"}
-          </button>
         </div>
       </div>
     </>
