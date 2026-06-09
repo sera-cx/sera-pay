@@ -8,7 +8,6 @@ import { formatAmount, getTransactionStatusLabel, shortenAddress } from "@/lib/d
 import { format, parseISO, startOfDay, endOfDay, startOfMonth, subDays } from "date-fns";
 import { Ban, ExternalLink, Search, X, QrCode, Download, Calendar, ChevronDown, FileText, ChevronRight } from "lucide-react";
 import { buildPaymentUrl, buildWalletPaymentUri } from "@/lib/payment";
-import { useActiveNetworkMode } from "@/components/NetworkSwitcher";
 import { QRStyled } from "@/components/QRStyled";
 import type { QrStyle } from "@/components/QRStyled";
 import { cn } from "@/lib/dashboard-utils";
@@ -576,9 +575,7 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export function Transactions() {
-  const { activeMode } = useActiveNetworkMode();
-  const activeChainId = activeMode === "live" ? 1 : 11155111;
-  const { data, isLoading } = useTransactions(500, 0, activeChainId);
+  const { data, isLoading } = useTransactions(500, 0);
   const { data: profile } = useMerchantProfile();
   const [query, setQuery] = useState("");
   const [qrTx, setQrTx] = useState<{ amount: string; coin: string; url: string; receiverAddress: string; chainId?: number | null } | null>(null);

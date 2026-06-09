@@ -24,6 +24,13 @@ export const ENV = {
   seraApiDebug: process.env.SERA_API_DEBUG === "true",
   goldskyGraphqlUrl: env("GOLDSKY_GRAPHQL_URL"),
   alchemyApiKey: env("ALCHEMY_API_KEY"),
+  rpcUrls: {
+    1: env("ETHEREUM_RPC_URL", "MAINNET_RPC_URL", "RPC_URL_1"),
+    137: env("POLYGON_RPC_URL", "RPC_URL_137"),
+    8453: env("BASE_RPC_URL", "RPC_URL_8453"),
+    42161: env("ARBITRUM_RPC_URL", "ARBITRUM_ONE_RPC_URL", "RPC_URL_42161"),
+    11155111: env("SEPOLIA_RPC_URL", "ETHEREUM_SEPOLIA_RPC_URL", "RPC_URL_11155111"),
+  } as Record<number, string>,
   privyAppId: env("PRIVY_APP_ID", "VITE_PRIVY_APP_ID"),
   privyClientId: env("PRIVY_CLIENT_ID", "VITE_PRIVY_CLIENT_ID"),
   privyAppSecret: env("PRIVY_SECRET", "PRIVY_APP_SECRET"),

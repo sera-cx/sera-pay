@@ -19,9 +19,8 @@ type ChartRange = "7d" | "30d" | "90d";
 
 export function Dashboard() {
   const { activeMode } = useActiveNetworkMode();
-  const activeChainId = activeMode === "live" ? 1 : 11155111;
-  const { data: txData, isLoading: txLoading } = useTransactions(500, 0, activeChainId);
-  const { data: stats, isLoading: statsLoading } = useMerchantStats(activeChainId);
+  const { data: txData, isLoading: txLoading } = useTransactions(500, 0);
+  const { data: stats, isLoading: statsLoading } = useMerchantStats();
   const [chartRange, setChartRange] = useState<ChartRange>("7d");
   const [showNetworkModal, setShowNetworkModal] = useState(false);
 

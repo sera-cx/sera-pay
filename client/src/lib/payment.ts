@@ -168,6 +168,11 @@ export interface WalletPaymentUriRequest {
   chainId?: number | null;
 }
 
+/**
+ * Builds a raw EIP-681 wallet URI so wallet scanners can prefill token + amount.
+ * Merchant QR history relies on backend direct-transfer reconciliation because
+ * raw wallet URIs do not call the /pay checkout recorder.
+ */
 export function buildWalletPaymentUri({
   receiverAddress,
   coin,

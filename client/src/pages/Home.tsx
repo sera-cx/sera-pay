@@ -1801,12 +1801,17 @@ export default function Home() {
   const [showQrCoinSheet, setShowQrCoinSheet] = useState(false);
   const [showQrReceiveCoinSheet, setShowQrReceiveCoinSheet] = useState(false);
   const [qrRateLoading, setQrRateLoading] = useState(false);
+  const directQrScanFromBlockRef = useRef<string | null>(null);
+  const directQrScanKeyRef = useRef("");
+  const [directQrPayment, setDirectQrPayment] = useState<{ amount: string; coin: string } | null>(null);
 
   const walletAddress = authWalletAddress ||
     user?.wallet?.address ||
     (user?.linkedAccounts as any[])?.find((a: any) => a.type === "wallet")?.address ||
     "";
-  const receiverAddress = merchantProfile?.storeAddress || walletAddress || guestReceiverAddress;
+  const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress || walletAddress || guestReceiverAddress;
+  const qrDisplayCoin = customerCoin ?? selectedCoin;
+  const qrDisplayAmount = normalizeDecimalAmountText(customerAmount || amount);
   const isConnected = authenticated;
   const merchantWorkspaceReady = Boolean(dashboardApiKey && walletAddress);
 
@@ -2042,9 +2047,71 @@ export default function Home() {
     setStep(1);
     setPaymentUrl("");
     setCopied(false);
+    setDirectQrPayment(null);
+    directQrScanFromBlockRef.current = null;
+    directQrScanKeyRef.current = "";
     // If description is pre-filled, auto-open advanced options so user knows it's there
     if (description.trim()) setShowAdvanced(true);
   }, [description]);
+
+  useEffect(() => {
+    const coin = qrDisplayCoin?.symbol;
+    const scanAmount = qrDisplayAmount;
+    if (step !== 2 || !paymentUrl || !receiverAddress || !coin || !scanAmount || Number(scanAmount) <= 0) return;
+    if (directQrPayment) return;
+
+    const scanKey = `${receiverAddress.toLowerCase()}:${coin}:${scanAmount}:${paymentChainId}:${paymentUrl}`;
+    if (directQrScanKeyRef.current !== scanKey) {
+      directQrScanKeyRef.current = scanKey;
+      directQrScanFromBlockRef.current = null;
+      setDirectQrPayment(null);
+    }
+
+    let stopped = false;
+    let inflight = false;
+
+    const pollDirectPayment = async () => {
+      if (stopped || inflight || directQrPayment) return;
+      inflight = true;
+      try {
+        const body: Record<string, unknown> = {
+          toAddress: receiverAddress,
+          coin,
+          amount: scanAmount,
+          chainId: paymentChainId,
+          paymentUrl,
+        };
+        if (directQrScanFromBlockRef.current) body.fromBlock = directQrScanFromBlockRef.current;
+        const res = await fetch("/api/payment/direct/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.fromBlock && !directQrScanFromBlockRef.current) {
+          directQrScanFromBlockRef.current = String(data.fromBlock);
+        }
+        if (data.status === "confirmed") {
+          setDirectQrPayment({ amount: scanAmount, coin });
+          queryClient.invalidateQueries({ queryKey: ["/merchant/transactions"] });
+          queryClient.invalidateQueries({ queryKey: ["/merchant/stats"] });
+          stopped = true;
+        }
+      } catch {
+        // Keep polling; RPC can be briefly slow right after a wallet submits.
+      } finally {
+        inflight = false;
+      }
+    };
+
+    void pollDirectPayment();
+    const interval = window.setInterval(pollDirectPayment, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+    };
+  }, [directQrPayment, paymentChainId, paymentUrl, qrDisplayAmount, qrDisplayCoin?.symbol, queryClient, receiverAddress, step]);
 
   const handleNameSaved = useCallback((newName: string) => {
     setMerchantName(newName);
@@ -2240,6 +2307,13 @@ export default function Home() {
 
     return (
       <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
+        {directQrPayment && (
+          <PaymentToast
+            amount={directQrPayment.amount}
+            coin={directQrPayment.coin}
+            onDismiss={() => setDirectQrPayment(null)}
+          />
+        )}
         <SeraPayHeader
           maxWidth={1240}
           compact

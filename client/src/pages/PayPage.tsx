@@ -1024,7 +1024,15 @@ export default function PayPage() {
 
       const createRes = await fetch("/api/payment/create", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ merchantAddress: req.receiverAddress, coin: selectedCoin.symbol, amount: sendAmount, chainId: cid, orderId: (req as any).orderId, paymentUrl: window.location.href }),
+        body: JSON.stringify({
+          merchantAddress: req.receiverAddress,
+          coin: selectedCoin.symbol,
+          amount: sendAmount,
+          chainId: cid,
+          orderId: (req as any).orderId,
+          paymentIntentId: (req as any).paymentIntentId,
+          paymentUrl: window.location.href,
+        }),
       });
       const createData = await readPaymentApiJson<any>(createRes, "Unable to create payment");
       setTxId(createData.txId);

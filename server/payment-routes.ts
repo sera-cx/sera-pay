@@ -5,7 +5,7 @@
 import { Router, Request, Response } from "express";
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
-import { createPublicClient, http, webSocket, parseAbi, parseAbiItem, decodeEventLog, keccak256, toHex, encodeAbiParameters, parseAbiParameters, verifyMessage } from "viem";
+import { createPublicClient, fallback, http, webSocket, parseAbi, parseAbiItem, decodeEventLog, keccak256, toHex, encodeAbiParameters, parseAbiParameters, verifyMessage } from "viem";
 import { sepolia, mainnet, polygon, base, arbitrum } from "viem/chains";
 import {
   getMerchantByWallet,
@@ -25,6 +25,7 @@ import {
   createWebhookLog,
   getMerchantWebhookLogs,
   getTransactionsByFromAddress,
+  listSubWallets,
   getSubWalletByAddress,
   updatePaymentIntent,
   updateMenuOrderPayment,
@@ -42,7 +43,7 @@ import {
   normalizeSeraBaseUrl,
   type SeraToken,
 } from "./sera-api";
-import type { Transaction } from "../drizzle/schema";
+import type { Merchant, Transaction } from "../drizzle/schema";
 
 export const paymentRouter = Router();
 
@@ -353,8 +354,13 @@ paymentRouter.get("/merchant/public/:address?", async (req, res) => {
     if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
       res.status(400).json({ error: "Invalid address" }); return;
     }
-    const merchant = await getMerchantByWallet(address);
-    if (!merchant) { res.status(404).json({ error: "Merchant not found" }); return; }
+    let resolved: Awaited<ReturnType<typeof resolvePaymentMerchant>>;
+    try {
+      resolved = await resolvePaymentMerchant(address);
+    } catch {
+      res.status(404).json({ error: "Merchant not found" }); return;
+    }
+    const { merchant } = resolved;
     // Cache public merchant profile for 60 seconds at CDN/proxy level
     res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=120");
     res.json({
@@ -605,6 +611,12 @@ paymentRouter.get("/merchant/webhook/logs", requireApiKey as any, async (req: an
 paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res) => {
   try {
     const requestedChainId = Number(req.query.chainId ?? req.query.chain_id);
+    const preferredSyncChainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : null;
+    if (req.query.syncDirect !== "0") {
+      await syncMerchantDirectActivity(req.merchant, preferredSyncChainId).catch((error) => {
+        console.warn("[direct-sync:stats]", error?.message || error);
+      });
+    }
     let txs = await getMerchantTransactions(req.merchant.id, 1000);
     const canceled = await cancelStaleMerchantTransactions(req.merchant.id, txs);
     if (canceled > 0) txs = await getMerchantTransactions(req.merchant.id, 1000);
@@ -771,6 +783,12 @@ paymentRouter.get("/merchant/transactions", requireApiKey as any, async (req: an
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
     const offset = parseInt(req.query.offset as string) || 0;
     const requestedChainId = Number(req.query.chainId ?? req.query.chain_id);
+    const preferredSyncChainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : null;
+    if (req.query.syncDirect !== "0") {
+      await syncMerchantDirectActivity(req.merchant, preferredSyncChainId).catch((error) => {
+        console.warn("[direct-sync]", error?.message || error);
+      });
+    }
     let txs = await getMerchantTransactions(req.merchant.id, limit, offset);
     const canceled = await cancelStaleMerchantTransactions(req.merchant.id, txs);
     if (canceled > 0) txs = await getMerchantTransactions(req.merchant.id, limit, offset);
@@ -840,7 +858,7 @@ function normalizeDecimalAmount(amount: unknown): string {
 
 async function resolvePaymentMerchant(merchantAddress: string) {
   const normalizedMerchantAddress = merchantAddress.toLowerCase();
-  let merchant = await getMerchantByWallet(normalizedMerchantAddress);
+  let merchant = await getMerchantByWallet(normalizedMerchantAddress) || await getMerchantByStoreAddress(normalizedMerchantAddress);
   const subWallet = merchant ? undefined : await getSubWalletByAddress(normalizedMerchantAddress);
   if (!merchant && subWallet) {
     merchant = await getMerchantById(subWallet.merchantId);
@@ -1081,6 +1099,7 @@ paymentRouter.post("/payment/create", async (req, res) => {
   try {
     const { merchantAddress, coin, amount, chainId } = req.body;
     const orderId = typeof req.body.orderId === "string" ? req.body.orderId : null;
+    const paymentIntentId = typeof req.body.paymentIntentId === "string" ? req.body.paymentIntentId : null;
     const paymentUrl = typeof req.body.paymentUrl === "string" && req.body.paymentUrl.length <= 4096 ? req.body.paymentUrl : null;
     if (!merchantAddress || !/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     if (!coin || !VALID_COINS.has(coin)) { res.status(400).json({ error: "Invalid coin" }); return; }
@@ -1099,14 +1118,14 @@ paymentRouter.post("/payment/create", async (req, res) => {
       res.status(403).json({ error: "Merchant address failed compliance screening", compliance: merchantAddressCompliance });
       return;
     }
-    let merchant = await getMerchantByWallet(normalizedMerchantAddress);
-    const subWallet = merchant ? undefined : await getSubWalletByAddress(normalizedMerchantAddress);
-    if (!merchant && subWallet) {
-      merchant = await getMerchantById(subWallet.merchantId);
+    let resolved: Awaited<ReturnType<typeof resolvePaymentMerchant>>;
+    try {
+      resolved = await resolvePaymentMerchant(normalizedMerchantAddress);
+    } catch {
+      res.status(404).json({ error: "Merchant not found" }); return;
     }
-    if (!merchant) { res.status(404).json({ error: "Merchant not found" }); return; }
+    const { merchant, toAddress } = resolved;
     const id = uuidv4();
-    const toAddress = subWallet?.address || merchant.storeAddress || merchant.walletAddress;
     const toAddressCompliance = await screenWalletAddress(toAddress, "recipient_wallet", merchant.id);
     if (toAddressCompliance.blocked) {
       res.status(403).json({ error: "Recipient address failed compliance screening", compliance: toAddressCompliance });
@@ -1122,10 +1141,19 @@ paymentRouter.post("/payment/create", async (req, res) => {
       chainId: resolvedChainId,
       status: "pending",
       verified: 0,
-      notes: orderId || paymentUrl ? JSON.stringify({ ...(orderId ? { orderId, source: "public_menu" } : {}), ...(paymentUrl ? { paymentUrl } : {}) }) : null,
+      notes: orderId || paymentIntentId || paymentUrl
+        ? JSON.stringify({
+            ...(orderId ? { orderId, source: "public_menu" } : {}),
+            ...(paymentIntentId ? { paymentIntentId } : {}),
+            ...(paymentUrl ? { paymentUrl } : {}),
+          })
+        : null,
     });
     if (orderId) {
       await updateMenuOrderPayment(orderId, merchant.id, { paymentId: id, transactionId: id, status: "payment_pending" }).catch(() => undefined);
+    }
+    if (paymentIntentId) {
+      await updatePaymentIntent(paymentIntentId, { status: "open" }).catch(() => undefined);
     }
     res.json({ txId: id, toAddress, coin, amount: normalizedAmount, chainId: resolvedChainId });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
@@ -1592,7 +1620,11 @@ const COIN_CONTRACTS: Record<string, Record<number, `0x${string}`>> = {
     11155111: "0x1920bf0643ae49B4fB334586dAd6Bed29fF30F88",
   },
   // EUR
-  EURC: { 11155111: "0xd3BdB2CE9cD98566EFc2e2977448c40578371779" },
+  EURC: {
+    1: "0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c",
+    8453: "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
+    11155111: "0xd3BdB2CE9cD98566EFc2e2977448c40578371779",
+  },
   EURT: { 11155111: "0x47230df72231f594C5c598635dD92849C11532D0" },
   TNEUR: { 11155111: "0xe4AF44eF7ce074F8FA94131035108201A5ac2F3a" },
   VEUR: { 11155111: "0x4AbcbC7C307baCF5AdbFc57E822658F5D917Ca1E" },
@@ -1658,6 +1690,31 @@ const COIN_CONTRACTS: Record<string, Record<number, `0x${string}`>> = {
 };
 
 const ALCHEMY_API_KEY = ENV.alchemyApiKey;
+const ALCHEMY_HTTP_URLS: Record<number, string> = {
+  1: "https://eth-mainnet.g.alchemy.com/v2",
+  137: "https://polygon-mainnet.g.alchemy.com/v2",
+  8453: "https://base-mainnet.g.alchemy.com/v2",
+  42161: "https://arb-mainnet.g.alchemy.com/v2",
+  11155111: "https://eth-sepolia.g.alchemy.com/v2",
+};
+const PUBLIC_RPC_URLS: Record<number, string[]> = {
+  1: ["https://ethereum.publicnode.com", "https://eth.llamarpc.com", "https://1rpc.io/eth"],
+  137: ["https://polygon-bor-rpc.publicnode.com", "https://polygon.llamarpc.com", "https://1rpc.io/matic"],
+  8453: ["https://base-rpc.publicnode.com", "https://base.llamarpc.com", "https://1rpc.io/base"],
+  42161: ["https://arbitrum-one-rpc.publicnode.com", "https://arbitrum.llamarpc.com", "https://1rpc.io/arb"],
+  11155111: ["https://ethereum-sepolia-rpc.publicnode.com", "https://sepolia.drpc.org"],
+};
+
+function rpcHttpTransport(chainId: number) {
+  const configuredRpcUrl = ENV.rpcUrls[chainId];
+  if (configuredRpcUrl) return http(configuredRpcUrl);
+  const alchemyBaseUrl = ALCHEMY_API_KEY ? ALCHEMY_HTTP_URLS[chainId] : null;
+  const urls = [
+    ...(alchemyBaseUrl ? [`${alchemyBaseUrl}/${ALCHEMY_API_KEY}`] : []),
+    ...(PUBLIC_RPC_URLS[chainId] ?? []),
+  ];
+  return urls.length > 0 ? fallback(urls.map((url) => http(url))) : http();
+}
 
 // WebSocket client for Sepolia (Alchemy) — used for real-time log subscriptions
 const sepoliaWsClient = ALCHEMY_API_KEY
@@ -1669,12 +1726,22 @@ const sepoliaWsClient = ALCHEMY_API_KEY
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const CHAIN_CLIENTS: Record<number, any> = {
-  1:        createPublicClient({ chain: mainnet,  transport: http() }),
-  137:      createPublicClient({ chain: polygon,  transport: http() }),
-  8453:     createPublicClient({ chain: base,     transport: http() }),
-  42161:    createPublicClient({ chain: arbitrum, transport: http() }),
-  11155111: createPublicClient({ chain: sepolia,  transport: http() }),
+  1:        createPublicClient({ chain: mainnet,  transport: rpcHttpTransport(1) }),
+  137:      createPublicClient({ chain: polygon,  transport: rpcHttpTransport(137) }),
+  8453:     createPublicClient({ chain: base,     transport: rpcHttpTransport(8453) }),
+  42161:    createPublicClient({ chain: arbitrum, transport: rpcHttpTransport(42161) }),
+  11155111: createPublicClient({ chain: sepolia,  transport: rpcHttpTransport(11155111) }),
 };
+
+const DIRECT_SYNC_INTERVAL_MS = 30_000;
+const DIRECT_SYNC_LOOKBACK_BLOCKS: Record<number, bigint> = {
+  1: 7200n,
+  137: 45_000n,
+  8453: 45_000n,
+  42161: 60_000n,
+  11155111: 7200n,
+};
+const directSyncState = new Map<string, { lastFinishedAt: number; promise: Promise<void> | null }>();
 
 async function getTokenDecimals(client: any, tokenAddress: `0x${string}`): Promise<number> {
   try {
@@ -1684,6 +1751,307 @@ async function getTokenDecimals(client: any, tokenAddress: `0x${string}`): Promi
   } catch {
     return 6;
   }
+}
+
+function uniqueEvmAddresses(addresses: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(
+    addresses
+      .map((address) => String(address || "").trim().toLowerCase())
+      .filter((address) => /^0x[0-9a-fA-F]{40}$/.test(address)),
+  ));
+}
+
+function tokenSymbolsForChain(chainId: number): string[] {
+  return Object.entries(COIN_CONTRACTS)
+    .filter(([, byChain]) => Boolean(byChain[chainId]))
+    .map(([symbol]) => symbol);
+}
+
+function supportedChainsForCoin(coin: string | null | undefined): number[] {
+  const symbol = String(coin || "").trim().toUpperCase();
+  return symbol && COIN_CONTRACTS[symbol] ? Object.keys(COIN_CONTRACTS[symbol]).map(Number) : [];
+}
+
+async function directSyncChainCandidates(merchant: Merchant, preferredChainId?: number | null): Promise<number[]> {
+  const subWallets = await listSubWallets(merchant.id).catch(() => []);
+  const chains = new Set<number>();
+  if (preferredChainId && CHAIN_CLIENTS[preferredChainId]) chains.add(preferredChainId);
+  for (const chainId of supportedChainsForCoin(merchant.receiveCoin)) {
+    if (CHAIN_CLIENTS[chainId]) chains.add(chainId);
+  }
+  for (const wallet of subWallets) {
+    const chainId = Number(wallet.chainId);
+    if (wallet.status === "active" && CHAIN_CLIENTS[chainId]) chains.add(chainId);
+  }
+  chains.add(1);
+  chains.add(11155111);
+  return Array.from(chains).filter((chainId) => Boolean(CHAIN_CLIENTS[chainId]));
+}
+
+function rawAmountsNearlyEqual(a: bigint, b: bigint) {
+  const diff = a > b ? a - b : b - a;
+  return diff <= 1n;
+}
+
+async function findMatchingPendingTransaction({
+  merchantId,
+  toAddress,
+  coin,
+  chainId,
+  rawAmount,
+  decimals,
+}: {
+  merchantId: string;
+  toAddress: string;
+  coin: string;
+  chainId: number;
+  rawAmount: bigint;
+  decimals: number;
+}) {
+  const recent = await getMerchantTransactions(merchantId, 100);
+  return recent.find((tx) => {
+    if (tx.txHash) return false;
+    if (tx.status !== "pending" && tx.status !== "confirming") return false;
+    if (String(tx.toAddress || "").toLowerCase() !== toAddress.toLowerCase()) return false;
+    if (String(tx.coin || "").toUpperCase() !== coin.toUpperCase()) return false;
+    if (Number(tx.chainId ?? 11155111) !== chainId) return false;
+    try {
+      return rawAmountsNearlyEqual(BigInt(toRawTokenAmount(String(tx.amount), decimals)), rawAmount);
+    } catch {
+      return false;
+    }
+  });
+}
+
+async function notifyRecordedDirectTransfer({
+  merchant,
+  txId,
+  txHash,
+  coin,
+  amount,
+  payCoin,
+  payAmount,
+  fromAddress,
+  toAddress,
+  verified,
+}: {
+  merchant: Merchant;
+  txId: string;
+  txHash: `0x${string}`;
+  coin: string;
+  amount: string;
+  payCoin?: string | null;
+  payAmount?: string | null;
+  fromAddress?: string | null;
+  toAddress: string;
+  verified: boolean;
+}) {
+  notifyMerchantSse(merchant.id, {
+    event: "payment_received",
+    transactionId: txId,
+    txHash,
+    amount,
+    coin,
+    payAmount: payAmount || amount,
+    payCoin: payCoin || coin,
+    from: fromAddress?.toLowerCase() || null,
+    verified,
+    source: "direct_wallet_qr",
+  });
+
+  if (merchant.webhookUrl) {
+    sendWebhook(
+      merchant.webhookUrl,
+      merchant.webhookSecret,
+      {
+        event: "payment.confirmed",
+        txId,
+        txHash,
+        coin,
+        amount,
+        payCoin: payCoin || coin,
+        payAmount: payAmount || amount,
+        fromAddress: fromAddress?.toLowerCase() || null,
+        toAddress,
+        verified,
+        source: "direct_wallet_qr",
+      },
+      { merchantId: merchant.id, txId, txHash },
+    ).catch(console.error);
+  }
+}
+
+async function confirmPendingDirectTransfer({
+  pending,
+  merchant,
+  txHash,
+  fromAddress,
+  toAddress,
+  coin,
+  amount,
+  verified,
+}: {
+  pending: Transaction;
+  merchant: Merchant;
+  txHash: `0x${string}`;
+  fromAddress?: string | null;
+  toAddress: string;
+  coin: string;
+  amount: string;
+  verified: boolean;
+}) {
+  const meta = transactionNotesMeta(pending.notes);
+  await updateTransaction(pending.id, {
+    txHash,
+    fromAddress: fromAddress?.toLowerCase() || null,
+    status: "confirmed",
+    verified: verified ? 1 : 0,
+    payCoin: pending.payCoin || coin,
+    payAmount: pending.payAmount || amount,
+    notifiedAt: new Date(),
+    webhookSentAt: merchant.webhookUrl ? new Date() : null,
+  });
+  if (meta.orderId) {
+    await updateMenuOrderPayment(meta.orderId, merchant.id, { status: "paid", paymentId: pending.id, transactionId: pending.id }).catch(() => undefined);
+  }
+  if (meta.paymentIntentId) {
+    await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
+  }
+  notifySseClients(pending.id, { status: "confirmed", txHash, verified });
+  await notifyRecordedDirectTransfer({
+    merchant,
+    txId: pending.id,
+    txHash,
+    coin: pending.coin,
+    amount: pending.amount,
+    payCoin: pending.payCoin || coin,
+    payAmount: pending.payAmount || amount,
+    fromAddress,
+    toAddress,
+    verified,
+  });
+  return await getTransactionById(pending.id) ?? pending;
+}
+
+async function scanDirectTransfersForReceiver({
+  merchant,
+  toAddress,
+  coin,
+  chainId,
+  fromBlock,
+}: {
+  merchant: Merchant;
+  toAddress: string;
+  coin: string;
+  chainId: number;
+  fromBlock: bigint;
+}) {
+  const client = CHAIN_CLIENTS[chainId];
+  const coinAddress = COIN_CONTRACTS[coin]?.[chainId];
+  if (!client || !coinAddress) return;
+
+  const decimals = await getTokenDecimals(client, coinAddress);
+  const logs = await client.getLogs({
+    address: coinAddress,
+    event: ERC20_TRANSFER_EVENT,
+    args: { to: toAddress.toLowerCase() as `0x${string}` },
+    fromBlock,
+    toBlock: "latest",
+  });
+
+  for (const log of logs) {
+    const txHash = String(log.transactionHash || "");
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) continue;
+    if (await getTransactionByHash(txHash)) continue;
+
+    const args = (log as any).args || {};
+    const rawAmount = BigInt(String(args.value ?? 0));
+    if (rawAmount <= 0n) continue;
+    const amount = fromRawTokenAmount(rawAmount, decimals);
+    const fromAddress = typeof args.from === "string" ? args.from.toLowerCase() : null;
+    const pending = await findMatchingPendingTransaction({
+      merchantId: merchant.id,
+      toAddress,
+      coin,
+      chainId,
+      rawAmount,
+      decimals,
+    });
+
+    if (pending) {
+      await confirmPendingDirectTransfer({
+        pending,
+        merchant,
+        txHash: txHash as `0x${string}`,
+        fromAddress,
+        toAddress,
+        coin,
+        amount,
+        verified: true,
+      });
+      continue;
+    }
+
+    await recordDirectTransferPayment({
+      txHash: txHash as `0x${string}`,
+      fromAddress,
+      toAddress,
+      coin,
+      amount,
+      chainId,
+      paymentUrl: null,
+      verified: true,
+    });
+  }
+}
+
+async function syncMerchantDirectTransfers(merchant: Merchant, chainId: number) {
+  const client = CHAIN_CLIENTS[chainId];
+  if (!client) return;
+  const symbols = tokenSymbolsForChain(chainId);
+  if (symbols.length === 0) return;
+
+  const key = `${merchant.id}:${chainId}`;
+  const existing = directSyncState.get(key);
+  if (existing?.promise) return existing.promise;
+  if (existing && Date.now() - existing.lastFinishedAt < DIRECT_SYNC_INTERVAL_MS) return;
+
+  const promise = (async () => {
+    const latestBlock = BigInt(String(await withDirectScanTimeout(client.getBlockNumber(), 8000)));
+    const lookback = DIRECT_SYNC_LOOKBACK_BLOCKS[chainId] ?? 900n;
+    const fromBlock = latestBlock > lookback ? latestBlock - lookback : 0n;
+    const subWallets = await listSubWallets(merchant.id).catch(() => []);
+    const receiverAddresses = uniqueEvmAddresses([
+      merchant.walletAddress,
+      merchant.storeAddress,
+      ...subWallets
+        .filter((wallet) => wallet.status === "active" && Number(wallet.chainId ?? chainId) === chainId)
+        .map((wallet) => wallet.address),
+    ]);
+
+    const scanTasks = receiverAddresses.flatMap((toAddress) =>
+      symbols.map((coin) =>
+        withDirectScanTimeout(scanDirectTransfersForReceiver({ merchant, toAddress, coin, chainId, fromBlock }), 8000)
+          .catch((error) => console.warn("[direct-sync:scan]", { chainId, coin, toAddress, error: error?.message || error })),
+      ),
+    );
+    await Promise.allSettled(scanTasks);
+  })();
+
+  directSyncState.set(key, { lastFinishedAt: existing?.lastFinishedAt ?? 0, promise });
+  try {
+    await promise;
+  } finally {
+    directSyncState.set(key, { lastFinishedAt: Date.now(), promise: null });
+  }
+}
+
+async function syncMerchantDirectActivity(merchant: Merchant, preferredChainId?: number | null) {
+  const chainIds = await directSyncChainCandidates(merchant, preferredChainId);
+  await Promise.allSettled(chainIds.map((chainId) =>
+    syncMerchantDirectTransfers(merchant, chainId)
+      .catch((error) => console.warn("[direct-sync:chain]", { chainId, error: error?.message || error })),
+  ));
 }
 
 async function resolveMerchantForReceiver(toAddress: string) {
@@ -1717,7 +2085,8 @@ async function recordDirectTransferPayment({
   paymentUrl?: string | null;
   verified: boolean;
 }) {
-  const existing = await getTransactionByHash(txHash);
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const existing = await getTransactionByHash(normalizedTxHash) || await getTransactionByHash(txHash);
   if (existing) {
     return { transaction: existing, created: false };
   }
@@ -1725,6 +2094,34 @@ async function recordDirectTransferPayment({
   const resolved = await resolveMerchantForReceiver(toAddress);
   if (!resolved) {
     throw new Error("Receiver wallet is not attached to a SeraPay merchant.");
+  }
+
+  const client = CHAIN_CLIENTS[chainId];
+  const coinAddress = COIN_CONTRACTS[coin]?.[chainId];
+  if (client && coinAddress) {
+    const decimals = await getTokenDecimals(client, coinAddress);
+    const rawAmount = BigInt(toRawTokenAmount(amount, decimals));
+    const pending = await findMatchingPendingTransaction({
+      merchantId: resolved.merchant.id,
+      toAddress: resolved.receiveAddress,
+      coin,
+      chainId,
+      rawAmount,
+      decimals,
+    });
+    if (pending) {
+      const transaction = await confirmPendingDirectTransfer({
+        pending,
+        merchant: resolved.merchant,
+        txHash: normalizedTxHash,
+        fromAddress,
+        toAddress: resolved.receiveAddress,
+        coin,
+        amount,
+        verified,
+      });
+      return { transaction, created: false };
+    }
   }
 
   const txId = uuidv4();
@@ -1736,7 +2133,7 @@ async function recordDirectTransferPayment({
   await createTransaction({
     id: txId,
     merchantId: resolved.merchant.id,
-    txHash,
+    txHash: normalizedTxHash,
     fromAddress: fromAddress?.toLowerCase() || null,
     toAddress: resolved.receiveAddress,
     coin,
@@ -1755,7 +2152,7 @@ async function recordDirectTransferPayment({
   notifyMerchantSse(resolved.merchant.id, {
     event: "payment_received",
     transactionId: txId,
-    txHash,
+    txHash: normalizedTxHash,
     amount,
     coin,
     payAmount: amount,
@@ -1772,7 +2169,7 @@ async function recordDirectTransferPayment({
       {
         event: "payment.confirmed",
         txId,
-        txHash,
+        txHash: normalizedTxHash,
         coin,
         amount,
         payCoin: coin,
@@ -1782,7 +2179,7 @@ async function recordDirectTransferPayment({
         verified,
         source: "direct_wallet_qr",
       },
-      { merchantId: resolved.merchant.id, txId, txHash },
+      { merchantId: resolved.merchant.id, txId, txHash: normalizedTxHash },
     ).catch(console.error);
   }
 
@@ -1889,7 +2286,8 @@ async function waitForReceiptViaWs(
 async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   const tx = await getTransactionById(txId);
   if (!tx || tx.status === "confirmed") return;
-  const orderId = orderIdFromTransactionNotes(tx.notes);
+  const meta = transactionNotesMeta(tx.notes);
+  const orderId = meta.orderId;
 
   const chainId = tx.chainId ?? 11155111;
   const client = CHAIN_CLIENTS[chainId];
@@ -1897,6 +2295,7 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     console.error(`[verify] No client for chainId ${chainId}`);
     await updateTransaction(txId, { status: "failed" });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "failed", paymentId: txId, transactionId: txId }).catch(() => undefined);
+    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
     notifySseClients(txId, { status: "failed", txHash });
     return;
   }
@@ -1926,6 +2325,7 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     console.warn(`[verify] txHash ${txHash} failed or timed out`);
     await updateTransaction(txId, { status: "failed" });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "failed", paymentId: txId, transactionId: txId }).catch(() => undefined);
+    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
     notifySseClients(txId, { status: "failed", txHash });
     return;
   }
@@ -1937,12 +2337,15 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     // Accept anyway — we at least have a mined tx
     await updateTransaction(txId, { status: "confirmed", verified: 1 });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
+    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
     notifySseClients(txId, { status: "confirmed", txHash, verified: true });
     return;
   }
 
   // Parse Transfer logs from the ERC-20 contract
   let transferVerified = false;
+  const tokenDecimals = await getTokenDecimals(client, coinAddress);
+  const expectedRaw = BigInt(toRawTokenAmount(String(tx.amount), tokenDecimals));
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== coinAddress.toLowerCase()) continue;
     try {
@@ -1951,11 +2354,9 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
       const toMatch = (decoded.args.to as string).toLowerCase() === tx.toAddress.toLowerCase();
       if (!toMatch) continue;
       // Verify amount (allow ±1 unit tolerance for rounding)
-      const decimals = ["USDT", "USDC"].includes(tx.coin) ? 6 : 18;
-      const expectedRaw = BigInt(Math.round(parseFloat(tx.amount) * 10 ** decimals));
       const actualRaw = BigInt(decoded.args.value);
       const diff = actualRaw > expectedRaw ? actualRaw - expectedRaw : expectedRaw - actualRaw;
-      if (diff <= BigInt(10 ** (decimals - 2))) { // within 0.01 token
+      if (diff <= 1n) {
         transferVerified = true;
         break;
       }
@@ -1967,10 +2368,12 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     // Still mark as confirmed — the tx mined, just log the discrepancy
     await updateTransaction(txId, { status: "confirmed", verified: 0 });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
+    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
     notifySseClients(txId, { status: "confirmed", txHash, verified: false });
   } else {
     await updateTransaction(txId, { status: "confirmed", verified: 1 });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
+    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
     notifySseClients(txId, { status: "confirmed", txHash, verified: true });
   }
 
