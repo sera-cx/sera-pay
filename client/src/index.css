@@ -352,6 +352,38 @@
   box-shadow: 0 6px 14px rgba(10, 31, 26, 0.12) !important;
 }
 
+/* Open-source / GitHub link on the home screen */
+.serapay-oss-link {
+  transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease,
+    box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.serapay-oss-link:hover {
+  color: #0A1F1A !important;
+  border-color: rgba(78, 206, 154, 0.55) !important;
+  background: linear-gradient(180deg, #FFFFFF 0%, #F0FAF6 100%) !important;
+  box-shadow: 0 8px 20px rgba(0, 138, 100, 0.12) !important;
+  transform: translateY(-1px);
+}
+
+.serapay-oss-link:active {
+  transform: translateY(0) scale(0.99);
+}
+
+.serapay-oss-link:focus-visible {
+  outline: none;
+  border-color: rgba(78, 206, 154, 0.55) !important;
+  box-shadow: 0 0 0 4px rgba(0, 168, 122, 0.18) !important;
+}
+
+.serapay-oss-link .serapay-oss-arrow {
+  transition: transform 0.16s ease;
+}
+
+.serapay-oss-link:hover .serapay-oss-arrow {
+  transform: translateX(2px);
+}
+
 button[data-slot="button"]:not(:disabled) {
   box-shadow: none;
 }
