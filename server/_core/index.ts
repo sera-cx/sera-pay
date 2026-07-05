@@ -12,6 +12,7 @@ import { serveStatic, setupVite } from "./vite";
 import { paymentRouter } from "../payment-routes";
 import { menuRouter } from "../menu-routes";
 import { gatewayRouter } from "../gateway-routes";
+import { fxRouter } from "../fx-routes";
 import { validateRuntimeEnv } from "./env";
 import { getContentSecurityPolicyDirectives, getCorsOrigin } from "./security";
 
@@ -129,6 +130,7 @@ async function startServer() {
   app.use("/api", gatewayRouter);
   app.use("/api", paymentRouter);
   app.use("/api", menuRouter);
+  app.use("/api/fx", fxRouter);
 
   // ── tRPC API ──────────────────────────────────────────────────────────────────
   app.use(

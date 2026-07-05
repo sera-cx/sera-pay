@@ -43,6 +43,8 @@ import {
   normalizeSeraBaseUrl,
   type SeraToken,
 } from "./sera-api";
+import { seraFxService } from "./sera-fx-service";
+import { locationDetectionService } from "./location-detection";
 import type { Merchant, Transaction } from "../drizzle/schema";
 
 export const paymentRouter = Router();
@@ -1157,6 +1159,153 @@ paymentRouter.post("/payment/create", async (req, res) => {
     }
     res.json({ txId: id, toAddress, coin, amount: normalizedAmount, chainId: resolvedChainId });
   } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+});
+
+/** POST /api/payment/create-multi-currency - Create payment with automatic currency detection and FX conversion */
+paymentRouter.post("/payment/create-multi-currency", async (req, res) => {
+  try {
+    const { merchantAddress, amount, customerCurrency, chainId } = req.body;
+    const orderId = typeof req.body.orderId === "string" ? req.body.orderId : null;
+    const paymentIntentId = typeof req.body.paymentIntentId === "string" ? req.body.paymentIntentId : null;
+    const paymentUrl = typeof req.body.paymentUrl === "string" && req.body.paymentUrl.length <= 4096 ? req.body.paymentUrl : null;
+
+    if (!merchantAddress || !/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) {
+      res.status(400).json({ error: "Invalid merchantAddress" });
+      return;
+    }
+
+    let normalizedAmount = "";
+    try {
+      normalizedAmount = normalizeDecimalAmount(amount);
+    } catch (error: any) {
+      res.status(400).json({ error: error?.message || "Invalid amount" });
+      return;
+    }
+
+    const parsedAmount = parseFloat(normalizedAmount);
+    if (isNaN(parsedAmount) || parsedAmount <= 0 || parsedAmount > 1_000_000) {
+      res.status(400).json({ error: "Invalid amount" });
+      return;
+    }
+
+    const normalizedMerchantAddress = merchantAddress.toLowerCase();
+    const merchantAddressCompliance = await screenWalletAddress(normalizedMerchantAddress, "recipient_wallet");
+    if (merchantAddressCompliance.blocked) {
+      res.status(403).json({ error: "Merchant address failed compliance screening", compliance: merchantAddressCompliance });
+      return;
+    }
+
+    let resolved: Awaited<ReturnType<typeof resolvePaymentMerchant>>;
+    try {
+      resolved = await resolvePaymentMerchant(normalizedMerchantAddress);
+    } catch {
+      res.status(404).json({ error: "Merchant not found" });
+      return;
+    }
+
+    const { merchant, toAddress } = resolved;
+    const toAddressCompliance = await screenWalletAddress(toAddress, "recipient_wallet", merchant.id);
+    if (toAddressCompliance.blocked) {
+      res.status(403).json({ error: "Recipient address failed compliance screening", compliance: toAddressCompliance });
+      return;
+    }
+
+    // Detect customer currency if not provided
+    let detectedCurrency = customerCurrency;
+    if (!detectedCurrency) {
+      try {
+        detectedCurrency = await locationDetectionService.detectCurrencyFromRequest(req);
+      } catch (error) {
+        console.error("[Multi-Currency] Failed to detect currency, defaulting to USD:", error);
+        detectedCurrency = "USD";
+      }
+    }
+
+    // Validate currency
+    if (!seraFxService.isCurrencySupported(detectedCurrency)) {
+      res.status(400).json({ error: `Unsupported currency: ${detectedCurrency}` });
+      return;
+    }
+
+    // Get merchant's preferred settlement currency
+    const merchantSettlementCurrency = merchant.preferredSettlementCurrency || "USD";
+    const merchantAutoConvert = merchant.autoConvertEnabled === 1;
+
+    // Get FX rate if currencies differ
+    let fxRate: number | null = null;
+    let convertedAmount: string | null = null;
+    let finalCurrency = detectedCurrency;
+    let finalAmount = normalizedAmount;
+
+    if (detectedCurrency !== merchantSettlementCurrency && merchantAutoConvert) {
+      try {
+        const rateData = await seraFxService.getFxRate(detectedCurrency, merchantSettlementCurrency);
+        if (rateData && rateData.rate) {
+          fxRate = parseFloat(rateData.rate);
+          convertedAmount = seraFxService.calculateConversion(parsedAmount, detectedCurrency, merchantSettlementCurrency, fxRate).toFixed(18);
+          finalCurrency = merchantSettlementCurrency;
+          finalAmount = convertedAmount;
+        }
+      } catch (error) {
+        console.error("[Multi-Currency] Failed to get FX rate:", error);
+        // Fall back to original currency if FX fails
+      }
+    }
+
+    // Get appropriate stablecoin for the final currency
+    const stablecoins = seraFxService.getStablecoinsForCurrency(finalCurrency);
+    const coin = stablecoins[0] || "USDC";
+
+    const id = uuidv4();
+    const resolvedChainId = chainId || 11155111;
+
+    await createTransaction({
+      id,
+      merchantId: merchant.id,
+      toAddress,
+      coin,
+      amount: finalAmount,
+      chainId: resolvedChainId,
+      status: "pending",
+      verified: 0,
+      customerCurrency: detectedCurrency,
+      customerAmount: normalizedAmount,
+      fxRate: fxRate ? fxRate.toFixed(8) : null,
+      fxConverted: fxRate ? 1 : 0,
+      settlementCurrency: finalCurrency,
+      notes: orderId || paymentIntentId || paymentUrl
+        ? JSON.stringify({
+            ...(orderId ? { orderId, source: "public_menu" } : {}),
+            ...(paymentIntentId ? { paymentIntentId } : {}),
+            ...(paymentUrl ? { paymentUrl } : {}),
+          })
+        : null,
+    });
+
+    if (orderId) {
+      await updateMenuOrderPayment(orderId, merchant.id, { paymentId: id, transactionId: id, status: "payment_pending" }).catch(() => undefined);
+    }
+
+    if (paymentIntentId) {
+      await updatePaymentIntent(paymentIntentId, { status: "open" }).catch(() => undefined);
+    }
+
+    res.json({
+      txId: id,
+      toAddress,
+      coin,
+      amount: finalAmount,
+      chainId: resolvedChainId,
+      customerCurrency: detectedCurrency,
+      customerAmount: normalizedAmount,
+      settlementCurrency: finalCurrency,
+      fxRate: fxRate ? fxRate.toFixed(8) : null,
+      fxConverted: fxRate ? 1 : 0,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 /** POST /api/payment/swap/quote - Sera quote for customer coin -> merchant receive coin */
