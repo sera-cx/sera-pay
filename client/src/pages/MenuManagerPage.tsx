@@ -18,7 +18,6 @@ import { useSeraApiConfig, useSetDefaultWallet, useWallets } from "@/hooks/use-g
 import { useLocation, useSearch } from "wouter";
 import { useChainId } from "wagmi";
 import { MENU_TEMPLATES } from "@/lib/menuTemplates";
-import { STABLECOINS } from "@/lib/stablecoins";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { CurrencySelectModal } from "@/components/CurrencySelectModal";
 import { QRStyled, type QrMode, type QrStyle } from "@/components/QRStyled";
@@ -201,10 +200,6 @@ function writeStoredCart(cart: CartEntry[]) {
   localStorage.setItem(CART_STORAGE_KEY, JSON.stringify({ savedAt: Date.now(), cart }));
 }
 
-// ── Coin options — derived from the canonical STABLECOINS list ───────────────
-
-const COIN_OPTIONS = STABLECOINS.map(s => s.symbol);
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function menuPublicUrl(slug: string, chainId?: number) {
@@ -360,12 +355,14 @@ function ItemEditDialog({
   onSave,
   onCancel,
   loading,
+  coinOptions,
 }: {
   item: MenuItem;
   menuId: string;
   onSave: (data: { name: string; description: string; itemCode?: string | null; price: string; coin: string; imageUrl?: string; category?: string; soldOutUntil?: string | null }) => void;
   onCancel: () => void;
   loading: boolean;
+  coinOptions: string[];
 }) {
   const [name, setName] = useState(item.name);
   const [description, setDescription] = useState(item.description || "");
@@ -425,6 +422,10 @@ function ItemEditDialog({
   };
 
   const handleSubmit = () => {
+    if (!coinOptions.includes(coin)) {
+      setError(`${coin} is not supported by Sera on the active network`);
+      return;
+    }
     const validation = validateItemForm({ name, price, coin, category });
     if (validation) {
       setError(validation);
@@ -513,7 +514,7 @@ function ItemEditDialog({
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
               <Select value={coin} onValueChange={(value) => { setCoin(value); setError(""); }}>
                 <SelectTrigger className="h-10"><SelectValue /></SelectTrigger>
-                <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                <SelectContent>{coinOptions.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
               </Select>
             </div>
           </div>
@@ -561,22 +562,28 @@ function AddItemDialog({
   onSave,
   onCancel,
   loading,
+  coinOptions,
 }: {
   menuId: string;
   onSave: (data: { name: string; description: string; itemCode?: string | null; price: string; coin: string; category?: string }) => void;
   onCancel: () => void;
   loading: boolean;
+  coinOptions: string[];
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [itemCode, setItemCode] = useState("");
   const [price, setPrice] = useState("");
-  const [coin, setCoin] = useState("USDC");
+  const [coin, setCoin] = useState(() => coinOptions.includes("USDC") ? "USDC" : coinOptions[0] || "");
   const [category, setCategory] = useState("");
   const [error, setError] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const handleSubmit = () => {
+    if (!coinOptions.includes(coin)) {
+      setError("Select a Sera-supported coin for the active network");
+      return;
+    }
     const validation = validateItemForm({ name, price, coin, category });
     if (validation) {
       setError(validation);
@@ -629,7 +636,7 @@ function AddItemDialog({
               <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 block">Coin</label>
               <Select value={coin} onValueChange={(value) => { setCoin(value); setError(""); }}>
                 <SelectTrigger className="h-10"><SelectValue /></SelectTrigger>
-                <SelectContent>{COIN_OPTIONS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                <SelectContent>{coinOptions.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
               </Select>
             </div>
           </div>
@@ -958,6 +965,7 @@ function CartSidebar({
   cart,
   activeMenu,
   merchantProfile,
+  coinOptions,
   onUpdateQty,
   onClear,
   variant = "sidebar",
@@ -966,6 +974,7 @@ function CartSidebar({
   cart: CartEntry[];
   activeMenu: Menu | null;
   merchantProfile: any;
+  coinOptions: string[];
   onUpdateQty: (itemId: string, delta: number) => void;
   onClear: () => void;
   variant?: "sidebar" | "drawer";
@@ -976,6 +985,7 @@ function CartSidebar({
   const { data: seraConfig } = useSeraApiConfig();
   const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [generatingPayment, setGeneratingPayment] = useState(false);
   const [paymentModal, setPaymentModal] = useState<{ url: string; amount: string; coin: string; startedAt: number } | null>(null);
   const totalQty = cart.reduce((s, e) => s + e.qty, 0);
 
@@ -986,34 +996,64 @@ function CartSidebar({
     coinTotals[c] = (coinTotals[c] || 0) + parseFloat(e.item.price) * e.qty;
   }
   const coinEntries = Object.entries(coinTotals); // [[coin, total], ...]
-  // Dominant coin = the one with the highest total value (used as receiveCoin)
+  // Dominant coin is only used to emphasize one row in the multi-currency summary.
   const dominantCoin = coinEntries.reduce((a, b) => b[1] > a[1] ? b : a, ["", 0])[0]
     || merchantProfile?.receiveCoin || "USDC";
-  const dominantTotal = coinTotals[dominantCoin] || 0;
+  const receiveCoin = String(merchantProfile?.receiveCoin || cart[0]?.item.coin || "").toUpperCase();
   const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress;
 
-  const handleGenerateQR = () => {
+  const handleGenerateQR = async () => {
     if (!receiverAddress) { toast.error("Wallet address not found"); return; }
-    const orderItems: OrderItem[] = cart.map(e => ({
-      id: e.item.id,
-      n: e.item.name,
-      p: e.item.price,
-      q: e.qty,
-      c: e.item.coin || undefined,
-    }));
-    const paymentAmount = formatDecimalAmount(dominantTotal) || dominantTotal.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-    const url = buildPaymentUrl({
-      receiverAddress,
-      receiveCoin: dominantCoin,
-      amount: paymentAmount,
-      chainId: paymentChainId,
-      merchantName: merchantProfile.name,
-      merchantIcon: merchantProfile.logoData || undefined,
-      orderItems,
-      menuName: activeMenu?.name,
-      menuSlug: activeMenu?.slug,
-    });
-    setPaymentModal({ url, amount: paymentAmount, coin: dominantCoin, startedAt: Date.now() });
+    if (coinOptions.length === 0) { toast.error("The Sera currency registry is unavailable. Please try again."); return; }
+    const supported = new Set(coinOptions);
+    const itemCoins = cart.map((entry) => String(entry.item.coin || "").toUpperCase());
+    const unsupportedCoin = [receiveCoin, ...itemCoins].find((coin) => !coin || !supported.has(coin));
+    if (unsupportedCoin !== undefined) {
+      toast.error(`${unsupportedCoin || "The selected currency"} is not supported by Sera on this network.`);
+      return;
+    }
+
+    setGeneratingPayment(true);
+    try {
+      const rates = new Map<string, number>([[receiveCoin, 1]]);
+      let paymentTotal = 0;
+      for (const entry of cart) {
+        const sourceCoin = String(entry.item.coin).toUpperCase();
+        let rate = rates.get(sourceCoin);
+        if (rate === undefined) {
+          rate = (await getCurrencyRate(sourceCoin, receiveCoin, paymentChainId)).rate;
+          rates.set(sourceCoin, rate);
+        }
+        const lineTotal = Number(entry.item.price) * entry.qty * rate;
+        if (!Number.isFinite(lineTotal) || lineTotal <= 0) throw new Error(`Invalid price for ${entry.item.name}`);
+        paymentTotal += lineTotal;
+      }
+
+      const orderItems: OrderItem[] = cart.map(e => ({
+        id: e.item.id,
+        n: e.item.name,
+        p: e.item.price,
+        q: e.qty,
+        c: e.item.coin || undefined,
+      }));
+      const paymentAmount = formatDecimalAmount(paymentTotal) || paymentTotal.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+      const url = buildPaymentUrl({
+        receiverAddress,
+        receiveCoin,
+        amount: paymentAmount,
+        chainId: paymentChainId,
+        merchantName: merchantProfile.name,
+        merchantIcon: merchantProfile.logoData || undefined,
+        orderItems,
+        menuName: activeMenu?.name,
+        menuSlug: activeMenu?.slug,
+      });
+      setPaymentModal({ url, amount: paymentAmount, coin: receiveCoin, startedAt: Date.now() });
+    } catch (error: any) {
+      toast.error(error?.message || "Unable to calculate the payment total from Sera");
+    } finally {
+      setGeneratingPayment(false);
+    }
   };
 
   const rootClass = variant === "drawer"
@@ -1116,10 +1156,10 @@ function CartSidebar({
         </div>
         <Button
           onClick={handleGenerateQR}
-          disabled={cart.length === 0}
+          disabled={cart.length === 0 || generatingPayment}
           className="serapay-green-button w-full gap-2 bg-gradient-to-r from-[#00D1A0] to-[#00B88A] text-white font-semibold h-11"
         >
-          <QrCode className="w-4 h-4" /> Generate Payment QR
+          <QrCode className="w-4 h-4" /> {generatingPayment ? "Calculating with Sera..." : "Generate Payment QR"}
         </Button>
       </div>
       {confirmClear && (
@@ -1305,7 +1345,8 @@ function POSView({
   const { data: seraConfig } = useSeraApiConfig();
   const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
   const publicUrl = menuPublicUrl(menu.slug, paymentChainId);
-  const currencyList = useMemo(() => currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const })), [currencyOptions]);
+  const currencyList = currencyOptions;
+  const coinOptions = useMemo(() => currencyOptions.map((coin) => coin.symbol), [currencyOptions]);
 
   const handleBulkCoinUpdate = async () => {
     const fromCoin = (items[0]?.coin || "USDC").toUpperCase();
@@ -1645,6 +1686,7 @@ function POSView({
         cart={cart}
         activeMenu={menu}
         merchantProfile={merchantProfile}
+        coinOptions={coinOptions}
         onUpdateQty={onUpdateCartQty}
         onClear={onClearCart}
       />
@@ -1669,6 +1711,7 @@ function POSView({
               cart={cart}
               activeMenu={menu}
               merchantProfile={merchantProfile}
+              coinOptions={coinOptions}
               onUpdateQty={onUpdateCartQty}
               onClear={onClearCart}
               variant="drawer"
@@ -1686,6 +1729,7 @@ function POSView({
           onSave={(data) => handleUpdateItem(editingItem, data)}
           onCancel={() => setEditingItem(null)}
           loading={savingItem}
+          coinOptions={coinOptions}
         />
       )}
       {addingItem && (
@@ -1694,6 +1738,7 @@ function POSView({
           onSave={handleAddItem}
           onCancel={() => setAddingItem(false)}
           loading={savingItem}
+          coinOptions={coinOptions}
         />
       )}
       {showQR && <QRSaveModal url={publicUrl} menuName={menu.name} merchantProfile={merchantProfile} onClose={() => setShowQR(false)} />}

@@ -39,6 +39,7 @@ import {
   getSeraMarkets,
   getSeraSystemSnapshot,
   getSeraTokens,
+  isSensitiveSeraAuditPayload,
   normalizeSeraBaseUrl,
   verifySeraApiCredential,
   type SeraMode,
@@ -59,42 +60,57 @@ function validationError(res: any, error: unknown) {
 function seraGatewayErrorResponse(error: unknown, fallback: string) {
   if (error instanceof SeraApiError) {
     const code = error.errorCode;
-    const detail = error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
-    const humanDetail = typeof detail?.detail === "string"
-      ? detail.detail
-      : typeof detail?.message === "string"
-        ? detail.message
-        : null;
     const isQuoteStale = error.status === 409
       || error.status === 410
       || code === "QUOTE_STALE"
       || code === "quote_stale";
     const isUnavailable = error.status >= 500;
     const message = code === "no_liquidity" || code === "NO_LIQUIDITY"
-      ? "Currently there is no liquidity for this transaction. Please try a different payment coin."
+      ? "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."
       : isQuoteStale
         ? "This quote closed before it could be submitted. Please try again."
       : isUnavailable
         ? "Sera is temporarily unavailable. Please try again shortly."
-        : humanDetail || error.message;
+        : fallback;
     return {
       status: error.status >= 400 && error.status < 500 ? error.status : 502,
       body: {
         error: message,
         errorCode: isQuoteStale ? "quote_stale" : code ?? (isUnavailable ? "sera_connection_error" : null),
         seraStatus: error.status,
-        detail: error.detail,
       },
     };
   }
-  const detail = error instanceof Error ? error.message : fallback;
   return {
     status: 502,
     body: {
       error: "Unable to reach Sera right now. Please try again shortly.",
       errorCode: "sera_connection_error",
-      detail,
     },
+  };
+}
+
+function safeGatewayLog(scope: string, error: unknown) {
+  const type = error instanceof Error ? error.name : "unknown_error";
+  console.error(`[gateway/${scope}] failed`, { type });
+}
+
+function redactSeraLogForResponse<T extends {
+  endpoint: string;
+  requestQuery?: string | null;
+  requestBody?: string | null;
+  responseBody?: string | null;
+  errorMessage?: string | null;
+}>(log: T): T {
+  const redactRequest = isSensitiveSeraAuditPayload(log.endpoint, "request");
+  const redactResponse = isSensitiveSeraAuditPayload(log.endpoint, "response");
+  if (!redactRequest && !redactResponse) return log;
+  return {
+    ...log,
+    requestQuery: redactRequest ? null : log.requestQuery,
+    requestBody: redactRequest ? JSON.stringify({ redacted: true }) : log.requestBody,
+    responseBody: redactResponse ? JSON.stringify({ redacted: true }) : log.responseBody,
+    errorMessage: redactRequest || redactResponse ? null : log.errorMessage,
   };
 }
 
@@ -129,7 +145,15 @@ function defaultSeraBaseUrlForMode(mode: SeraMode): string {
 }
 
 function resolveSeraBaseUrl(mode: SeraMode, configuredBaseUrl?: string | null): string {
-  return normalizeSeraBaseUrl(configuredBaseUrl || defaultSeraBaseUrlForMode(mode));
+  const candidate = normalizeSeraBaseUrl(configuredBaseUrl || defaultSeraBaseUrlForMode(mode));
+  const allowed = new Set([
+    normalizeSeraBaseUrl(DEFAULT_SERA_API_BASE_URL),
+    normalizeSeraBaseUrl(DEFAULT_SERA_API_TESTNET_BASE_URL),
+    ...(ENV.seraApiBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiBaseUrl)] : []),
+    ...(ENV.seraApiTestnetBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiTestnetBaseUrl)] : []),
+  ]);
+  if (!allowed.has(candidate)) throw new Error("Unsupported Sera API base URL");
+  return candidate;
 }
 
 function modeFromBaseUrl(baseUrl: string): SeraMode {
@@ -229,13 +253,12 @@ function walletViewsForMerchant(merchant: any, subWallets: any[]) {
 gatewayRouter.get("/sera/system", async (req, res) => {
   try {
     const requestedMode = querySeraMode(req.query);
-    const requestedBaseUrl = String(req.query.baseUrl ?? req.query.base_url ?? defaultSeraBaseUrlForMode(requestedMode));
-    const baseUrl = normalizeSeraBaseUrl(requestedBaseUrl);
-    new URL(baseUrl);
-    const snapshot = await getSeraSystemSnapshot(baseUrl, requestedMode === "mock" ? modeFromBaseUrl(baseUrl) : requestedMode);
+    const effectiveMode = requestedMode === "mock" ? "live" : requestedMode;
+    const baseUrl = resolveSeraBaseUrl(effectiveMode);
+    const snapshot = await getSeraSystemSnapshot(baseUrl, effectiveMode);
     res.json(snapshot);
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to reach Sera API" });
+    res.status(502).json({ error: "Unable to reach Sera API" });
   }
 });
 
@@ -244,7 +267,7 @@ gatewayRouter.get("/sera/tokens", async (req, res) => {
     const mode = querySeraMode(req.query);
     res.json(await getSeraTokens(resolveSeraBaseUrl(mode)));
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera tokens" });
+    res.status(502).json({ error: "Unable to fetch Sera tokens" });
   }
 });
 
@@ -253,7 +276,7 @@ gatewayRouter.get("/sera/markets", async (req, res) => {
     const mode = querySeraMode(req.query);
     res.json(await getSeraMarkets(resolveSeraBaseUrl(mode)));
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera markets" });
+    res.status(502).json({ error: "Unable to fetch Sera markets" });
   }
 });
 
@@ -268,7 +291,7 @@ gatewayRouter.get("/sera/fx-rate", async (req, res) => {
     const mode = querySeraMode(req.query);
     res.json(await getSeraFxRate(resolveSeraBaseUrl(mode), base, quote));
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera FX rate" });
+    res.status(502).json({ error: "Unable to fetch Sera FX rate" });
   }
 });
 
@@ -338,7 +361,8 @@ gatewayRouter.get("/sera/orders", requireApiKey as any, async (req: any, res) =>
     });
     res.json(data);
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera orders" });
+    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera orders");
+    res.status(response.status).json(response.body);
   }
 });
 
@@ -359,7 +383,8 @@ gatewayRouter.get("/sera/fills", requireApiKey as any, async (req: any, res) => 
     });
     res.json(data);
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera fills" });
+    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera fills");
+    res.status(response.status).json(response.body);
   }
 });
 
@@ -380,16 +405,17 @@ gatewayRouter.get("/sera/balances", requireApiKey as any, async (req: any, res) 
     });
     res.json(data);
   } catch (error) {
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera balances" });
+    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera balances");
+    res.status(response.status).json(response.body);
   }
 });
 
 gatewayRouter.get("/sera/logs", requireApiKey as any, async (req: any, res) => {
   try {
     const logs = await listSeraApiRequestLogs(req.merchant.id, Number(req.query.limit) || 50);
-    res.json({ logs });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to fetch Sera API logs" });
+    res.json({ logs: logs.map(redactSeraLogForResponse) });
+  } catch {
+    res.status(500).json({ error: "Unable to fetch Sera API logs" });
   }
 });
 
@@ -397,8 +423,8 @@ gatewayRouter.get("/compliance/logs", requireApiKey as any, async (req: any, res
   try {
     const logs = await listComplianceScreeningLogs(req.merchant.id, Number(req.query.limit) || 50);
     res.json({ logs });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to fetch compliance logs" });
+  } catch {
+    res.status(500).json({ error: "Unable to fetch compliance logs" });
   }
 });
 
@@ -412,7 +438,8 @@ gatewayRouter.post("/compliance/screen-address", requireApiKey as any, async (re
     const result = await screenWalletAddress(address, req.body.checkType ?? "recipient_wallet", req.merchant.id);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to screen address" });
+    safeGatewayLog("compliance/screen-address", error);
+    res.status(500).json({ error: "Unable to screen address" });
   }
 });
 
@@ -472,7 +499,7 @@ gatewayRouter.get("/wallets", requireApiKey as any, async (req: any, res) => {
     const subWallets = await listSubWallets(merchant.id);
     res.json(walletViewsForMerchant(merchant, subWallets));
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("wallets", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -508,8 +535,8 @@ gatewayRouter.put("/wallets/default", requireApiKey as any, async (req: any, res
     const subWallets = await listSubWallets(req.merchant.id);
     res.json(walletViewsForMerchant({ ...req.merchant, storeAddress: wallet.address }, subWallets));
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to set default wallet" });
+    safeGatewayLog("wallets/default", error);
+    res.status(500).json({ error: "Unable to set default wallet" });
   }
 });
 
@@ -517,7 +544,7 @@ gatewayRouter.get("/sub-wallets", requireApiKey as any, async (req: any, res) =>
   try {
     res.json({ subWallets: await listSubWallets(req.merchant.id) });
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("sub-wallets", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -544,7 +571,7 @@ gatewayRouter.post("/sub-wallets", requireApiKey as any, async (req: any, res) =
     res.status(201).json(subWallet);
   } catch (error) {
     if (validationError(res, error)) return;
-    console.error(error);
+    safeGatewayLog("sub-wallets/create", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -566,7 +593,8 @@ gatewayRouter.delete("/sub-wallets/:id", requireApiKey as any, async (req: any, 
     }
     res.json({ ok: true });
   } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : "Unable to delete sub-wallet" });
+    safeGatewayLog("sub-wallets/delete", error);
+    res.status(500).json({ error: "Unable to delete sub-wallet" });
   }
 });
 
@@ -576,7 +604,7 @@ gatewayRouter.get("/payments", requireApiKey as any, async (req: any, res) => {
     const paymentIntents = await listPaymentIntents(req.merchant.id, limit);
     res.json({ paymentIntents: paymentIntents.map(paymentIntentToJson) });
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("payment-intents", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -633,7 +661,7 @@ gatewayRouter.post("/payments", requireApiKey as any, async (req: any, res) => {
     res.status(201).json({ paymentIntent: paymentIntentToJson(intent), checkoutUrl });
   } catch (error) {
     if (validationError(res, error)) return;
-    console.error(error);
+    safeGatewayLog("payments/create", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -647,7 +675,7 @@ gatewayRouter.get("/payments/:id", requireApiKey as any, async (req: any, res) =
     }
     res.json({ paymentIntent: paymentIntentToJson(intent) });
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("payments/read", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -659,7 +687,7 @@ gatewayRouter.get("/transactions", requireApiKey as any, async (req: any, res) =
     const transactions = await getMerchantTransactions(req.merchant.id, limit, offset);
     res.json({ transactions, pagination: { limit, offset } });
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("transactions", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -669,7 +697,7 @@ gatewayRouter.get("/merchant/sera-config", requireApiKey as any, async (req: any
     const config = await getApiKeyConfigRecord(req.merchant.id);
     res.json(apiConfigToJson(config));
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("sera-config/read", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -698,7 +726,7 @@ gatewayRouter.put("/merchant/sera-config", requireApiKey as any, async (req: any
     await upsertApiKeyConfig({
       id: existing?.id ?? uuidv4(),
       merchantId: req.merchant.id,
-      seraApiBaseUrl: normalizeSeraBaseUrl(input.seraApiBaseUrl),
+      seraApiBaseUrl: resolveSeraBaseUrl(input.mode, input.seraApiBaseUrl),
       seraApiKeyEncrypted,
       seraApiKeyLast4,
       seraWebhookSecretEncrypted,
@@ -714,7 +742,7 @@ gatewayRouter.put("/merchant/sera-config", requireApiKey as any, async (req: any
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error(error);
+    safeGatewayLog("sera-config/update", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -731,7 +759,7 @@ gatewayRouter.post("/merchant/sera-config/test", requireApiKey as any, async (re
       : { ok: false, message: "No Sera API key saved." };
     res.json({ snapshot, verification });
   } catch (error) {
-    console.error(error);
+    safeGatewayLog("sera-config/test", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -745,8 +773,9 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
       return;
     }
 
-    const baseUrl = normalizeSeraBaseUrl(input.seraApiBaseUrl);
-    const mode = modeFromBaseUrl(baseUrl);
+    const normalizedInputBaseUrl = normalizeSeraBaseUrl(input.seraApiBaseUrl);
+    const mode = modeFromBaseUrl(normalizedInputBaseUrl);
+    const baseUrl = resolveSeraBaseUrl(mode, normalizedInputBaseUrl);
     const result = await callSeraApi<{
       api_key?: string;
       api_secret?: string;
@@ -766,6 +795,7 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
         signature: input.signature,
         label: input.label,
       },
+      sensitiveRequest: true,
       sensitiveResponse: true,
     });
 
@@ -802,7 +832,8 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
       res.status(400).json({ error: error.message });
       return;
     }
-    res.status(502).json({ error: error instanceof Error ? error.message : "Unable to generate Sera API key" });
+    const response = seraGatewayErrorResponse(error, "Unable to generate Sera API key");
+    res.status(response.status).json(response.body);
   }
 });
 
@@ -854,7 +885,7 @@ gatewayRouter.post("/webhooks/sera", async (req, res) => {
     res.json({ received: true });
   } catch (error) {
     if (validationError(res, error)) return;
-    console.error(error);
+    safeGatewayLog("webhook", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });

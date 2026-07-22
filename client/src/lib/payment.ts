@@ -1,15 +1,28 @@
 import { buildClientAppUrl } from "@/lib/app-url";
 import { normalizeDecimalAmountText } from "@/lib/decimalInput";
-import { getStablecoinBySymbol } from "@/lib/stablecoins";
 import type { SeraApiMode } from "@shared/gateway";
 
 export const LIVE_PAYMENT_CHAIN_ID = 1;
 export const TEST_PAYMENT_CHAIN_ID = 11155111;
+export const SERA_NO_LIQUIDITY_MESSAGE = "Currently there's no liquidity on this exchange in Sera.cx. Please try another option.";
+const LEGACY_LIVE_PAYMENT_CHAIN_IDS = new Set([10, 56, 137, 8453, 42161]);
 
 export function resolvePaymentChainId(chainId: number | null | undefined, mode?: SeraApiMode | null): number {
   if (mode === "test") return TEST_PAYMENT_CHAIN_ID;
   if (mode === "live") return LIVE_PAYMENT_CHAIN_ID;
   return chainId === LIVE_PAYMENT_CHAIN_ID ? LIVE_PAYMENT_CHAIN_ID : TEST_PAYMENT_CHAIN_ID;
+}
+
+function normalizeCheckoutChainId(value: unknown): number | undefined | null {
+  if (value === undefined || value === null || value === "") return undefined;
+  const chainId = Number(value);
+  if (!Number.isInteger(chainId) || chainId <= 0) return null;
+  if (chainId === LIVE_PAYMENT_CHAIN_ID || chainId === TEST_PAYMENT_CHAIN_ID) return chainId;
+  // Older live SeraPay links used Polygon/Base/Arbitrum/Optimism/BNB. Sera's
+  // current live registry and contracts are on Ethereum mainnet, so migrate
+  // those links before resolving token addresses or asking the wallet to pay.
+  if (LEGACY_LIVE_PAYMENT_CHAIN_IDS.has(chainId)) return LIVE_PAYMENT_CHAIN_ID;
+  return null;
 }
 
 export interface OrderItem {
@@ -91,8 +104,11 @@ export function decodePaymentRequest(encoded: string): PaymentRequest | null {
     }
     const parsed = JSON.parse(data);
     if (!parsed.receiverAddress || !parsed.receiveCoin) return null;
+    const chainId = normalizeCheckoutChainId(parsed.chainId);
+    if (chainId === null) return null;
     return {
       ...parsed,
+      chainId,
       amount: parsed.amount ? normalizeDecimalAmountText(parsed.amount) || undefined : undefined,
       payAmount: parsed.payAmount ? normalizeDecimalAmountText(parsed.payAmount) || undefined : undefined,
       orderItems: Array.isArray(parsed.orderItems)
@@ -115,57 +131,31 @@ export function parseAmountToRaw(amount: string, decimals: number): bigint {
   if (!/^\d+(\.\d+)?$/.test(normalized) || parseFloat(normalized) <= 0) return 0n;
   const parts = normalized.split(".");
   const intPart = parts[0] || "0";
-  const fracPart = (parts[1] || "").padEnd(decimals, "0").slice(0, decimals);
+  const meaningfulFraction = (parts[1] || "").replace(/0+$/, "");
+  if (meaningfulFraction.length > decimals) {
+    throw new Error(`Amount exceeds the token's ${decimals}-decimal precision.`);
+  }
+  const fracPart = meaningfulFraction.padEnd(decimals, "0");
   const scale = 10n ** BigInt(decimals);
   return BigInt(intPart) * scale + BigInt(fracPart);
 }
 
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
-const LIVE_TOKEN_ADDRESSES: Record<string, Record<number, `0x${string}`>> = {
-  USDC: {
-    1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    137: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-    8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-  },
-  USDT: {
-    1: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-    137: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-    42161: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-  },
-  XSGD: {
-    1: "0x70e8dE73cE538DA2bEEd35d14187F6959a8ecA96",
-    137: "0xDC3326e71D45186F113a2F448984CA0e8D201995",
-  },
-  EURC: {
-    1: "0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c",
-    8453: "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
-  },
-  MYRT: {
-    1: "0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f",
-  },
-};
-
-function getTokenForWalletQr(coin: string | null | undefined, chainId: number): { address: `0x${string}`; decimals: number } | null {
-  const symbol = String(coin || "").trim().toUpperCase();
-  if (!symbol || symbol === "ANY COIN" || symbol === "ANY") return null;
-  const sepoliaCoin = chainId === TEST_PAYMENT_CHAIN_ID ? getStablecoinBySymbol(symbol) : undefined;
-  const address = chainId === TEST_PAYMENT_CHAIN_ID
-    ? sepoliaCoin?.contractAddress
-    : LIVE_TOKEN_ADDRESSES[symbol]?.[chainId];
-  if (!address || !EVM_ADDRESS_RE.test(address)) return null;
-  return {
-    address: address as `0x${string}`,
-    decimals: sepoliaCoin?.decimals ?? 6,
-  };
-}
-
 export interface WalletPaymentUriRequest {
   receiverAddress: string;
   coin?: string | null;
   amount?: string | null;
   chainId?: number | null;
+  /** Exact address returned by the active Sera /tokens registry. */
+  tokenAddress?: string | null;
+  /** Decimals returned beside tokenAddress by the same registry response. */
+  tokenDecimals?: number | null;
+}
+
+export interface PaymentQrValueRequest extends WalletPaymentUriRequest {
+  receiveCoin?: string | null;
+  paymentUrl: string;
 }
 
 /**
@@ -178,6 +168,8 @@ export function buildWalletPaymentUri({
   coin,
   amount,
   chainId,
+  tokenAddress,
+  tokenDecimals,
 }: WalletPaymentUriRequest): string {
   const receiver = receiverAddress.trim();
   const resolvedChainId = chainId || TEST_PAYMENT_CHAIN_ID;
@@ -192,16 +184,35 @@ export function buildWalletPaymentUri({
     return `ethereum:${receiver}@${resolvedChainId}${params}`;
   }
 
-  const token = getTokenForWalletQr(symbol, resolvedChainId);
-  if (token) {
-    const rawAmount = normalizedAmount ? parseAmountToRaw(normalizedAmount, token.decimals) : 0n;
+  const decimals = Number(tokenDecimals);
+  if (tokenAddress && EVM_ADDRESS_RE.test(tokenAddress) && Number.isInteger(decimals) && decimals >= 0 && decimals <= 255) {
+    let rawAmount = 0n;
+    try {
+      rawAmount = normalizedAmount ? parseAmountToRaw(normalizedAmount, decimals) : 0n;
+    } catch {
+      return "";
+    }
     const params = new URLSearchParams({ address: receiver });
     if (rawAmount > 0n) params.set("uint256", rawAmount.toString());
     params.set("gas", "65000");
-    return `ethereum:${token.address}@${resolvedChainId}/transfer?${params.toString()}`;
+    return `ethereum:${tokenAddress}@${resolvedChainId}/transfer?${params.toString()}`;
   }
 
-  return `ethereum:${receiver}@${resolvedChainId}`;
+  // Never degrade an ERC-20 request to a native/plain-address URI. That loses
+  // the selected token and wallets may display it as ETH, USDC, or "Unknown".
+  return "";
+}
+
+/**
+ * Same-coin QR codes may safely open a wallet's exact ERC-20 transfer screen.
+ * Cross-currency payments must open SeraPay checkout so Sera can quote and
+ * execute the swap; a raw transfer would bypass conversion entirely.
+ */
+export function buildPaymentQrValue(request: PaymentQrValueRequest): string {
+  const payCoin = String(request.coin || "").trim().toUpperCase();
+  const receiveCoin = String(request.receiveCoin || "").trim().toUpperCase();
+  if (payCoin && receiveCoin && payCoin !== receiveCoin) return request.paymentUrl;
+  return buildWalletPaymentUri(request) || request.paymentUrl;
 }
 
 const CURRENCY_FORMATS: Record<string, { symbol: string; prefix: boolean; decimals: number }> = {

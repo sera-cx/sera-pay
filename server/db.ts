@@ -339,7 +339,6 @@ async function ensurePostgresSchema(pool: pg.Pool) {
   `;
   await pool.query(sql);
   _pgSchemaReady = true;
-  console.log("[Database] PostgreSQL schema ready");
 }
 
 async function getPostgresPool() {
@@ -353,13 +352,12 @@ async function getPostgresPool() {
         connectionTimeoutMillis: 5_000,
       });
       _pgPool.on("error", (error) => {
-        console.warn("[Database] PostgreSQL pool error:", error.message);
+        console.warn("[Database] PostgreSQL pool error");
       });
       await ensurePostgresSchema(_pgPool);
-      console.log("[Database] PostgreSQL connection pool initialised (max=10)");
     } catch (error) {
       _pgUnavailableReason = error instanceof Error ? error.message : String(error);
-      console.warn(`[Database] PostgreSQL unavailable; using in-memory fallback. ${_pgUnavailableReason}`);
+      console.warn("[Database] PostgreSQL unavailable; using in-memory fallback");
       await _pgPool?.end().catch(() => undefined);
       _pgPool = null;
       return null;
@@ -430,7 +428,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       target: users.openId,
       set: { ...updateSet, updatedAt: new Date() },
     });
-  } catch (error) { console.error("[Database] Failed to upsert user:", error); throw error; }
+  } catch (error) { console.error("[Database] Failed to upsert user"); throw error; }
 }
 
 export async function getUserByOpenId(openId: string) {

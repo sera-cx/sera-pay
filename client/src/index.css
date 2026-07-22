@@ -298,6 +298,17 @@
   background-clip: padding-box;
 }
 
+.serapay-modal-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.serapay-modal-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .serapay-cancel-danger:not(:disabled) {
   color: #ef4444 !important;
   border-color: rgba(239, 68, 68, 0.25) !important;

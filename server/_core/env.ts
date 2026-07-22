@@ -21,7 +21,6 @@ export const ENV = {
   seraApiBaseUrl: env("SERA_API_BASE_URL"),
   seraApiTestnetBaseUrl: env("SERA_API_TESTNET_BASE_URL"),
   seraApiKey: env("SERA_API_KEY"),
-  seraApiDebug: process.env.SERA_API_DEBUG === "true",
   goldskyGraphqlUrl: env("GOLDSKY_GRAPHQL_URL"),
   alchemyApiKey: env("ALCHEMY_API_KEY"),
   rpcUrls: {

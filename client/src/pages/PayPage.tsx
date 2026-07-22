@@ -3,202 +3,20 @@ import { useParams } from "wouter";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
 import { ChevronDown, ChevronRight, Wallet } from "lucide-react";
-import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { decodePaymentRequest, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { type Stablecoin } from "@/lib/stablecoins";
+import { decodePaymentRequest, SERA_NO_LIQUIDITY_MESSAGE, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
-import { getCurrencyRate } from "@/lib/currencyCalculator";
+import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 import { SeraPayHeader } from "@/components/SeraPayHeader";
+import { StablecoinLogo } from "@/components/StablecoinLogo";
 import { detectLocale, getTranslations, RTL_LOCALES } from "@/lib/i18n";
 import jsPDF from "jspdf";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 
-const TOKEN_COLORS: Record<string, string> = {
-  USDT: "#26A17B", USDC: "#2775CA", XSGD: "#EF3E42", MYRT: "#CC0001",
-  IDRX: "#E4002B", IDRT: "#E4002B", EURC: "#003399", AUDD: "#00843D",
-  JPYC: "#BC002D", THBT: "#A51931", CADC: "#FF0000", BRZ: "#009C3B",
-  VGBP: "#012169", MXNT: "#006847", ZARP: "#007A4D", CNGN: "#008751",
-  DAI: "#F5AC37", PYUSD: "#003087", FRAX: "#6B6B6B",
-  GYEN: "#BC002D", XSGD2: "#EF3E42", TNSGD: "#EF3E42",
-  GBPA: "#012169", TGBP: "#012169", VEUR: "#003399",
-  AUDF: "#00843D", CADC2: "#FF0000", QCAD: "#FF0000",
-  BRLA: "#009C3B", KRW1: "#C60C30", KRWO: "#C60C30", KRWIN: "#C60C30",
-  XIDR: "#E4002B", CCHF: "#D52B1E", VCHF: "#D52B1E",
-  MXNB: "#006847", NZDD: "#00247D", NZDS: "#00247D",
-  THBK: "#A51931", ZARU: "#007A4D", ARC: "#FF9933",
-  TRYB: "#E30A17", PHPC: "#0038A8", HKDR: "#DE2910",
-  CNHT: "#DE2910", ARZ: "#74ACDF",
-};
-
-// ERC-20 contract addresses per chain
-// Sepolia (11155111) addresses sourced from https://docs.sera.cx/tokens
-const COIN_ADDRESSES: Record<string, Record<number, `0x${string}`>> = {
-  // USD
-  USDC: {
-    1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    137: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-    8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-  },
-  USDT: {
-    1: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-    137: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-    42161: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-    11155111: "0x1920bf0643ae49B4fB334586dAd6Bed29fF30F88",
-  },
-  // EUR
-  EURC: {
-    1: "0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c",
-    8453: "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
-    11155111: "0xd3BdB2CE9cD98566EFc2e2977448c40578371779",
-  },
-  EURT: {
-    11155111: "0x47230df72231f594C5c598635dD92849C11532D0",
-  },
-  TNEUR: {
-    11155111: "0xe4AF44eF7ce074F8FA94131035108201A5ac2F3a",
-  },
-  VEUR: {
-    11155111: "0x4AbcbC7C307baCF5AdbFc57E822658F5D917Ca1E",
-  },
-  // GBP
-  GBPA: {
-    11155111: "0xD685BC15a53bbb624B98Ebf97B357DB8e0DA4A23",
-  },
-  TGBP: {
-    11155111: "0xA26f1088f41714B696d0e7b117FA9cbd810bbE8B",
-  },
-  VGBP: {
-    1: "0x39C2a0af4a9c797b4d4f3e2a0a3e8e5c6e9e2e2e",
-    11155111: "0x01d8b6E34a57573Ff48d49fA047b45054f939eDa",
-  },
-  // SGD
-  XSGD: {
-    1: "0x70e8dE73cE538DA2bEEd35d14187F6959a8ecA96",
-    137: "0xDC3326e71D45186F113a2F448984CA0e8D201995",
-    11155111: "0x1Fe69B1171d8aA5e6d432F14A9E4129ED96E40C0",
-  },
-  TNSGD: {
-    11155111: "0x4638F8eB9F2047Ab18d70E12539E0B16fF2998A2",
-  },
-  // JPY
-  GYEN: {
-    11155111: "0xA39c3648Cd2b5a183Af33Dcc30af6799A13aD7ae",
-  },
-  JPYC: {
-    11155111: "0x2C9e4Db557af394f1F21d1E1E6754a7CB1eC1D01",
-  },
-  // AUD
-  AUDD: {
-    11155111: "0x03A8D551Bf1d708471064aA97FeA004a45Ed8CF3",
-  },
-  AUDF: {
-    11155111: "0x06dCE1A62f5D3188d016e640F3a9dd3bB26f9431",
-  },
-  // CAD
-  CADC: {
-    11155111: "0xaE64cEB804292F737C28e0Bd552d929041662970",
-  },
-  QCAD: {
-    11155111: "0x3BDB8BE37Ad586852ad005C5a0885211CD803250",
-  },
-  // BRL
-  BRLA: {
-    11155111: "0x6B5256523aCD840aE97AeDE492cB31a5D500Fdf9",
-  },
-  BRZ: {
-    11155111: "0x1B7fA411238bf745138a59Cbd90Fb8480D85c130",
-  },
-  // KRW
-  KRW1: {
-    11155111: "0x01943628c3E70A4F39CE905e8fea56E7A8a357F8",
-  },
-  KRWO: {
-    11155111: "0x4C16AF20C7f8a841397273955c6451F4fEB6a576",
-  },
-  KRWIN: {
-    11155111: "0xCE2dDC28068b3929ECF9787ec47284A9e3a62B3a",
-  },
-  // IDR
-  IDRX: {
-    11155111: "0x258f1E146b8Bd0dEcf54bAD8f1f01fE69025601c",
-  },
-  IDRT: {
-    11155111: "0x26db12e7cB7Be8Ab22a97B7e4c3d33C0bfE89e82",
-  },
-  XIDR: {
-    11155111: "0xe02bbf861736147e1506d07239d7f2D291FB39fC",
-  },
-  // CHF
-  CCHF: {
-    11155111: "0xA6B42B17219C854E4a44F40ed93d15A5FD88676E",
-  },
-  VCHF: {
-    11155111: "0x1e7Fd8256Cff4C61519e9E7E5E9d0496a14b0D5B",
-  },
-  // MXN
-  MXNT: {
-    11155111: "0x6750EEC6a189BCBc4a9A52EE285b525c8D1940F3",
-  },
-  MXNB: {
-    11155111: "0x510139cC0B118711ACCf9ec476b3093dF0BBb1FC",
-  },
-  // NZD
-  NZDD: {
-    11155111: "0x2cDc20d7eFEe786d28529ecC8a0A491Bee84b207",
-  },
-  NZDS: {
-    11155111: "0xA6DA6F948F6C95D4D6525856208B1A267a37c905",
-  },
-  // THB
-  THBT: {
-    11155111: "0x5e875193255BfE0557701DceB01831C7bDFa910b",
-  },
-  THBK: {
-    11155111: "0x696451A335EB929934a1020Db4ED655f33765802",
-  },
-  // ZAR
-  ZARP: {
-    11155111: "0x409667Ce4E4674E9fB8272774AAbFfBB7c8956a4",
-  },
-  ZARU: {
-    11155111: "0x721CB3e2B0BA43b0a51f2179b7D260DD98d4BAF1",
-  },
-  // Other
-  MYRT: {
-    1: "0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f",
-    11155111: "0x68077f53a6562D42051C86b09160EA577f3C7476",
-  },
-  TRYB: {
-    11155111: "0x0d2968Dc1b9EC131bEcaB8e28193e81Bcd63040c",
-  },
-  PHPC: {
-    11155111: "0x9aA087afD8C3EadA4f52Dfe61aaC507Bf845BC29",
-  },
-  HKDR: {
-    11155111: "0x40ad01c5ade2a9202D110C621919D0a2b147EB97",
-  },
-  CNHT: {
-    11155111: "0x8f3F6bE3f2545d5d90275f0dA98980264F6a8913",
-  },
-  ARZ: {
-    11155111: "0x3A2498C86Db0e4a2E8766649f368cBD37Fe6D52a",
-  },
-  ARC: {
-    11155111: "0xDbb492152eBd689ceF184C17e6F65AB18DCDe627",
-  },
-  CNGN: {
-    11155111: "0x82167feCbB10C496F75afcD933DC0E23891E1CF3",
-  },
-  A7A5: {
-    11155111: "0xEf6182c0DB1466b4B24608360bEf8376A6A0578d",
-  },
-};
-
 const CHAIN_NAMES: Record<number, string> = {
-  1: "Ethereum", 137: "Polygon", 8453: "Base", 42161: "Arbitrum", 11155111: "Sepolia",
+  1: "Ethereum", 11155111: "Sepolia",
 };
 
 function HeaderNetworkBadge({ isTestnet }: { isTestnet: boolean }) {
@@ -313,11 +131,66 @@ async function getActiveWalletAddress(provider: any, fallbackAddress?: string) {
   return address.toLowerCase();
 }
 
+async function getWalletTokenAllowance(provider: any, tokenAddress: string, walletAddress: string, spenderAddress: string): Promise<bigint> {
+  const data = `0xdd62ed3e${walletAddress.slice(2).padStart(64, "0")}${spenderAddress.slice(2).padStart(64, "0")}`;
+  const result = await provider.request({
+    method: "eth_call",
+    params: [{ to: tokenAddress, data }, "latest"],
+  });
+  if (typeof result !== "string" || !/^0x[0-9a-fA-F]+$/.test(result)) {
+    throw new Error("Your wallet could not verify this token allowance.");
+  }
+  return BigInt(result);
+}
+
+async function waitForWalletTransaction(provider: any, txHash: string, timeoutMs = 120_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const receipt = await provider.request({ method: "eth_getTransactionReceipt", params: [txHash] });
+    if (receipt) {
+      if (receipt.status === "0x0" || receipt.status === 0 || receipt.status === "0") {
+        throw new Error("Token approval failed on-chain.");
+      }
+      return receipt;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  throw new Error("Token approval is still pending. Please wait for it to confirm, then try again.");
+}
+
+async function approveWalletToken(
+  provider: any,
+  tokenAddress: string,
+  walletAddress: string,
+  spenderAddress: string,
+  amount: bigint,
+  chainId: number,
+) {
+  const data = `0x095ea7b3${spenderAddress.slice(2).padStart(64, "0")}${amount.toString(16).padStart(64, "0")}`;
+  const transaction = {
+    from: walletAddress,
+    to: tokenAddress,
+    data,
+    chainId: `0x${chainId.toString(16)}`,
+  };
+  await provider.request({ method: "eth_estimateGas", params: [transaction] });
+  const txHash = await provider.request({ method: "eth_sendTransaction", params: [transaction] });
+  if (typeof txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    throw new Error("Your wallet did not return a valid token approval transaction.");
+  }
+  await waitForWalletTransaction(provider, txHash);
+}
+
+function isWalletCancellation(error: any): boolean {
+  const message = String(error?.message || error?.cause?.message || error || "");
+  return error?.code === 4001 || error?.cause?.code === 4001 || /rejected|denied|cancelled|canceled/i.test(message);
+}
+
 function paymentFailureMessage(error: any): string {
   const message = String(error?.message || error || "Transaction failed");
   if (error?.code === 4001 || /rejected|denied|cancelled/i.test(message)) return "Transaction cancelled.";
-  if (/gas limit too high|gas required exceeds allowance|execution reverted|transaction is likely to fail/i.test(message)) {
-    return "Transaction simulation failed. Please check your token balance and Sepolia ETH for gas, then try again.";
+  if (/gas limit too high|gas required exceeds allowance|execution reverted|transaction is likely to fail|transfer simulation failed/i.test(message)) {
+    return "Transaction simulation failed. Please check your token balance and network gas, then try again.";
   }
   if (/wallet_addEthereumChain|wallet_switchEthereumChain|unrecognized chain|unsupported chain/i.test(message)) {
     return "Please add or switch to the payment network in your wallet, then try again.";
@@ -326,7 +199,7 @@ function paymentFailureMessage(error: any): string {
     return "Your wallet browser could not open this payment request. Please try Connect existing wallet, or open the browser payment QR.";
   }
   if (error?.errorCode === "no_liquidity" || /no liquidity|No liquidity is available/i.test(message)) {
-    return "Currently there is no liquidity for this transaction. Please try a different payment coin.";
+    return SERA_NO_LIQUIDITY_MESSAGE;
   }
   if (isQuoteStaleError(error)) {
     return "The quote closed before it could be submitted. Please try again.";
@@ -346,6 +219,7 @@ function paymentFailureMessage(error: any): string {
 
 function isQuoteStaleError(error: any): boolean {
   const message = String(error?.message || error || "");
+  if (error?.errorCode === "no_liquidity" || error?.errorCode === "NO_LIQUIDITY") return false;
   return error?.errorCode === "quote_stale"
     || error?.errorCode === "QUOTE_STALE"
     || error?.status === 409
@@ -390,39 +264,14 @@ async function totalOrderItemsInCoin(
   return { amount: formatTokenAmount(total), convertedCoins: Array.from(convertedCoins) };
 }
 
-/** Returns coins that have a contract address on the given chain */
-function getSupportedCoins(chainId: number): Stablecoin[] {
-  if (chainId === 1) return STABLECOINS;
-  return STABLECOINS.filter(c => !!COIN_ADDRESSES[c.symbol]?.[chainId]);
-}
-
-function TokenIcon({ symbol, size = 36 }: { symbol: string; size?: number }) {
-  const [imageFailed, setImageFailed] = useState(false);
-  const logoUrl = !imageFailed ? getStablecoinLogoUrl(symbol) : undefined;
-  if (logoUrl) {
-    return (
-      <img
-        src={logoUrl}
-        alt={`${symbol} logo`}
-        onError={() => setImageFailed(true)}
-        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", background: "rgba(0,0,0,0.05)", flexShrink: 0 }}
-      />
-    );
-  }
-  const coin = getStablecoinBySymbol(symbol);
-  const flagEmoji = coin?.icon;
-  if (flagEmoji) {
-    return (
-      <div style={{ width: size, height: size, borderRadius: "50%", background: "rgba(0,0,0,0.05)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: size * 0.55 }}>
-        <span role="img" aria-label={symbol}>{flagEmoji}</span>
-      </div>
-    );
-  }
-  const color = TOKEN_COLORS[symbol] ?? "#888";
+function TokenIcon({ symbol, logoUri, size = 36 }: { symbol: string; logoUri?: string; size?: number }) {
   return (
-    <div style={{ width: size, height: size, borderRadius: "50%", background: color, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-      <span style={{ fontSize: size * 0.38, fontWeight: 700, color: "#fff", letterSpacing: "-0.5px" }}>{symbol.slice(0, 2)}</span>
-    </div>
+    <StablecoinLogo
+      symbol={symbol}
+      logoUri={logoUri}
+      style={{ width: size, height: size, borderRadius: "50%", objectFit: "contain", background: "rgba(0,0,0,0.05)", flexShrink: 0 }}
+      fallbackClassName="inline-flex items-center justify-center bg-gray-100 text-[10px] font-bold text-gray-600"
+    />
   );
 }
 
@@ -520,7 +369,7 @@ function CoinSheet({ onClose, onSelect, selectedSymbol, receiveCoin, supportedCo
                 outline: focusIdx === i ? "2px solid #00D1A0" : "none", outlineOffset: -2,
               }}
             >
-              <TokenIcon symbol={c.symbol} size={36} />
+              <TokenIcon symbol={c.symbol} logoUri={c.logoUri} size={36} />
               <div style={{ flex: 1, textAlign: "left" }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: "#1C1C1E" }}>{c.symbol}</div>
                 <div style={{ fontSize: 12, color: "rgba(60,60,67,0.5)" }}>{c.name}</div>
@@ -611,6 +460,9 @@ export default function PayPage() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [req, setReq] = useState<ReturnType<typeof decodePaymentRequest> | null>(null);
   const [selectedCoin, setSelectedCoin] = useState<Stablecoin | null>(null);
+  const [supportedCoins, setSupportedCoins] = useState<SeraCurrency[]>([]);
+  const [registryLoading, setRegistryLoading] = useState(true);
+  const [registryError, setRegistryError] = useState("");
   const [showCoinSheet, setShowCoinSheet] = useState(false);
   const [showLeaveCheckout, setShowLeaveCheckout] = useState(false);
   const [txHash, setTxHash] = useState("");
@@ -629,6 +481,8 @@ export default function PayPage() {
   const [rateExpiry, setRateExpiry] = useState<number | null>(null); // timestamp ms when rate expires
   const [countdown, setCountdown] = useState(RATE_TTL_SECONDS);
   const rateRef = useRef<number | null>(null); // raw rate number for comparison
+  const payRateRequestRef = useRef(0);
+  const registryRequestKeyRef = useRef("");
   const orderPaymentCoinRef = useRef<string | null>(null);
 
   // Rate-changed confirmation
@@ -692,8 +546,13 @@ export default function PayPage() {
         setDisplayRate(null);
         setRateExpiry(Date.now() + RATE_TTL_SECONDS * 1000);
         setCountdown(RATE_TTL_SECONDS);
-      } catch {
+      } catch (error) {
+        setPayAmount(null);
         setUnifiedAmount(null); setUnifiedCoin(null); setUnifiedNote(null); setReceiveAmount(req.amount || null);
+        setOrderMinimumPayAmount(null);
+        setRateExpiry(null);
+        setCountdown(0);
+        setTxError(error instanceof Error ? error.message : "This payment currency cannot currently be converted by Sera. Please choose another currency.");
       } finally {
         if (!cancelled) setUnifiedLoading(false);
       }
@@ -702,9 +561,8 @@ export default function PayPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req, selectedCoin?.symbol, rateRefreshKey, chainId]);
 
-  const supportedCoins = getSupportedCoins(chainId);
   const requiresSeraSwap = Boolean(req && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
-  const selectedCoinSupported = Boolean(selectedCoin && (requiresSeraSwap || COIN_ADDRESSES[selectedCoin.symbol]?.[chainId]));
+  const selectedCoinSupported = Boolean(selectedCoin && supportedCoins.some((coin) => coin.symbol === selectedCoin.symbol));
   // True when the payment request has no fixed amount — customer types their own amount
   const isOpenAmount = !hasOrderItems && !req?.amount;
   const showEditableAmount = isOpenAmount || hasOrderItems;
@@ -740,9 +598,6 @@ export default function PayPage() {
     const chainRpc: Record<number, string> = {
       11155111: import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
       1: import.meta.env.VITE_MAINNET_RPC_URL || "https://ethereum-rpc.publicnode.com",
-      137: import.meta.env.VITE_POLYGON_RPC_URL || "https://polygon-bor-rpc.publicnode.com",
-      8453: import.meta.env.VITE_BASE_RPC_URL || "https://base-rpc.publicnode.com",
-      42161: import.meta.env.VITE_ARBITRUM_RPC_URL || "https://arbitrum-one-rpc.publicnode.com",
     };
     const rpc = chainRpc[chainId] || chainRpc[11155111];
     let cancelled = false;
@@ -773,11 +628,6 @@ export default function PayPage() {
       const decoded = decodePaymentRequest(encoded);
       if (!decoded?.receiverAddress) { setPhase("invalid"); return; }
       setReq(decoded);
-      const preferredSymbol = decoded.payCoin || decoded.receiveCoin;
-      if (preferredSymbol) {
-        const coin = STABLECOINS.find(c => c.symbol.toUpperCase() === preferredSymbol.toUpperCase());
-        if (coin) setSelectedCoin(coin);
-      }
       // Check expiry
       if (decoded.expiresAt && Date.now() > decoded.expiresAt) {
         setPhase("invalid"); return;
@@ -795,14 +645,51 @@ export default function PayPage() {
   }, [encoded, ready, isConnected]);
 
   useEffect(() => {
+    if (!req) return;
+    let active = true;
+    setRegistryLoading(true);
+    setRegistryError("");
+    loadSeraCurrencies(chainId)
+      .then((coins) => {
+        if (!active) return;
+        setSupportedCoins(coins);
+        const preferredSymbol = String(req.payCoin || req.receiveCoin).toUpperCase();
+        const preferred = coins.find((coin) => coin.symbol === preferredSymbol) ?? null;
+        const requestKey = `${encoded || ""}:${chainId}`;
+        const sameRequest = registryRequestKeyRef.current === requestKey;
+        registryRequestKeyRef.current = requestKey;
+        setSelectedCoin((current) => {
+          const retained = sameRequest && current ? coins.find((coin) => coin.symbol === current.symbol) ?? null : null;
+          return retained ?? preferred;
+        });
+        if (!preferred && !sameRequest) {
+          setRegistryError(`${preferredSymbol} is not supported by Sera on ${CHAIN_NAMES[chainId] || "this network"}`);
+        }
+      })
+      .catch((error) => {
+        if (!active) return;
+        setSupportedCoins([]);
+        setSelectedCoin(null);
+        setRegistryError(error instanceof Error ? error.message : "Unable to load Sera currencies");
+      })
+      .finally(() => {
+        if (active) setRegistryLoading(false);
+      });
+    return () => { active = false; };
+  }, [chainId, req]);
+
+  useEffect(() => {
     if (phase === "connect" && ready && isConnected) setPhase("select-coin");
   }, [ready, isConnected, phase]);
 
   // Fetch FX rate
   const fetchRate = useCallback(async (receiveCoin: string, payCoin: string, amount: string, rateChainId: number) => {
+    const requestId = ++payRateRequestRef.current;
     if (payCoin === receiveCoin) {
+      setRateLoading(false);
       setPayAmount(amount);
       setDisplayRate(null);
+      setTxError("");
       rateRef.current = 1;
       setRateExpiry(Date.now() + RATE_TTL_SECONDS * 1000);
       setCountdown(RATE_TTL_SECONDS);
@@ -811,7 +698,9 @@ export default function PayPage() {
     setRateLoading(true);
     try {
       const res = await fetch(`/api/rates?from=${receiveCoin}&to=${payCoin}&chainId=${rateChainId}`);
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+      if (requestId !== payRateRequestRef.current) return;
       if (data.rate) {
         const converted = parseFloat(amount) * data.rate;
         const formatted = converted >= 1
@@ -822,15 +711,20 @@ export default function PayPage() {
         setDisplayRate(`1 ${receiveCoin} ≈ ${data.rate >= 1 ? data.rate.toLocaleString(undefined, { maximumFractionDigits: 4 }) : data.rate.toFixed(6)} ${payCoin}`);
         setRateExpiry(Date.now() + RATE_TTL_SECONDS * 1000);
         setCountdown(RATE_TTL_SECONDS);
+        setTxError("");
       } else {
-        setPayAmount(null);
-        setDisplayRate(null);
+        throw new Error("Sera did not return an exchange rate");
       }
-    } catch {
+    } catch (error) {
+      if (requestId !== payRateRequestRef.current) return;
       setPayAmount(null);
       setDisplayRate(null);
+      setRateExpiry(null);
+      setCountdown(0);
+      rateRef.current = null;
+      setTxError(error instanceof Error ? error.message : "Unable to fetch the Sera exchange rate");
     } finally {
-      setRateLoading(false);
+      if (requestId === payRateRequestRef.current) setRateLoading(false);
     }
   }, []);
 
@@ -838,11 +732,6 @@ export default function PayPage() {
   useEffect(() => {
     if (!req?.receiveCoin || !selectedCoin) { setPayAmount(null); setDisplayRate(null); return; }
     if (req.orderItems?.length) return;
-    if (req.payAmount && req.payCoin === selectedCoin.symbol) {
-      setPayAmount(req.payAmount);
-      setDisplayRate(null);
-      return;
-    }
     if (!req.amount) { setPayAmount(null); setDisplayRate(null); return; }
     fetchRate(req.receiveCoin, selectedCoin.symbol, req.amount, chainId);
   }, [selectedCoin, req, fetchRate, chainId]);
@@ -932,9 +821,15 @@ export default function PayPage() {
       if (!sendAmount) throw new Error("Invalid payment amount");
 
       if (requiresSeraSwap) {
+        const selectedTokenAddress = String(selectedCoin.contractAddress || "");
+        const selectedTokenDecimals = Number(selectedCoin.decimals);
+        if (!/^0x[0-9a-fA-F]{40}$/.test(selectedTokenAddress) || !Number.isInteger(selectedTokenDecimals) || selectedTokenDecimals < 0 || selectedTokenDecimals > 255) {
+          throw new Error(`Sera did not return valid ${selectedCoin.symbol} token metadata for ${CHAIN_NAMES[cid] || "this network"}`);
+        }
         const attemptStartedAt = Date.now();
         const swapExpiration = Math.floor((attemptStartedAt + PAYMENT_ATTEMPT_MAX_MS) / 1000);
         let quoteRetries = 0;
+        let quoteTransactionId = "";
 
         const createSwapQuote = async () => {
           const quoteRes = await fetch("/api/payment/swap/quote", {
@@ -951,18 +846,62 @@ export default function PayPage() {
               paymentIntentId: (req as any).paymentIntentId,
               orderId: (req as any).orderId,
               expiration: swapExpiration,
+              txId: quoteTransactionId || undefined,
             }),
           });
           const quoteData = await readPaymentApiJson<any>(quoteRes, "Unable to create Sera swap quote");
-          setTxId(quoteData.txId);
+          quoteTransactionId = String(quoteData.txId || "");
+          setTxId(quoteTransactionId);
+          if (quoteData.payAmount) setPayAmount(String(quoteData.payAmount));
           return quoteData;
+        };
+
+        const validateSwapQuote = async (quoteData: any) => {
+          const quoteTokenAddress = String(quoteData?.request?.from_token || "");
+          const maximumInputRaw = String(quoteData?.quote?.route_params?.maxInputAmount ?? quoteData?.intentTypedData?.message?.maxInputAmount ?? "");
+          if (!/^0x[0-9a-fA-F]{40}$/.test(quoteTokenAddress) || !/^\d+$/.test(maximumInputRaw)) {
+            throw new Error("Sera returned invalid payment token or amount metadata.");
+          }
+          if (quoteTokenAddress.toLowerCase() !== String(selectedCoin.contractAddress || "").toLowerCase()) {
+            throw new Error(`${selectedCoin.symbol} token metadata changed while this payment was open. Refresh the page before paying.`);
+          }
+          const required = BigInt(maximumInputRaw);
+          return { quoteTokenAddress, required };
         };
 
         while (true) {
           try {
             let quoteData = await createSwapQuote();
+            let { quoteTokenAddress, required } = await validateSwapQuote(quoteData);
             let permitSignature: string | undefined;
             let permitDeadline = quoteData.permitDeadline;
+
+            if (quoteData.approvalRequired) {
+              const spender = String(quoteData.approvalSpender || "");
+              if (!/^0x[0-9a-fA-F]{40}$/.test(spender)) {
+                throw new Error(`Sera did not return a valid ${selectedCoin.symbol} approval target.`);
+              }
+              const allowance = await getWalletTokenAllowance(provider, quoteTokenAddress, activeWalletAddress, spender);
+              if (allowance < required) {
+                setTxError(`${selectedCoin.symbol} does not support a gasless permit. Approve the exact Sera spend amount in your wallet to continue.`);
+                try {
+                  await approveWalletToken(provider, quoteTokenAddress, activeWalletAddress, spender, required, cid);
+                } catch (approvalError) {
+                  // Legacy tokens such as USDT require a zero allowance before
+                  // replacing an existing non-zero allowance.
+                  if (allowance === 0n || isWalletCancellation(approvalError)) throw approvalError;
+                  await approveWalletToken(provider, quoteTokenAddress, activeWalletAddress, spender, 0n, cid);
+                  await approveWalletToken(provider, quoteTokenAddress, activeWalletAddress, spender, required, cid);
+                }
+                quoteData = await createSwapQuote();
+                ({ quoteTokenAddress, required } = await validateSwapQuote(quoteData));
+                const refreshedSpender = String(quoteData.approvalSpender || spender);
+                const refreshedAllowance = await getWalletTokenAllowance(provider, quoteTokenAddress, activeWalletAddress, refreshedSpender);
+                if (refreshedAllowance < required) {
+                  throw new Error(`${selectedCoin.symbol} approval is below the refreshed Sera quote. Please try again.`);
+                }
+              }
+            }
 
             if (quoteData.permitTypedData) {
               const signedPermitTypedData = quoteData.permitTypedData;
@@ -974,6 +913,7 @@ export default function PayPage() {
               // Sera quotes can close quickly. Refresh after the slower permit prompt so the
               // final intent signature is made against a fresh, still-open quote.
               quoteData = await createSwapQuote();
+              await validateSwapQuote(quoteData);
               permitDeadline = quoteData.permitDeadline;
               if (quoteData.permitTypedData && !sameTypedData(quoteData.permitTypedData, signedPermitTypedData)) {
                 permitSignature = await provider.request({
@@ -1010,6 +950,7 @@ export default function PayPage() {
             const stillWithinAttemptWindow = Date.now() - attemptStartedAt < PAYMENT_ATTEMPT_MAX_MS;
             if (isQuoteStaleError(error) && stillWithinAttemptWindow && quoteRetries < MAX_SWAP_QUOTE_RETRIES) {
               quoteRetries += 1;
+              quoteTransactionId = "";
               setTxId("");
               setTxError("Quote refreshed. Please approve the fresh request in your wallet.");
               continue;
@@ -1019,8 +960,12 @@ export default function PayPage() {
         }
       }
 
-      const coinAddress = COIN_ADDRESSES[selectedCoin.symbol]?.[cid];
-      if (!coinAddress) throw new Error(`${selectedCoin.symbol} not supported on ${CHAIN_NAMES[cid] || "this network"}`);
+      const selectedTokenAddress = String(selectedCoin.contractAddress || "");
+      const selectedTokenDecimals = Number(selectedCoin.decimals);
+      if (!/^0x[0-9a-fA-F]{40}$/.test(selectedTokenAddress) || !Number.isInteger(selectedTokenDecimals) || selectedTokenDecimals < 0 || selectedTokenDecimals > 255) {
+        throw new Error(`Sera did not return valid ${selectedCoin.symbol} token metadata for ${CHAIN_NAMES[cid] || "this network"}`);
+      }
+      const amountWei = parseUnits(sendAmount, selectedTokenDecimals);
 
       const createRes = await fetch("/api/payment/create", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1037,16 +982,24 @@ export default function PayPage() {
       const createData = await readPaymentApiJson<any>(createRes, "Unable to create payment");
       setTxId(createData.txId);
 
-      const decimals = 6; // All Sera testnet tokens use 6 decimals
-      const amountWei = parseUnits(sendAmount, decimals);
+      const coinAddress = String(createData.tokenAddress || "");
+      const decimals = Number(createData.tokenDecimals);
+      if (!/^0x[0-9a-fA-F]{40}$/.test(coinAddress) || !Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+        throw new Error(`Sera did not return valid ${selectedCoin.symbol} token metadata for ${CHAIN_NAMES[cid] || "this network"}`);
+      }
+      if (coinAddress.toLowerCase() !== selectedTokenAddress.toLowerCase() || decimals !== selectedTokenDecimals) {
+        throw new Error(`${selectedCoin.symbol} token metadata changed while this payment was open. Refresh the page before paying.`);
+      }
+
       const selector = "0xa9059cbb";
       const paddedTo = createData.toAddress.slice(2).padStart(64, "0");
       const paddedAmount = amountWei.toString(16).padStart(64, "0");
       const transferData = selector + paddedTo + paddedAmount;
 
+      const transaction = { from: activeWalletAddress, to: coinAddress, data: transferData, chainId: `0x${cid.toString(16)}` };
       const hash = await provider.request({
         method: "eth_sendTransaction",
-        params: [{ from: activeWalletAddress, to: coinAddress, data: transferData, chainId: `0x${cid.toString(16)}` }],
+        params: [transaction],
       });
 
       setTxHash(hash as string);
@@ -1059,7 +1012,12 @@ export default function PayPage() {
     } catch (e: any) {
       const message = paymentFailureMessage(e);
       setTxError(message);
-      setPhase(e?.errorCode === "no_liquidity" ? "select-coin" : "failed");
+      if (isWalletCancellation(e) || e?.errorCode === "no_liquidity") {
+        setTxId("");
+        setPhase("select-coin");
+      } else {
+        setPhase("failed");
+      }
     }
   }, [req, selectedCoin, wallets, requiresSeraSwap, receiveAmount]);
 
@@ -1146,12 +1104,10 @@ export default function PayPage() {
         // Rate within tolerance — proceed
         await executePay(newFormatted);
       } else {
-        // Can't get rate — proceed with existing amount
-        await executePay(payAmount);
+        throw new Error(data.detail || data.error || "Sera did not return an exchange rate");
       }
-    } catch {
-      // Network error — proceed with existing amount
-      await executePay(payAmount);
+    } catch (error) {
+      setTxError(error instanceof Error ? error.message : "Unable to refresh the Sera exchange rate. Please try again.");
     } finally {
       setRateLoading(false);
     }
@@ -1430,7 +1386,7 @@ export default function PayPage() {
           <button onClick={() => { window.location.assign(buildClientAppUrl("/")); }} style={{ width: "100%", height: 48, borderRadius: 14, background: "#fff", border: "1px solid rgba(0,0,0,0.08)", color: "#0A1F1A", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 10 }}>
             Return to SeraPay
           </button>
-          {txHash && <a href={`https://sepolia.etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ display: "block", marginTop: 12, fontSize: 12, color: "#00B88A", textDecoration: "none", fontWeight: 500 }}>View on Etherscan →</a>}
+          {txHash && <a href={`${chainId === TEST_PAYMENT_CHAIN_ID ? "https://sepolia.etherscan.io" : "https://etherscan.io"}/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ display: "block", marginTop: 12, fontSize: 12, color: "#00B88A", textDecoration: "none", fontWeight: 500 }}>View on Etherscan →</a>}
           {wallets[0]?.address && (
             <a href={`/wallet/history/${wallets[0].address}`} style={{ display: "block", marginTop: 8, fontSize: 12, color: "rgba(60,60,67,0.4)", textDecoration: "none", fontWeight: 500 }}>View all my payments →</a>
           )}
@@ -1459,6 +1415,7 @@ export default function PayPage() {
 
   const isSameCoin = selectedCoin?.symbol === req?.receiveCoin;
   const showCountdown = !!rateExpiry && !!selectedCoin && (hasOrderItems || (!isSameCoin && !!req?.amount));
+  const paymentAmountReady = Boolean(payAmount && Number.isFinite(parseDisplayAmount(payAmount)) && parseDisplayAmount(payAmount) > 0);
   const isPaymentTestnet = chainId === 11155111;
   const returnToOrder = () => {
     if (req?.menuSlug) {
@@ -1727,8 +1684,8 @@ export default function PayPage() {
               </div>
             )}
             {!selectedCoin && (
-              <button onClick={() => setShowCoinSheet(true)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, background: "#F9F9FB", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 14, padding: "14px 16px", cursor: "pointer", marginBottom: 16 }}>
-                <span style={{ fontSize: 14, color: "rgba(60,60,67,0.4)", flex: 1, textAlign: "left" }}>Tap the coin above to choose</span>
+              <button disabled={registryLoading || supportedCoins.length === 0} onClick={() => setShowCoinSheet(true)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, background: "#F9F9FB", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 14, padding: "14px 16px", cursor: registryLoading || supportedCoins.length === 0 ? "not-allowed" : "pointer", marginBottom: 16 }}>
+                <span style={{ fontSize: 14, color: "rgba(60,60,67,0.4)", flex: 1, textAlign: "left" }}>{registryLoading ? "Loading currencies from Sera…" : "Choose a supported payment coin"}</span>
                 <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="rgba(60,60,67,0.3)" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
               </button>
             )}
@@ -1750,6 +1707,11 @@ export default function PayPage() {
                 {selectedCoin.symbol} is not supported on {CHAIN_NAMES[chainId] || "this network"}. Please choose a different coin.
               </p>
             )}
+            {registryError && (
+              <p style={{ fontSize: 12, color: "#FF3B30", textAlign: "center", margin: "0 0 8px", fontWeight: 500 }}>
+                {registryError}. This checkout will not substitute another currency.
+              </p>
+            )}
             {txError && (
               <div style={{ borderRadius: 12, background: "#FFF8E6", border: "1px solid rgba(245,158,11,0.26)", color: "#9A5B00", fontSize: 12, lineHeight: 1.45, fontWeight: 600, padding: "10px 12px", marginBottom: 12, textAlign: "left" }}>
                 {txError}
@@ -1758,13 +1720,13 @@ export default function PayPage() {
             <button
               onClick={handlePay}
               className="serapay-action-primary serapay-shine-button"
-              disabled={!selectedCoin || rateLoading || (!req?.amount && !payAmount) || !!amountError || !selectedCoinSupported}
+              disabled={!selectedCoin || registryLoading || !!registryError || rateLoading || !paymentAmountReady || !!amountError || !selectedCoinSupported}
               style={{
                 width: "100%", height: 54, borderRadius: 14, border: "none",
-                background: (selectedCoin && !rateLoading && (req?.amount || payAmount) && !amountError && selectedCoinSupported) ? "linear-gradient(135deg, #4ECE9A, #3AB882)" : "rgba(0,0,0,0.08)",
-                color: (selectedCoin && !rateLoading && (req?.amount || payAmount) && !amountError && selectedCoinSupported) ? "#fff" : "rgba(60,60,67,0.3)",
+                background: (selectedCoin && !rateLoading && paymentAmountReady && !amountError && selectedCoinSupported) ? "linear-gradient(135deg, #4ECE9A, #3AB882)" : "rgba(0,0,0,0.08)",
+                color: (selectedCoin && !rateLoading && paymentAmountReady && !amountError && selectedCoinSupported) ? "#fff" : "rgba(60,60,67,0.3)",
                 fontSize: 15, fontWeight: 700,
-                cursor: (selectedCoin && !rateLoading && (req?.amount || payAmount) && !amountError && selectedCoinSupported) ? "pointer" : "not-allowed",
+                cursor: (selectedCoin && !rateLoading && paymentAmountReady && !amountError && selectedCoinSupported) ? "pointer" : "not-allowed",
               }}
             >
               {rateLoading ? t.calculating : t.confirmAndPay}
@@ -1790,7 +1752,7 @@ export default function PayPage() {
       {showCoinSheet && (
         <CoinSheet
           onClose={() => setShowCoinSheet(false)}
-          onSelect={(coin) => { setSelectedCoin(coin); setTxError(""); }}
+          onSelect={(coin) => { setSelectedCoin(coin); setRegistryError(""); setTxError(""); }}
           selectedSymbol={selectedCoin?.symbol}
           receiveCoin={req?.receiveCoin}
           supportedCoins={supportedCoins}

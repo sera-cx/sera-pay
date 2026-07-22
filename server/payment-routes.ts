@@ -6,7 +6,7 @@ import { Router, Request, Response } from "express";
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { createPublicClient, fallback, http, webSocket, parseAbi, parseAbiItem, decodeEventLog, keccak256, toHex, encodeAbiParameters, parseAbiParameters, verifyMessage } from "viem";
-import { sepolia, mainnet, polygon, base, arbitrum } from "viem/chains";
+import { sepolia, mainnet } from "viem/chains";
 import {
   getMerchantByWallet,
   getMerchantByStoreAddress,
@@ -27,6 +27,7 @@ import {
   getTransactionsByFromAddress,
   listSubWallets,
   getSubWalletByAddress,
+  getApiKeyConfigRecord,
   updatePaymentIntent,
   updateMenuOrderPayment,
 } from "./db";
@@ -34,6 +35,8 @@ import { screenWalletAddress } from "./compliance";
 import { ENV } from "./_core/env";
 import { PrivyAuthError, assertPrivyWalletOwnership, getPrivyWalletSummary, sendPrivyAuthError, verifyPrivyRequest, type PrivyIdentity, type PrivyWalletOwnership } from "./_core/privy";
 import { isR2StorageConfigured, storagePut, storageRead } from "./storage";
+import { decryptSecret } from "./secret-vault";
+import { hashSeraIntentStruct, SERA_INTENT_TYPES, type SeraIntentMessage } from "./sera-intent";
 import {
   DEFAULT_SERA_API_BASE_URL,
   DEFAULT_SERA_API_TESTNET_BASE_URL,
@@ -50,6 +53,8 @@ export const paymentRouter = Router();
 const PUBLIC_STORAGE_PREFIXES = ["merchant-logos/", "menu-items/", "generated/"];
 const PENDING_TRANSACTION_CANCEL_AFTER_MS = 5 * 60 * 1000;
 const SERA_TESTNET_CHAIN_ID = sepolia.id;
+const SERA_MAINNET_CHAIN_ID = mainnet.id;
+const COIN_SYMBOL_RE = /^[A-Z0-9]{2,20}$/;
 
 function getSeraApiBaseUrlForChain(chainId?: number | null): string {
   const baseUrl = chainId === SERA_TESTNET_CHAIN_ID
@@ -95,60 +100,16 @@ paymentRouter.get("/storage/objects/*", async (req, res) => {
     res.type(object.contentType);
     res.send(object.body);
   } catch (error) {
-    console.error("[Storage] Failed to read object", error);
+    console.error("[Storage] Failed to read object");
     res.status(404).json({ error: "Object not found" });
   }
 });
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const VALID_COINS = new Set([
-  // USD
-  "USDC", "USDT",
-  // EUR
-  "EURC", "EURT", "TNEUR", "VEUR",
-  // GBP
-  "GBPA", "TGBP", "VGBP",
-  // SGD
-  "XSGD", "TNSGD",
-  // JPY
-  "JPYC", "GYEN",
-  // AUD
-  "AUDD", "AUDF",
-  // CAD
-  "CADC", "QCAD",
-  // BRL
-  "BRLA", "BRZ",
-  // KRW
-  "KRW1", "KRWO", "KRWIN",
-  // IDR
-  "IDRX", "IDRT", "XIDR",
-  // CHF
-  "CCHF", "VCHF",
-  // MXN
-  "MXNB", "MXNT",
-  // NZD
-  "NZDD", "NZDS",
-  // THB
-  "THBK", "THBT",
-  // ZAR
-  "ZARP", "ZARU",
-  // Other
-  "ARC", "MYRT", "TRYB", "PHPC", "HKDR", "CNHT", "ARZ", "CNGN", "A7A5",
-]);
 const VALID_QR_MODES = new Set(["standard", "advanced"]);
 
-type SeraRouteParams = {
-  taker: string;
-  inputToken: string;
-  outputToken: string;
-  maxInputAmount: string;
-  minOutputAmount: string;
-  recipient: string;
-  initialDepositAmount: string;
-  uuid: string | number;
-  deadline: string | number;
-};
+type SeraRouteParams = SeraIntentMessage;
 
 type SeraSwapQuote = {
   uuid?: string | number;
@@ -161,25 +122,33 @@ type SeraSwapQuote = {
 
 type SeraConfigResponse = {
   chain_id?: number;
+  sera_address?: string;
+  vault_address?: string;
+  sor_address?: string;
   eip712_domain?: Record<string, unknown>;
 };
 
-const SERA_INTENT_TYPES = {
-  Intent: [
-    { name: "taker", type: "address" },
-    { name: "inputToken", type: "address" },
-    { name: "outputToken", type: "address" },
-    { name: "maxInputAmount", type: "uint256" },
-    { name: "minOutputAmount", type: "uint256" },
-    { name: "recipient", type: "address" },
-    { name: "initialDepositAmount", type: "uint256" },
-    { name: "uuid", type: "uint256" },
-    { name: "deadline", type: "uint48" },
-  ],
-} as const;
+type SeraSystemTimeResponse = {
+  timestamp?: number;
+};
+
+async function getSeraServerTimestamp(baseUrl: string, merchantId?: string | null): Promise<number> {
+  const response = await callSeraApi<SeraSystemTimeResponse>({
+    baseUrl,
+    path: "/system/time",
+    authMode: "none",
+    merchantId,
+  });
+  const timestamp = Number(response.timestamp);
+  if (!Number.isInteger(timestamp) || timestamp <= 0) {
+    throw new Error("Sera /system/time did not return a valid timestamp");
+  }
+  return timestamp;
+}
 
 // In-memory SSE clients: txId → Set<Response>
 const sseClients = new Map<string, Set<Response>>();
+const transactionVerificationInFlight = new Set<string>();
 
 function notifySseClients(txId: string, data: object) {
   const clients = sseClients.get(txId);
@@ -193,12 +162,21 @@ function notifySseClients(txId: string, data: object) {
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
 export async function requireApiKey(req: Request, res: Response, next: Function) {
-  const apiKey = req.headers["x-api-key"] as string;
-  if (!apiKey) { res.status(401).json({ error: "Missing X-Api-Key header" }); return; }
-  const merchant = await getMerchantByApiKey(apiKey);
-  if (!merchant) { res.status(401).json({ error: "Invalid API key" }); return; }
-  (req as any).merchant = merchant;
-  next();
+  try {
+    const apiKey = req.headers["x-api-key"] as string;
+    if (!apiKey) { res.status(401).json({ error: "Missing X-Api-Key header" }); return; }
+    const merchant = await getMerchantByApiKey(apiKey);
+    if (!merchant) { res.status(401).json({ error: "Invalid API key" }); return; }
+    (req as any).merchant = merchant;
+    next();
+  } catch (error) {
+    // Express 4 does not automatically catch rejected async middleware. A
+    // transient database timeout must return an error, not kill the process.
+    console.error("[auth] Unable to validate API key");
+    if (!res.headersSent) {
+      res.status(503).json({ error: "Database is temporarily unavailable. Please retry." });
+    }
+  }
 }
 
 // ─── Merchant endpoints ───────────────────────────────────────────────────────
@@ -302,7 +280,7 @@ paymentRouter.post("/merchant/register", async (req, res) => {
     res.json({ id, userId: identity.userId, walletAddress: addr, name: name.trim(), apiKey, isNew: true });
   } catch (e) {
     if (e instanceof PrivyAuthError) { sendPrivyAuthError(res, e); return; }
-    console.error(e); res.status(500).json({ error: "Internal server error" });
+    logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -374,7 +352,7 @@ paymentRouter.get("/merchant/public/:address?", async (req, res) => {
       qrStyle: merchant.qrStyle,
       qrMode: (merchant as any).qrMode || "standard",
     });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** PUT /api/merchant/settings — update merchant profile */
@@ -392,7 +370,7 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
       updates.description = description?.trim()?.slice(0, 500) || null;
     }
     if (receiveCoin !== undefined) {
-      if (!VALID_COINS.has(receiveCoin)) { res.status(400).json({ error: "Invalid receiveCoin" }); return; }
+      if (typeof receiveCoin !== "string" || !COIN_SYMBOL_RE.test(receiveCoin)) { res.status(400).json({ error: "Invalid receiveCoin" }); return; }
       updates.receiveCoin = receiveCoin;
     }
     if (logoData !== undefined) {
@@ -431,7 +409,7 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
     res.json(updated || { success: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/merchant/me — get merchant profile */
@@ -461,7 +439,7 @@ paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, re
       updates.description = description?.trim()?.slice(0, 500) || null;
     }
     if (receiveCoin !== undefined) {
-      if (receiveCoin !== null && (typeof receiveCoin !== "string" || !VALID_COINS.has(receiveCoin))) {
+      if (receiveCoin !== null && (typeof receiveCoin !== "string" || !COIN_SYMBOL_RE.test(receiveCoin))) {
         res.status(400).json({ error: "Invalid receiveCoin" }); return;
       }
       updates.receiveCoin = receiveCoin || null;
@@ -501,7 +479,7 @@ paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, re
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
     res.json(updated);
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** POST /api/merchant/webhook — update webhook URL (used by dashboard Developer page) */
@@ -513,7 +491,7 @@ paymentRouter.post("/merchant/webhook", requireApiKey as any, async (req: any, r
     }
     await updateMerchant(req.merchant.id, { webhookUrl: webhookUrl || null });
     res.json({ success: true, webhookUrl: webhookUrl || null });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** POST /api/merchant/webhook/test — fire a sample payload to the merchant's webhook URL */
@@ -576,7 +554,7 @@ paymentRouter.post("/merchant/webhook/test", requireApiKey as any, async (req: a
     }
 
     res.json({ success: statusCode >= 200 && statusCode < 300, statusCode, responseBody: responseBody.slice(0, 500), payload: samplePayload });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** POST /api/merchant/webhook/secret/regenerate — rotate HMAC signing secret */
@@ -586,7 +564,7 @@ paymentRouter.post("/merchant/webhook/secret/regenerate", requireApiKey as any, 
     const newSecret = "whsec_" + randomBytes(24).toString("hex"); // 48-char hex prefixed
     await updateMerchant(req.merchant.id, { webhookSecret: newSecret });
     res.json({ success: true, webhookSecret: newSecret });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/merchant/webhook/logs — recent webhook delivery log */
@@ -604,7 +582,7 @@ paymentRouter.get("/merchant/webhook/logs", requireApiKey as any, async (req: an
       error: l.error,
       sentAt: l.sentAt.getTime(),
     })));
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/merchant/stats — aggregate stats for dashboard */
@@ -612,9 +590,9 @@ paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res)
   try {
     const requestedChainId = Number(req.query.chainId ?? req.query.chain_id);
     const preferredSyncChainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : null;
-    if (req.query.syncDirect !== "0") {
+    if (req.query.syncDirect === "1") {
       await syncMerchantDirectActivity(req.merchant, preferredSyncChainId).catch((error) => {
-        console.warn("[direct-sync:stats]", error?.message || error);
+        logSeraOperationFailure("direct-sync/stats", error);
       });
     }
     let txs = await getMerchantTransactions(req.merchant.id, 1000);
@@ -645,7 +623,7 @@ paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res)
     }
     const dailyVolume = Array.from(dailyMap.entries()).map(([date, volume]) => ({ date, volume: volume.toFixed(6) }));
     res.json({ totalCount, confirmedCount, pendingCount, unverifiedCount, totalVolume, dailyVolume });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 // In-memory SSE clients per merchant: merchantId → Set<Response>
@@ -774,7 +752,7 @@ paymentRouter.get("/merchant/events/poll", requireApiKey as any, async (req: any
       } catch {}
     }
     res.json({ events: [...events, ...dbEvents], serverTime: Date.now() });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/merchant/transactions — list transactions */
@@ -784,9 +762,9 @@ paymentRouter.get("/merchant/transactions", requireApiKey as any, async (req: an
     const offset = parseInt(req.query.offset as string) || 0;
     const requestedChainId = Number(req.query.chainId ?? req.query.chain_id);
     const preferredSyncChainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : null;
-    if (req.query.syncDirect !== "0") {
+    if (req.query.syncDirect === "1") {
       await syncMerchantDirectActivity(req.merchant, preferredSyncChainId).catch((error) => {
-        console.warn("[direct-sync]", error?.message || error);
+        logSeraOperationFailure("direct-sync", error);
       });
     }
     let txs = await getMerchantTransactions(req.merchant.id, limit, offset);
@@ -796,7 +774,7 @@ paymentRouter.get("/merchant/transactions", requireApiKey as any, async (req: an
       txs = txs.filter((tx) => Number(tx.chainId ?? 11155111) === requestedChainId);
     }
     res.json({ transactions: txs.map(transactionToJson), pagination: { limit, offset } });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** PATCH /api/merchant/transactions/:id/notes — update notes/memo on a transaction */
@@ -809,7 +787,7 @@ paymentRouter.patch("/merchant/transactions/:id/notes", requireApiKey as any, as
     if (tx.merchantId !== req.merchant.id) { res.status(403).json({ error: "Forbidden" }); return; }
     await updateTransaction(id, { notes: notes ?? tx.notes, memo: memo ?? tx.memo });
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** PATCH /api/merchant/transactions/:id/cancel — cancel a pending payment request */
@@ -825,15 +803,18 @@ paymentRouter.patch("/merchant/transactions/:id/cancel", requireApiKey as any, a
     }
     await cancelTransactionRecord(tx, "Canceled by merchant.", "transaction_canceled");
     res.json({ ok: true, status: "canceled" });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 // ─── Payment endpoints ────────────────────────────────────────────────────────
 
 function toRawTokenAmount(amount: string, decimals: number): string {
   const normalized = amount.replace(/,/g, "").trim();
-  if (!/^\d+(\.\d{1,6})?$/.test(normalized)) throw new Error("Invalid amount. Max 6 decimals.");
+  if (!/^\d+(\.\d+)?$/.test(normalized)) throw new Error("Invalid token amount.");
   const [whole, fraction = ""] = normalized.split(".");
+  if (fraction.length > decimals) {
+    throw new Error(`Invalid amount. ${decimals} decimal places maximum for this token.`);
+  }
   const raw = `${whole}${fraction.padEnd(decimals, "0").slice(0, decimals)}`.replace(/^0+(?=\d)/, "");
   return raw || "0";
 }
@@ -868,11 +849,40 @@ async function resolvePaymentMerchant(merchantAddress: string) {
   return { merchant, subWallet, toAddress: toAddress.toLowerCase() };
 }
 
+const paymentTokenRegistryCache = new Map<string, { expiresAt: number; tokens: SeraToken[]; request?: Promise<SeraToken[]> }>();
+
+async function getPaymentTokenRegistry(baseUrl: string): Promise<SeraToken[]> {
+  const key = normalizeSeraBaseUrl(baseUrl);
+  const cached = paymentTokenRegistryCache.get(key);
+  if (cached?.tokens.length && cached.expiresAt > Date.now()) return cached.tokens;
+  if (cached?.request) return cached.request;
+
+  const request = getSeraTokens(key)
+    .then((registry) => {
+      const tokens = registry.tokens.filter((token) => /^0x[0-9a-fA-F]{40}$/.test(token.address));
+      paymentTokenRegistryCache.set(key, { tokens, expiresAt: Date.now() + 30_000 });
+      return tokens;
+    })
+    .catch((error) => {
+      paymentTokenRegistryCache.delete(key);
+      throw error;
+    });
+  paymentTokenRegistryCache.set(key, { tokens: cached?.tokens ?? [], expiresAt: cached?.expiresAt ?? 0, request });
+  return request;
+}
+
 async function resolveSeraTokenBySymbol(baseUrl: string, symbol: string): Promise<SeraToken> {
-  const registry = await getSeraTokens(baseUrl);
-  const token = registry.tokens.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase());
+  const registry = await getPaymentTokenRegistry(baseUrl);
+  const token = registry.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase());
   if (!token) throw new Error(`Unsupported Sera token: ${symbol}`);
   return token;
+}
+
+async function resolveSeraTokenForChain(chainId: number, symbol: string): Promise<SeraToken> {
+  if (chainId !== SERA_MAINNET_CHAIN_ID && chainId !== SERA_TESTNET_CHAIN_ID) {
+    throw new Error(`Sera payments are not supported on chain ${chainId}`);
+  }
+  return resolveSeraTokenBySymbol(getSeraApiBaseUrlForChain(chainId), symbol);
 }
 
 function unwrapSeraQuote(raw: unknown): SeraSwapQuote {
@@ -902,6 +912,16 @@ function getPermitDeadline(permit: unknown): string | number | null {
   const message = typedData?.message as Record<string, unknown> | undefined;
   const deadline = value.deadline ?? value.permit_deadline ?? message?.deadline ?? message?.sigDeadline;
   return typeof deadline === "string" || typeof deadline === "number" ? deadline : null;
+}
+
+function getPermitApproval(permit: unknown, fallbackAmountRaw: string): { spender: string; amountRaw: string } | null {
+  if (!permit || typeof permit !== "object") return null;
+  const value = permit as Record<string, unknown>;
+  if (value.permit_supported !== false && value.permitSupported !== false) return null;
+  const spender = String(value.spender || "");
+  const amountRaw = String(value.value_raw ?? value.valueRaw ?? fallbackAmountRaw);
+  if (!/^0x[0-9a-fA-F]{40}$/.test(spender) || !/^\d+$/.test(amountRaw)) return null;
+  return { spender, amountRaw };
 }
 
 function extractTransactionHash(value: unknown): string | null {
@@ -1024,7 +1044,9 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
   const cutoff = Date.now() - PENDING_TRANSACTION_CANCEL_AFTER_MS;
   let canceled = 0;
   for (const tx of txs) {
-    if ((tx.status === "pending" || tx.status === "confirming") && new Date(tx.createdAt).getTime() <= cutoff) {
+    // "confirming" means a wallet transaction or Sera trade was already
+    // submitted. Never auto-cancel submitted money just because settlement is slow.
+    if (tx.status === "pending" && new Date(tx.createdAt).getTime() <= cutoff) {
       if (await cancelTransactionRecord(tx, "Auto-canceled after 5 minutes without payment confirmation.", "transaction_auto_canceled")) {
         canceled += 1;
       }
@@ -1035,12 +1057,6 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
 
 function seraPaymentErrorResponse(error: unknown, fallback: string) {
   if (error instanceof SeraApiError) {
-    const detail = error.detail && typeof error.detail === "object" ? error.detail as Record<string, unknown> : null;
-    const humanDetail = typeof detail?.detail === "string"
-      ? detail.detail
-      : typeof detail?.message === "string"
-        ? detail.message
-        : null;
     const code = error.errorCode;
     const isQuoteStale = error.status === 409
       || error.status === 410
@@ -1048,31 +1064,39 @@ function seraPaymentErrorResponse(error: unknown, fallback: string) {
       || code === "quote_stale";
     const isUnavailable = error.status >= 500;
     const message = code === "no_liquidity" || code === "NO_LIQUIDITY"
-      ? "Currently there is no liquidity for this transaction. Please try a different payment coin."
+      ? "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."
       : isQuoteStale
         ? "This quote closed before it could be submitted. Please try again."
       : isUnavailable
         ? "Sera is temporarily unavailable. Please try again shortly."
-        : humanDetail || error.message;
+        : code === "AMOUNT_BELOW_MIN"
+          ? "This payment amount is below Sera's minimum for this currency pair."
+          : fallback;
     return {
       status: error.status >= 400 && error.status < 500 ? error.status : 502,
       body: {
         error: message,
         errorCode: isQuoteStale ? "quote_stale" : code ?? (isUnavailable ? "sera_connection_error" : null),
         seraStatus: error.status,
-        detail: error.detail,
       },
     };
   }
-  const detail = error instanceof Error ? error.message : fallback;
   return {
     status: 502,
     body: {
       error: "Unable to reach Sera right now. Please try again shortly.",
       errorCode: "sera_connection_error",
-      detail,
     },
   };
+}
+
+function logSeraOperationFailure(scope: string, error: unknown) {
+  if (error instanceof SeraApiError) {
+    if (error.errorCode === "no_liquidity" || error.errorCode === "NO_LIQUIDITY") return;
+    console.error(`[${scope}] failed`, { status: error.status, code: error.errorCode || "sera_api_error" });
+    return;
+  }
+  console.error(`[${scope}] failed`, { type: error instanceof Error ? error.name : "unknown_error" });
 }
 
 async function cancelAllStalePendingTransactions() {
@@ -1088,11 +1112,128 @@ async function cancelAllStalePendingTransactions() {
       await cancelStaleMerchantTransactions(merchantId, txs);
     }
   } catch (error) {
-    console.error("[payments] Failed to auto-cancel stale pending transactions", error);
+    logSeraOperationFailure("payments/auto-cancel", error);
   }
 }
 
 setInterval(() => { void cancelAllStalePendingTransactions(); }, 60_000);
+
+type SeraTrackedOrder = {
+  status?: string;
+  error?: string | null;
+  error_code?: string | null;
+  settlement_summary?: {
+    latest_tx_hash?: string | null;
+    latest_failed_fill_failure_reason?: string | null;
+  } | null;
+};
+
+async function reconcileSeraSwapTransaction(tx: Transaction): Promise<Transaction> {
+  if (tx.status !== "confirming") return tx;
+  let notes: Record<string, unknown>;
+  try {
+    notes = tx.notes ? JSON.parse(tx.notes) as Record<string, unknown> : {};
+  } catch {
+    return tx;
+  }
+  const tradeId = typeof notes.tradeId === "string" ? notes.tradeId : null;
+  if (notes.type !== "sera_swap" || !tradeId) return tx;
+
+  const config = await getApiKeyConfigRecord(tx.merchantId).catch(() => undefined);
+  const credential = decryptSecret(config?.seraApiKeyEncrypted) || ENV.seraApiKey || "";
+  if (!credential) return reconcileSeraSwapOnChain(tx, notes);
+
+  let order: SeraTrackedOrder;
+  try {
+    order = await callSeraApi<SeraTrackedOrder>({
+      baseUrl: getSeraApiBaseUrlForChain(tx.chainId),
+      path: `/orders/${encodeURIComponent(tradeId)}`,
+      credential,
+      authMode: "api_key",
+      merchantId: tx.merchantId,
+    });
+  } catch (error) {
+    logSeraOperationFailure("payment/swap/reconcile", error);
+    return reconcileSeraSwapOnChain(tx, notes);
+  }
+
+  const seraStatus = String(order.status || "pending").toLowerCase();
+  const txHash = order.settlement_summary?.latest_tx_hash;
+  const nextNotes = JSON.stringify({ ...notes, seraStatus, seraOrder: order });
+
+  if (seraStatus === "failed" || seraStatus === "cancelled") {
+    const reason = order.error || order.settlement_summary?.latest_failed_fill_failure_reason || order.error_code || `Sera swap ${seraStatus}`;
+    await updateTransaction(tx.id, { notes: nextNotes });
+    await failTransactionRecord({ ...tx, notes: nextNotes }, reason);
+    return await getTransactionById(tx.id) ?? tx;
+  }
+
+  if (seraStatus !== "settled") {
+    await updateTransaction(tx.id, { notes: nextNotes, ...(txHash && /^0x[0-9a-fA-F]{64}$/.test(txHash) ? { txHash } : {}) });
+    const refreshed = await getTransactionById(tx.id) ?? { ...tx, notes: nextNotes };
+    return reconcileSeraSwapOnChain(refreshed, { ...notes, seraStatus, seraOrder: order });
+  }
+
+  const verifiedHash = txHash && /^0x[0-9a-fA-F]{64}$/.test(txHash) ? txHash : tx.txHash;
+  await updateTransaction(tx.id, {
+    status: "confirmed",
+    verified: 1,
+    ...(verifiedHash ? { txHash: verifiedHash } : {}),
+    notes: nextNotes,
+    notifiedAt: new Date(),
+    webhookSentAt: new Date(),
+  });
+  const meta = transactionNotesMeta(tx.notes);
+  if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
+  if (meta.orderId) await updateMenuOrderPayment(meta.orderId, tx.merchantId, { status: "paid", paymentId: tx.id, transactionId: tx.id }).catch(() => undefined);
+  notifySseClients(tx.id, { status: "confirmed", txHash: verifiedHash, verified: true, tradeId });
+  notifyMerchantSse(tx.merchantId, {
+    event: "payment_received",
+    transactionId: tx.id,
+    txHash: verifiedHash,
+    amount: tx.amount,
+    coin: tx.coin,
+    payAmount: tx.payAmount,
+    payCoin: tx.payCoin,
+    from: tx.fromAddress,
+    verified: true,
+    source: "sera_swap",
+  });
+
+  const merchant = await getMerchantById(tx.merchantId);
+  if (merchant?.webhookUrl) {
+    sendWebhook(
+      merchant.webhookUrl,
+      merchant.webhookSecret,
+      {
+        event: "payment.confirmed",
+        txId: tx.id,
+        txHash: verifiedHash,
+        coin: tx.coin,
+        amount: tx.amount,
+        payCoin: tx.payCoin,
+        payAmount: tx.payAmount,
+        fromAddress: tx.fromAddress,
+        toAddress: tx.toAddress,
+        verified: true,
+        source: "sera_swap",
+        tradeId,
+      },
+      { merchantId: merchant.id, txId: tx.id, txHash: verifiedHash },
+    ).catch((error) => logSeraOperationFailure("payment-notification", error));
+  }
+  return await getTransactionById(tx.id) ?? tx;
+}
+
+function isSeraSwapTransaction(tx: Transaction): boolean {
+  if (!tx.notes) return false;
+  try {
+    const parsed = JSON.parse(tx.notes) as { type?: unknown };
+    return parsed.type === "sera_swap";
+  } catch {
+    return false;
+  }
+}
 
 /** POST /api/payment/create — create a pending payment request */
 paymentRouter.post("/payment/create", async (req, res) => {
@@ -1102,7 +1243,8 @@ paymentRouter.post("/payment/create", async (req, res) => {
     const paymentIntentId = typeof req.body.paymentIntentId === "string" ? req.body.paymentIntentId : null;
     const paymentUrl = typeof req.body.paymentUrl === "string" && req.body.paymentUrl.length <= 4096 ? req.body.paymentUrl : null;
     if (!merchantAddress || !/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
-    if (!coin || !VALID_COINS.has(coin)) { res.status(400).json({ error: "Invalid coin" }); return; }
+    const coinSymbol = String(coin || "").trim().toUpperCase();
+    if (!COIN_SYMBOL_RE.test(coinSymbol)) { res.status(400).json({ error: "Invalid coin" }); return; }
     let normalizedAmount = "";
     try {
       normalizedAmount = normalizeDecimalAmount(amount);
@@ -1131,12 +1273,20 @@ paymentRouter.post("/payment/create", async (req, res) => {
       res.status(403).json({ error: "Recipient address failed compliance screening", compliance: toAddressCompliance });
       return;
     }
-    const resolvedChainId = chainId || 11155111;
+    const resolvedChainId = Number(chainId || SERA_TESTNET_CHAIN_ID);
+    let paymentToken: SeraToken;
+    try {
+      paymentToken = await resolveSeraTokenForChain(resolvedChainId, coinSymbol);
+      toRawTokenAmount(normalizedAmount, paymentToken.decimals);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : "Unsupported coin on this network" });
+      return;
+    }
     await createTransaction({
       id,
       merchantId: merchant.id,
       toAddress,
-      coin,
+      coin: coinSymbol,
       amount: normalizedAmount,
       chainId: resolvedChainId,
       status: "pending",
@@ -1155,8 +1305,16 @@ paymentRouter.post("/payment/create", async (req, res) => {
     if (paymentIntentId) {
       await updatePaymentIntent(paymentIntentId, { status: "open" }).catch(() => undefined);
     }
-    res.json({ txId: id, toAddress, coin, amount: normalizedAmount, chainId: resolvedChainId });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+    res.json({
+      txId: id,
+      toAddress,
+      coin: coinSymbol,
+      amount: normalizedAmount,
+      chainId: resolvedChainId,
+      tokenAddress: paymentToken.address,
+      tokenDecimals: paymentToken.decimals,
+    });
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** POST /api/payment/swap/quote - Sera quote for customer coin -> merchant receive coin */
@@ -1179,15 +1337,11 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     const chainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : 1;
     const paymentIntentId = typeof req.body.paymentIntentId === "string" ? req.body.paymentIntentId : null;
     const orderId = typeof req.body.orderId === "string" ? req.body.orderId : null;
-    const nowSec = Math.floor(Date.now() / 1000);
     const requestedExpiration = Number(req.body.expiration);
-    const expiration = Number.isInteger(requestedExpiration) && requestedExpiration > nowSec + 15
-      ? Math.min(requestedExpiration, nowSec + 300)
-      : nowSec + 300;
 
     if (!/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     if (!/^0x[0-9a-fA-F]{40}$/.test(payerAddress)) { res.status(400).json({ error: "Invalid payerAddress" }); return; }
-    if (!VALID_COINS.has(payCoin) || !VALID_COINS.has(receiveCoin)) { res.status(400).json({ error: "Invalid coin" }); return; }
+    if (!COIN_SYMBOL_RE.test(payCoin) || !COIN_SYMBOL_RE.test(receiveCoin)) { res.status(400).json({ error: "Invalid coin" }); return; }
     if (payCoin === receiveCoin) { res.status(400).json({ error: "Sera swap quote requires different pay and receive coins." }); return; }
 
     const payerCompliance = await screenWalletAddress(payerAddress, "payer_wallet");
@@ -1204,12 +1358,21 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     }
 
     const baseUrl = getSeraApiBaseUrlForChain(chainId);
-    const [fromToken, toToken, config] = await Promise.all([
+    const [fromToken, toToken, config, seraNowSec] = await Promise.all([
       resolveSeraTokenBySymbol(baseUrl, payCoin),
       resolveSeraTokenBySymbol(baseUrl, receiveCoin),
       callSeraApi<SeraConfigResponse>({ baseUrl, path: "/config", authMode: "none" }),
+      getSeraServerTimestamp(baseUrl, merchant.id),
     ]);
     if (!config.eip712_domain) throw new Error("Sera /config did not return eip712_domain");
+    if (config.chain_id !== chainId) {
+      throw new Error(`Sera /config returned chain ${config.chain_id ?? "unknown"}, expected ${chainId}`);
+    }
+    // Sera explicitly requires deadlines to be based on GET /system/time.
+    // This avoids rejecting otherwise valid payments when a phone clock drifts.
+    const expiration = Number.isInteger(requestedExpiration) && requestedExpiration > seraNowSec + 15
+      ? Math.min(requestedExpiration, seraNowSec + 300)
+      : seraNowSec + 300;
 
     const quoteRequest = {
       from_token: fromToken.address,
@@ -1218,56 +1381,110 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       owner_address: payerAddress,
       recipient: toAddress,
       expiration,
-      gas_mode: "receive_less",
+      // A payment must preserve what the merchant receives. Sera adds the
+      // execution cost to the customer's maximum input instead of subtracting
+      // it from the merchant's output.
+      gas_mode: "pay_more",
     };
-    const rawQuote = await callSeraApi<unknown>({
-      baseUrl,
-      path: "/swap/quote",
-      method: "POST",
-      body: quoteRequest,
-      authMode: "none",
-      merchantId: merchant.id,
-    });
-    const quote = unwrapSeraQuote(rawQuote);
-    const routeParams = getRouteParams(quote);
-    const quoteUuid = quote.uuid ?? routeParams.uuid;
-    const expectedReceiveAmount = requestedReceiveAmount ?? fromRawTokenAmount(routeParams.minOutputAmount, toToken.decimals);
-    const txId = uuidv4();
-
-    await createTransaction({
-      id: txId,
-      merchantId: merchant.id,
-      fromAddress: payerAddress,
-      toAddress,
-      coin: receiveCoin,
-      amount: expectedReceiveAmount,
-      chainId: config.chain_id ?? chainId,
-      status: "pending",
-      verified: 0,
-      payCoin,
-      payAmount,
-      notes: JSON.stringify({
-        type: "sera_swap_quote",
-        quoteUuid,
-        paymentIntentId,
-        orderId,
-        payToken: fromToken.address,
-        receiveToken: toToken.address,
-        chainId,
-        expiresAt: quote.expires_at ?? null,
-      }),
-    });
-    if (orderId) {
-      await updateMenuOrderPayment(orderId, merchant.id, { paymentId: txId, paymentIntentId, transactionId: txId, status: "payment_pending" }).catch(() => undefined);
+    const requestQuote = async () => unwrapSeraQuote(await callSeraApi<unknown>({
+        baseUrl,
+        path: "/swap/quote",
+        method: "POST",
+        body: quoteRequest,
+        authMode: "none",
+        merchantId: merchant.id,
+      }));
+    let quote = await requestQuote();
+    let routeParams = getRouteParams(quote);
+    if (requestedReceiveAmount) {
+      const requestedOutputRaw = BigInt(toRawTokenAmount(requestedReceiveAmount, toToken.decimals));
+      const quotedOutputRaw = BigInt(String(routeParams.minOutputAmount));
+      if (quotedOutputRaw <= 0n) throw new Error("Sera quote returned no output");
+      if (quotedOutputRaw < requestedOutputRaw) {
+        const currentInputRaw = BigInt(quoteRequest.from_amount);
+        // Round up proportionally, then add a small buffer for quote refresh
+        // movement so the merchant amount is not underpaid by token rounding.
+        const adjustedInputRaw = ((currentInputRaw * requestedOutputRaw + quotedOutputRaw - 1n) / quotedOutputRaw * 1001n + 999n) / 1000n;
+        quoteRequest.from_amount = adjustedInputRaw.toString();
+        quote = await requestQuote();
+        routeParams = getRouteParams(quote);
+        if (BigInt(String(routeParams.minOutputAmount)) < requestedOutputRaw) {
+          throw new Error("Sera quote cannot currently cover the merchant receive amount");
+        }
+      }
     }
+    const quoteUuid = quote.uuid ?? routeParams.uuid;
+    // SeraSOR's IntentMatched event emits the EIP-712 struct hash (before the
+    // domain separator), so persist exactly that value for public on-chain
+    // settlement reconciliation.
+    const intentHash = hashSeraIntentStruct(routeParams);
+    const expectedReceiveAmount = requestedReceiveAmount ?? fromRawTokenAmount(routeParams.minOutputAmount, toToken.decimals);
+    const maximumPayAmount = fromRawTokenAmount(routeParams.maxInputAmount, fromToken.decimals);
+    const approval = getPermitApproval(quote.permit, routeParams.maxInputAmount);
+    if (approval && (!config.sor_address || approval.spender.toLowerCase() !== config.sor_address.toLowerCase())) {
+      throw new Error("Sera quote approval target does not match the live SOR contract");
+    }
+    const requestedTxId = typeof req.body.txId === "string" ? req.body.txId.trim() : "";
+    const txId = requestedTxId || uuidv4();
+    const transactionNotes = JSON.stringify({
+      type: "sera_swap_quote",
+      quoteUuid,
+      intentHash,
+      paymentIntentId,
+      orderId,
+      payToken: fromToken.address,
+      receiveToken: toToken.address,
+      chainId,
+      expiresAt: quote.expires_at ?? null,
+      requestedPayAmount: payAmount,
+    });
 
+    if (requestedTxId) {
+      const existing = await getTransactionById(requestedTxId);
+      const samePayment = existing
+        && existing.status === "pending"
+        && existing.merchantId === merchant.id
+        && existing.fromAddress?.toLowerCase() === payerAddress
+        && existing.toAddress.toLowerCase() === toAddress.toLowerCase()
+        && existing.coin === receiveCoin
+        && existing.payCoin === payCoin
+        && existing.chainId === (config.chain_id ?? chainId);
+      if (!samePayment) {
+        res.status(409).json({ error: "The previous Sera quote can no longer be refreshed.", errorCode: "quote_stale" });
+        return;
+      }
+      await updateTransaction(txId, {
+        amount: expectedReceiveAmount,
+        payAmount: maximumPayAmount,
+        notes: transactionNotes,
+      });
+    } else {
+      await createTransaction({
+        id: txId,
+        merchantId: merchant.id,
+        fromAddress: payerAddress,
+        toAddress,
+        coin: receiveCoin,
+        amount: expectedReceiveAmount,
+        chainId: config.chain_id ?? chainId,
+        status: "pending",
+        verified: 0,
+        payCoin,
+        payAmount: maximumPayAmount,
+        notes: transactionNotes,
+      });
+      if (orderId) {
+        await updateMenuOrderPayment(orderId, merchant.id, { paymentId: txId, paymentIntentId, transactionId: txId, status: "payment_pending" }).catch(() => undefined);
+      }
+    }
     res.json({
       txId,
       chainId: config.chain_id ?? chainId,
       toAddress,
       payCoin,
       receiveCoin,
-      payAmount,
+      payAmount: maximumPayAmount,
+      requestedPayAmount: payAmount,
       expectedReceiveAmount,
       quoteUuid,
       quote,
@@ -1279,6 +1496,9 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       },
       permitTypedData: getPermitTypedData(quote.permit),
       permitDeadline: getPermitDeadline(quote.permit),
+      approvalRequired: Boolean(approval),
+      approvalSpender: approval?.spender ?? null,
+      approvalAmountRaw: approval?.amountRaw ?? null,
       request: {
         ...quoteRequest,
         from_symbol: payCoin,
@@ -1286,7 +1506,7 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       },
     });
   } catch (e: any) {
-    console.error("[payment/swap/quote]", e?.message || e);
+    logSeraOperationFailure("payment/swap/quote", e);
     const response = seraPaymentErrorResponse(e, "Unable to create Sera swap quote");
     res.status(response.status).json(response.body);
   }
@@ -1334,6 +1554,9 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     notifySseClients(txId, { status: "confirming" });
 
     const baseUrl = getSeraApiBaseUrlForChain(tx.chainId);
+    const submittedBlockNumber = await CHAIN_CLIENTS[tx.chainId]?.getBlockNumber()
+      .then((blockNumber: bigint) => blockNumber.toString())
+      .catch(() => null);
     const result = await callSeraApi<Record<string, unknown>>({
       baseUrl,
       path: "/swap",
@@ -1343,9 +1566,22 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       merchantId: tx.merchantId,
     });
 
-    const success = result.success !== false;
+    const tradeId = typeof result.trade_id === "string" ? result.trade_id : null;
+    const seraStatus = typeof result.status === "string" ? result.status.toLowerCase() : "pending";
+    const success = result.success === true && Boolean(tradeId);
     const txHash = extractTransactionHash(result);
-    const notes = `${tx.notes ? `${tx.notes}\n` : ""}Sera swap submit response: ${JSON.stringify(result).slice(0, 1500)}`;
+    let existingNotes: Record<string, unknown> = {};
+    try {
+      existingNotes = tx.notes ? JSON.parse(tx.notes) as Record<string, unknown> : {};
+    } catch {}
+    const notes = JSON.stringify({
+      ...existingNotes,
+      type: "sera_swap",
+      tradeId,
+      seraStatus,
+      submittedBlockNumber,
+      seraSubmitResponse: result,
+    });
 
     if (!success) {
       await updateTransaction(txId, { status: "failed", notes });
@@ -1353,6 +1589,26 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "failed", paymentId: txId, transactionId: txId }).catch(() => undefined);
       notifySseClients(txId, { status: "failed" });
       res.status(502).json({ success: false, status: "failed", sera: result });
+      return;
+    }
+
+    if (seraStatus !== "settled") {
+      await updateTransaction(txId, {
+        status: "confirming",
+        verified: 0,
+        ...(txHash ? { txHash } : {}),
+        notes,
+        notifiedAt: new Date(),
+      });
+      const orderId = orderIdFromTransactionNotes(tx.notes);
+      if (orderId) {
+        await updateMenuOrderPayment(orderId, tx.merchantId, { status: "payment_submitted", paymentId: txId, transactionId: txId }).catch(() => undefined);
+      }
+      notifySseClients(txId, { status: "confirming", txHash, tradeId });
+      void getTransactionById(txId)
+        .then((fresh) => fresh ? reconcileSeraSwapTransaction(fresh) : undefined)
+        .catch((error) => logSeraOperationFailure("payment/swap/reconcile", error));
+      res.json({ success: true, status: "confirming", tradeId, txHash, sera: result });
       return;
     }
 
@@ -1412,18 +1668,18 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
           source: "sera_swap",
         },
         { merchantId: merchant.id, txId, txHash }
-      ).catch(console.error);
+      ).catch((error) => logSeraOperationFailure("payment-notification", error));
     }
 
     res.json({ success: true, status: "confirmed", txHash, sera: result });
   } catch (e: any) {
-    console.error("[payment/swap/submit]", e?.message || e);
+    const response = seraPaymentErrorResponse(e, "Unable to submit Sera swap");
+    logSeraOperationFailure("payment/swap/submit", e);
     if (txForFailure) {
-      await failTransactionRecord(txForFailure, e?.message || "Sera swap submit failed").catch((failError) => {
-        console.error("[payment/swap/submit] failed to update transaction status", failError);
+      await failTransactionRecord(txForFailure, response.body.error).catch((failError) => {
+        logSeraOperationFailure("payment/swap/status-update", failError);
       });
     }
-    const response = seraPaymentErrorResponse(e, "Unable to submit Sera swap");
     res.status(response.status).json(response.body);
   }
 });
@@ -1462,10 +1718,11 @@ paymentRouter.post("/payment/notify", async (req, res) => {
       throw dbErr;
     }
     notifySseClients(txId, { status: "confirming", txHash });
-    // Fire-and-forget verification
-    verifyTransactionAsync(txId, txHash as `0x${string}`).catch(console.error);
+    // Fire-and-forget verification. The in-flight guard prevents duplicate
+    // receipt watchers when the browser polls status at the same time.
+    scheduleTransactionVerification(txId, txHash as `0x${string}`);
     res.json({ success: true, status: "confirming" });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/payment/status/:txId — poll payment status */
@@ -1473,6 +1730,12 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
   try {
     let tx = await getTransactionById(req.params.txId);
     if (!tx) { res.status(404).json({ error: "Not found" }); return; }
+    if (tx.status === "confirming") {
+      tx = await reconcileSeraSwapTransaction(tx);
+      if (tx.status === "confirming" && tx.txHash && !isSeraSwapTransaction(tx)) {
+        scheduleTransactionVerification(tx.id, tx.txHash as `0x${string}`);
+      }
+    }
     const canceled = await cancelStaleMerchantTransactions(tx.merchantId, [tx]);
     if (canceled > 0) tx = await getTransactionById(req.params.txId);
     if (!tx) { res.status(404).json({ error: "Not found" }); return; }
@@ -1494,7 +1757,7 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
       merchantLogo: merchant?.logoData || null,
       merchantDescription: (merchant as any)?.description || null,
     });
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/payment/events/:txId — SSE stream for real-time status */
@@ -1527,11 +1790,16 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
       : null;
 
     if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) { res.status(400).json({ error: "Invalid receiver wallet" }); return; }
-    if (!VALID_COINS.has(coin)) { res.status(400).json({ error: "Unsupported coin" }); return; }
+    if (!COIN_SYMBOL_RE.test(coin)) { res.status(400).json({ error: "Unsupported coin" }); return; }
     if (!/^\d+(\.\d{1,6})?$/.test(amount) || Number(amount) <= 0) { res.status(400).json({ error: "Invalid amount" }); return; }
     const client = CHAIN_CLIENTS[chainId];
     if (!client) { res.status(400).json({ error: "Unsupported chain" }); return; }
-    if (!COIN_CONTRACTS[coin]?.[chainId]) { res.status(400).json({ error: "Unsupported coin on this network" }); return; }
+    try {
+      await resolveSeraTokenForChain(chainId, coin);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : "Unsupported coin on this network" });
+      return;
+    }
 
     let latestBlock: bigint;
     try {
@@ -1540,16 +1808,23 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
       res.json({ status: "pending", fromBlock: requestedFromBlock?.toString() ?? null, warning: "Scanner RPC is temporarily slow" });
       return;
     }
-    const fromBlock = requestedFromBlock ?? (latestBlock > 3n ? latestBlock - 3n : 0n);
+    const minimumFromBlock = latestBlock > 49n ? latestBlock - 49n : 0n;
+    const requestedStart = requestedFromBlock ?? (latestBlock > 3n ? latestBlock - 3n : 0n);
+    // Clamp every request to the provider-safe 50-block inclusive window.
+    const fromBlock = requestedStart < minimumFromBlock
+      ? minimumFromBlock
+      : requestedStart > latestBlock
+        ? latestBlock
+        : requestedStart;
     let match: Awaited<ReturnType<typeof findDirectTransfer>> | null = null;
     try {
-      match = await withDirectScanTimeout(findDirectTransfer({ toAddress, coin, amount, chainId, fromBlock }), 8000);
+      match = await withDirectScanTimeout(findDirectTransfer({ toAddress, coin, amount, chainId, fromBlock, toBlock: latestBlock }), 8000);
     } catch {
       res.json({ status: "pending", fromBlock: fromBlock.toString(), latestBlock: latestBlock.toString(), warning: "Scanner RPC is temporarily slow" });
       return;
     }
     if (!match?.txHash) {
-      res.json({ status: "pending", fromBlock: fromBlock.toString(), latestBlock: (match?.latestBlock ?? latestBlock).toString() });
+      res.json({ status: "pending", fromBlock: (latestBlock + 1n).toString(), latestBlock: latestBlock.toString() });
       return;
     }
 
@@ -1571,8 +1846,8 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
       created: recorded.created,
     });
   } catch (e: any) {
-    console.error("[payment/direct/scan]", e?.message || e);
-    res.status(500).json({ error: e?.message || "Unable to scan direct payment" });
+    logSeraOperationFailure("payment/direct/scan", e);
+    res.status(500).json({ error: "Unable to scan direct payment" });
   }
 });
 
@@ -1602,106 +1877,16 @@ const ERC20_ABI = parseAbi([
   "function decimals() view returns (uint8)",
 ]);
 const ERC20_TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
+const SERA_INTENT_MATCHED_EVENT = parseAbiItem("event IntentMatched(bytes32 indexed intentHash, address indexed taker, uint256 legCount)");
 
 // Sepolia USDC contract address (Circle's official)
-const COIN_CONTRACTS: Record<string, Record<number, `0x${string}`>> = {
-  // USD
-  USDC: {
-    1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    137: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-    8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
-    11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-  },
-  USDT: {
-    1: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-    137: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
-    42161: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
-    11155111: "0x1920bf0643ae49B4fB334586dAd6Bed29fF30F88",
-  },
-  // EUR
-  EURC: {
-    1: "0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c",
-    8453: "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",
-    11155111: "0xd3BdB2CE9cD98566EFc2e2977448c40578371779",
-  },
-  EURT: { 11155111: "0x47230df72231f594C5c598635dD92849C11532D0" },
-  TNEUR: { 11155111: "0xe4AF44eF7ce074F8FA94131035108201A5ac2F3a" },
-  VEUR: { 11155111: "0x4AbcbC7C307baCF5AdbFc57E822658F5D917Ca1E" },
-  // GBP
-  GBPA: { 11155111: "0xD685BC15a53bbb624B98Ebf97B357DB8e0DA4A23" },
-  TGBP: { 11155111: "0xA26f1088f41714B696d0e7b117FA9cbd810bbE8B" },
-  VGBP: { 11155111: "0x01d8b6E34a57573Ff48d49fA047b45054f939eDa" },
-  // SGD
-  XSGD: {
-    1: "0x70e8dE73cE538DA2bEEd35d14187F6959a8ecA96",
-    137: "0xDC3326e71D45186F113a2F448984CA0e8D201995",
-    11155111: "0x1Fe69B1171d8aA5e6d432F14A9E4129ED96E40C0",
-  },
-  TNSGD: { 11155111: "0x4638F8eB9F2047Ab18d70E12539E0B16fF2998A2" },
-  // JPY
-  GYEN: { 11155111: "0xA39c3648Cd2b5a183Af33Dcc30af6799A13aD7aE" },
-  JPYC: { 11155111: "0x2C9e4Db557af394f1F21d1E1E6754a7CB1eC1D01" },
-  // AUD
-  AUDD: { 11155111: "0x03A8D551Bf1d708471064aA97FeA004a45Ed8CF3" },
-  AUDF: { 11155111: "0x06dCE1A62f5D3188d016e640F3a9dd3bB26f9431" },
-  // CAD
-  CADC: { 11155111: "0xaE64cEB804292F737C28e0Bd552d929041662970" },
-  QCAD: { 11155111: "0x3BDB8BE37Ad586852ad005C5a0885211CD803250" },
-  // BRL
-  BRLA: { 11155111: "0x6B5256523aCD840aE97AeDE492cB31a5D500Fdf9" },
-  BRZ: { 11155111: "0x1B7fA411238bf745138a59Cbd90Fb8480D85c130" },
-  // KRW
-  KRW1: { 11155111: "0x01943628c3E70A4F39CE905e8fea56E7A8a357F8" },
-  KRWO: { 11155111: "0x4C16AF20C7f8a841397273955c6451F4fEB6a576" },
-  KRWIN: { 11155111: "0xCE2dDC28068b3929ECF9787ec47284A9e3a62B3a" },
-  // IDR
-  IDRX: { 11155111: "0x258f1E146b8Bd0dEcf54bAD8f1f01fE69025601c" },
-  IDRT: { 11155111: "0x26db12e7cB7Be8Ab22a97B7e4c3d33C0bfE89e82" },
-  XIDR: { 11155111: "0xe02bbf861736147e1506d07239d7f2D291FB39fC" },
-  // CHF
-  CCHF: { 11155111: "0xA6B42B17219C854E4a44F40ed93d15A5FD88676E" },
-  VCHF: { 11155111: "0x1e7Fd8256Cff4C61519e9E7E5E9d0496a14b0D5B" },
-  // MXN
-  MXNB: { 11155111: "0x510139cC0B118711ACCf9ec476b3093dF0BBb1FC" },
-  MXNT: { 11155111: "0x6750EEC6a189BCBc4a9A52EE285b525c8D1940f3" },
-  // NZD
-  NZDD: { 11155111: "0x2cDc20d7eFEe786d28529ecC8a0A491Bee84b207" },
-  NZDS: { 11155111: "0xA6DA6F948F6C95D4D6525856208B1A267a37c905" },
-  // THB
-  THBK: { 11155111: "0x696451A335EB929934a1020Db4ED655f33765802" },
-  THBT: { 11155111: "0x5e875193255BfE0557701DceB01831C7bDFa910b" },
-  // ZAR
-  ZARP: { 11155111: "0x409667Ce4E4674E9fB8272774AAbFfBB7c8956a4" },
-  ZARU: { 11155111: "0x721CB3e2B0BA43b0a51f2179b7D260DD98d4BAF1" },
-  // Other
-  ARC: { 11155111: "0xDbb492152eBd689ceF184C17e6F65AB18DCDe627" },
-  MYRT: {
-    1: "0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f",
-    11155111: "0x68077f53a6562D42051C86b09160EA577f3C7476",
-  },
-  TRYB: { 11155111: "0x0d2968Dc1b9EC131bEcaB8e28193e81Bcd63040c" },
-  PHPC: { 11155111: "0x9aA087afD8C3EadA4f52Dfe61aaC507Bf845BC29" },
-  HKDR: { 11155111: "0x40ad01c5ade2a9202D110C621919D0a2b147EB97" },
-  CNHT: { 11155111: "0x8f3F6bE3f2545d5d90275f0dA98980264F6a8913" },
-  ARZ: { 11155111: "0x3A2498C86Db0e4a2E8766649f368cBD37Fe6D52a" },
-  CNGN: { 11155111: "0x82167feCbB10C496F75afcD933DC0E23891E1CF3" },
-  A7A5: { 11155111: "0xEf6182c0DB1466b4B24608360bEf8376A6A0578d" },
-};
-
 const ALCHEMY_API_KEY = ENV.alchemyApiKey;
 const ALCHEMY_HTTP_URLS: Record<number, string> = {
   1: "https://eth-mainnet.g.alchemy.com/v2",
-  137: "https://polygon-mainnet.g.alchemy.com/v2",
-  8453: "https://base-mainnet.g.alchemy.com/v2",
-  42161: "https://arb-mainnet.g.alchemy.com/v2",
   11155111: "https://eth-sepolia.g.alchemy.com/v2",
 };
 const PUBLIC_RPC_URLS: Record<number, string[]> = {
   1: ["https://ethereum.publicnode.com", "https://eth.llamarpc.com", "https://1rpc.io/eth"],
-  137: ["https://polygon-bor-rpc.publicnode.com", "https://polygon.llamarpc.com", "https://1rpc.io/matic"],
-  8453: ["https://base-rpc.publicnode.com", "https://base.llamarpc.com", "https://1rpc.io/base"],
-  42161: ["https://arbitrum-one-rpc.publicnode.com", "https://arbitrum.llamarpc.com", "https://1rpc.io/arb"],
   11155111: ["https://ethereum-sepolia-rpc.publicnode.com", "https://sepolia.drpc.org"],
 };
 
@@ -1727,19 +1912,155 @@ const sepoliaWsClient = ALCHEMY_API_KEY
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const CHAIN_CLIENTS: Record<number, any> = {
   1:        createPublicClient({ chain: mainnet,  transport: rpcHttpTransport(1) }),
-  137:      createPublicClient({ chain: polygon,  transport: rpcHttpTransport(137) }),
-  8453:     createPublicClient({ chain: base,     transport: rpcHttpTransport(8453) }),
-  42161:    createPublicClient({ chain: arbitrum, transport: rpcHttpTransport(42161) }),
   11155111: createPublicClient({ chain: sepolia,  transport: rpcHttpTransport(11155111) }),
 };
 
+const SERA_CHAIN_SCAN_INTERVAL_MS = 8_000;
+const SERA_CHAIN_SCAN_CHUNK_SIZE = 49n;
+const SERA_CHAIN_SCAN_MAX_BLOCKS = SERA_CHAIN_SCAN_CHUNK_SIZE * 10n;
+const seraChainScanState = new Map<string, { lastFinishedAt: number; promise: Promise<Transaction> | null }>();
+
+function parseStoredBlockNumber(value: unknown): bigint | null {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") return null;
+  try {
+    const blockNumber = BigInt(value);
+    return blockNumber >= 0n ? blockNumber : null;
+  } catch {
+    return null;
+  }
+}
+
+async function performSeraSwapOnChainReconciliation(tx: Transaction, notes: Record<string, unknown>): Promise<Transaction> {
+  const intentHash = typeof notes.intentHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(notes.intentHash)
+    ? notes.intentHash as `0x${string}`
+    : null;
+  const client = CHAIN_CLIENTS[Number(tx.chainId)];
+  if (!intentHash || !client) return tx;
+
+  const baseUrl = getSeraApiBaseUrlForChain(tx.chainId);
+  const [config, token] = await Promise.all([
+    callSeraApi<SeraConfigResponse>({ baseUrl, path: "/config", authMode: "none", merchantId: tx.merchantId }),
+    resolveSeraTokenForChain(tx.chainId, tx.coin),
+  ]);
+  if (Number(config.chain_id) !== Number(tx.chainId)) return tx;
+  if (!config.sor_address || !/^0x[0-9a-fA-F]{40}$/.test(config.sor_address)) return tx;
+  if (!config.vault_address || !/^0x[0-9a-fA-F]{40}$/.test(config.vault_address)) return tx;
+
+  const latestBlock = BigInt(String(await withDirectScanTimeout(client.getBlockNumber(), 8_000)));
+  const submittedBlock = parseStoredBlockNumber(notes.submittedBlockNumber);
+  const lastScannedBlock = parseStoredBlockNumber(notes.seraLastScannedBlock);
+  let fromBlock = lastScannedBlock !== null
+    ? lastScannedBlock + 1n
+    : submittedBlock !== null
+      ? (submittedBlock > 2n ? submittedBlock - 2n : 0n)
+      : (latestBlock > SERA_CHAIN_SCAN_CHUNK_SIZE ? latestBlock - SERA_CHAIN_SCAN_CHUNK_SIZE : 0n);
+  if (fromBlock > latestBlock) return tx;
+
+  const scanToBlock = fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n < latestBlock
+    ? fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n
+    : latestBlock;
+  const expectedRawAmount = BigInt(toRawTokenAmount(String(tx.amount), token.decimals));
+
+  for (let chunkFrom = fromBlock; chunkFrom <= scanToBlock; chunkFrom += SERA_CHAIN_SCAN_CHUNK_SIZE) {
+    const chunkTo = chunkFrom + SERA_CHAIN_SCAN_CHUNK_SIZE - 1n < scanToBlock
+      ? chunkFrom + SERA_CHAIN_SCAN_CHUNK_SIZE - 1n
+      : scanToBlock;
+    const matchedLogs = await withDirectScanTimeout(client.getLogs({
+      address: config.sor_address.toLowerCase() as `0x${string}`,
+      event: SERA_INTENT_MATCHED_EVENT,
+      args: { intentHash },
+      fromBlock: chunkFrom,
+      toBlock: chunkTo,
+    }), 8_000);
+
+    for (const matchedLog of matchedLogs as any[]) {
+      const txHash = String(matchedLog.transactionHash || "").toLowerCase();
+      const blockNumber = parseStoredBlockNumber(matchedLog.blockNumber);
+      if (!/^0x[0-9a-f]{64}$/.test(txHash) || blockNumber === null) continue;
+
+      const payoutLogs = await withDirectScanTimeout(client.getLogs({
+        address: token.address.toLowerCase() as `0x${string}`,
+        event: ERC20_TRANSFER_EVENT,
+        args: {
+          from: config.vault_address.toLowerCase() as `0x${string}`,
+          to: tx.toAddress.toLowerCase() as `0x${string}`,
+        },
+        fromBlock: blockNumber,
+        toBlock: blockNumber,
+      }), 8_000);
+      const payout = (payoutLogs as any[]).find((log) => {
+        if (String(log.transactionHash || "").toLowerCase() !== txHash) return false;
+        try { return BigInt(String(log.args?.value ?? 0)) >= expectedRawAmount; } catch { return false; }
+      });
+      if (!payout) continue;
+
+      const alreadyRecorded = await getTransactionByHash(txHash);
+      if (alreadyRecorded && alreadyRecorded.id !== tx.id) {
+        console.warn("[payment/swap/reconcile-chain] Settlement hash already belongs to another payment");
+        return tx;
+      }
+      const merchant = await getMerchantById(tx.merchantId);
+      if (!merchant) return tx;
+
+      const rawPayout = BigInt(String(payout.args?.value ?? 0));
+      const settlementNotes = JSON.stringify({
+        ...notes,
+        seraStatus: "settled",
+        seraOnchainSettlement: {
+          intentHash,
+          txHash,
+          blockNumber: blockNumber.toString(),
+          payoutRaw: rawPayout.toString(),
+          verifiedAgainst: "IntentMatched+VaultTransfer",
+        },
+      });
+      await updateTransaction(tx.id, { notes: settlementNotes });
+      const pending = await getTransactionById(tx.id) ?? { ...tx, notes: settlementNotes };
+      return confirmPendingDirectTransfer({
+        pending,
+        merchant,
+        txHash: txHash as `0x${string}`,
+        fromAddress: tx.fromAddress,
+        toAddress: tx.toAddress,
+        coin: tx.coin,
+        amount: fromRawTokenAmount(rawPayout, token.decimals),
+        verified: true,
+      });
+    }
+  }
+
+  const current = await getTransactionById(tx.id) ?? tx;
+  let currentNotes = notes;
+  try { currentNotes = current.notes ? JSON.parse(current.notes) as Record<string, unknown> : notes; } catch {}
+  await updateTransaction(tx.id, {
+    notes: JSON.stringify({ ...currentNotes, seraLastScannedBlock: scanToBlock.toString() }),
+  });
+  return await getTransactionById(tx.id) ?? current;
+}
+
+async function reconcileSeraSwapOnChain(tx: Transaction, notes: Record<string, unknown>): Promise<Transaction> {
+  if (tx.status !== "confirming") return tx;
+  const existing = seraChainScanState.get(tx.id);
+  if (existing?.promise) return existing.promise;
+  if (existing && Date.now() - existing.lastFinishedAt < SERA_CHAIN_SCAN_INTERVAL_MS) return tx;
+
+  const promise = performSeraSwapOnChainReconciliation(tx, notes).catch((error) => {
+    logSeraOperationFailure("payment/swap/reconcile-chain", error);
+    return tx;
+  });
+  seraChainScanState.set(tx.id, { lastFinishedAt: existing?.lastFinishedAt ?? 0, promise });
+  try {
+    return await promise;
+  } finally {
+    seraChainScanState.set(tx.id, { lastFinishedAt: Date.now(), promise: null });
+  }
+}
+
 const DIRECT_SYNC_INTERVAL_MS = 30_000;
 const DIRECT_SYNC_LOOKBACK_BLOCKS: Record<number, bigint> = {
-  1: 7200n,
-  137: 45_000n,
-  8453: 45_000n,
-  42161: 60_000n,
-  11155111: 7200n,
+  // Public RPC providers commonly cap eth_getLogs at 50 inclusive blocks.
+  1: 49n,
+  11155111: 49n,
 };
 const directSyncState = new Map<string, { lastFinishedAt: number; promise: Promise<void> | null }>();
 
@@ -1761,31 +2082,24 @@ function uniqueEvmAddresses(addresses: Array<string | null | undefined>): string
   ));
 }
 
-function tokenSymbolsForChain(chainId: number): string[] {
-  return Object.entries(COIN_CONTRACTS)
-    .filter(([, byChain]) => Boolean(byChain[chainId]))
-    .map(([symbol]) => symbol);
-}
-
-function supportedChainsForCoin(coin: string | null | undefined): number[] {
-  const symbol = String(coin || "").trim().toUpperCase();
-  return symbol && COIN_CONTRACTS[symbol] ? Object.keys(COIN_CONTRACTS[symbol]).map(Number) : [];
+async function tokenSymbolsForMerchantChain(merchant: Merchant, chainId: number): Promise<string[]> {
+  const registry = await getPaymentTokenRegistry(getSeraApiBaseUrlForChain(chainId));
+  const supported = new Set(registry.map((token) => token.symbol.toUpperCase()));
+  const recent = await getMerchantTransactions(merchant.id, 100).catch(() => []);
+  return Array.from(new Set([
+    String(merchant.receiveCoin || "").toUpperCase(),
+    ...recent
+      .filter((tx) => Number(tx.chainId ?? SERA_TESTNET_CHAIN_ID) === chainId)
+      .map((tx) => String(tx.coin || "").toUpperCase()),
+  ])).filter((symbol) => supported.has(symbol));
 }
 
 async function directSyncChainCandidates(merchant: Merchant, preferredChainId?: number | null): Promise<number[]> {
-  const subWallets = await listSubWallets(merchant.id).catch(() => []);
-  const chains = new Set<number>();
-  if (preferredChainId && CHAIN_CLIENTS[preferredChainId]) chains.add(preferredChainId);
-  for (const chainId of supportedChainsForCoin(merchant.receiveCoin)) {
-    if (CHAIN_CLIENTS[chainId]) chains.add(chainId);
+  void merchant;
+  if (preferredChainId === SERA_MAINNET_CHAIN_ID || preferredChainId === SERA_TESTNET_CHAIN_ID) {
+    return [preferredChainId];
   }
-  for (const wallet of subWallets) {
-    const chainId = Number(wallet.chainId);
-    if (wallet.status === "active" && CHAIN_CLIENTS[chainId]) chains.add(chainId);
-  }
-  chains.add(1);
-  chains.add(11155111);
-  return Array.from(chains).filter((chainId) => Boolean(CHAIN_CLIENTS[chainId]));
+  return [SERA_MAINNET_CHAIN_ID];
 }
 
 function rawAmountsNearlyEqual(a: bigint, b: bigint) {
@@ -1834,6 +2148,7 @@ async function notifyRecordedDirectTransfer({
   fromAddress,
   toAddress,
   verified,
+  source = "direct_wallet_qr",
 }: {
   merchant: Merchant;
   txId: string;
@@ -1845,6 +2160,7 @@ async function notifyRecordedDirectTransfer({
   fromAddress?: string | null;
   toAddress: string;
   verified: boolean;
+  source?: "direct_wallet_qr" | "sera_swap";
 }) {
   notifyMerchantSse(merchant.id, {
     event: "payment_received",
@@ -1856,7 +2172,7 @@ async function notifyRecordedDirectTransfer({
     payCoin: payCoin || coin,
     from: fromAddress?.toLowerCase() || null,
     verified,
-    source: "direct_wallet_qr",
+    source,
   });
 
   if (merchant.webhookUrl) {
@@ -1874,10 +2190,10 @@ async function notifyRecordedDirectTransfer({
         fromAddress: fromAddress?.toLowerCase() || null,
         toAddress,
         verified,
-        source: "direct_wallet_qr",
+        source,
       },
       { merchantId: merchant.id, txId, txHash },
-    ).catch(console.error);
+    ).catch((error) => logSeraOperationFailure("payment-notification", error));
   }
 }
 
@@ -1901,9 +2217,12 @@ async function confirmPendingDirectTransfer({
   verified: boolean;
 }) {
   const meta = transactionNotesMeta(pending.notes);
+  const source = isSeraSwapTransaction(pending) ? "sera_swap" : "direct_wallet_qr";
   await updateTransaction(pending.id, {
     txHash,
-    fromAddress: fromAddress?.toLowerCase() || null,
+    fromAddress: source === "sera_swap"
+      ? pending.fromAddress
+      : fromAddress?.toLowerCase() || null,
     status: "confirmed",
     verified: verified ? 1 : 0,
     payCoin: pending.payCoin || coin,
@@ -1926,9 +2245,10 @@ async function confirmPendingDirectTransfer({
     amount: pending.amount,
     payCoin: pending.payCoin || coin,
     payAmount: pending.payAmount || amount,
-    fromAddress,
+    fromAddress: source === "sera_swap" ? pending.fromAddress : fromAddress,
     toAddress,
     verified,
+    source,
   });
   return await getTransactionById(pending.id) ?? pending;
 }
@@ -1947,10 +2267,11 @@ async function scanDirectTransfersForReceiver({
   fromBlock: bigint;
 }) {
   const client = CHAIN_CLIENTS[chainId];
-  const coinAddress = COIN_CONTRACTS[coin]?.[chainId];
+  const token = await resolveSeraTokenForChain(chainId, coin).catch(() => null);
+  const coinAddress = token?.address as `0x${string}` | undefined;
   if (!client || !coinAddress) return;
 
-  const decimals = await getTokenDecimals(client, coinAddress);
+  const decimals = token?.decimals ?? await getTokenDecimals(client, coinAddress);
   const logs = await client.getLogs({
     address: coinAddress,
     event: ERC20_TRANSFER_EVENT,
@@ -2008,7 +2329,7 @@ async function scanDirectTransfersForReceiver({
 async function syncMerchantDirectTransfers(merchant: Merchant, chainId: number) {
   const client = CHAIN_CLIENTS[chainId];
   if (!client) return;
-  const symbols = tokenSymbolsForChain(chainId);
+  const symbols = await tokenSymbolsForMerchantChain(merchant, chainId).catch(() => []);
   if (symbols.length === 0) return;
 
   const key = `${merchant.id}:${chainId}`;
@@ -2032,7 +2353,7 @@ async function syncMerchantDirectTransfers(merchant: Merchant, chainId: number) 
     const scanTasks = receiverAddresses.flatMap((toAddress) =>
       symbols.map((coin) =>
         withDirectScanTimeout(scanDirectTransfersForReceiver({ merchant, toAddress, coin, chainId, fromBlock }), 8000)
-          .catch((error) => console.warn("[direct-sync:scan]", { chainId, coin, toAddress, error: error?.message || error })),
+          .catch((error) => logSeraOperationFailure("direct-sync/scan", error)),
       ),
     );
     await Promise.allSettled(scanTasks);
@@ -2050,7 +2371,7 @@ async function syncMerchantDirectActivity(merchant: Merchant, preferredChainId?:
   const chainIds = await directSyncChainCandidates(merchant, preferredChainId);
   await Promise.allSettled(chainIds.map((chainId) =>
     syncMerchantDirectTransfers(merchant, chainId)
-      .catch((error) => console.warn("[direct-sync:chain]", { chainId, error: error?.message || error })),
+      .catch((error) => logSeraOperationFailure("direct-sync/chain", error)),
   ));
 }
 
@@ -2097,9 +2418,10 @@ async function recordDirectTransferPayment({
   }
 
   const client = CHAIN_CLIENTS[chainId];
-  const coinAddress = COIN_CONTRACTS[coin]?.[chainId];
+  const token = await resolveSeraTokenForChain(chainId, coin).catch(() => null);
+  const coinAddress = token?.address as `0x${string}` | undefined;
   if (client && coinAddress) {
-    const decimals = await getTokenDecimals(client, coinAddress);
+    const decimals = token?.decimals ?? await getTokenDecimals(client, coinAddress);
     const rawAmount = BigInt(toRawTokenAmount(amount, decimals));
     const pending = await findMatchingPendingTransaction({
       merchantId: resolved.merchant.id,
@@ -2180,7 +2502,7 @@ async function recordDirectTransferPayment({
         source: "direct_wallet_qr",
       },
       { merchantId: resolved.merchant.id, txId, txHash: normalizedTxHash },
-    ).catch(console.error);
+    ).catch((error) => logSeraOperationFailure("payment-notification", error));
   }
 
   return { transaction: transaction!, created: true };
@@ -2192,26 +2514,28 @@ async function findDirectTransfer({
   amount,
   chainId,
   fromBlock,
+  toBlock,
 }: {
   toAddress: string;
   coin: string;
   amount: string;
   chainId: number;
   fromBlock: bigint;
+  toBlock: bigint;
 }) {
   const client = CHAIN_CLIENTS[chainId];
-  const coinAddress = COIN_CONTRACTS[coin]?.[chainId];
+  const token = await resolveSeraTokenForChain(chainId, coin).catch(() => null);
+  const coinAddress = token?.address as `0x${string}` | undefined;
   if (!client || !coinAddress) return null;
 
-  const decimals = await getTokenDecimals(client, coinAddress);
+  const decimals = token?.decimals ?? await getTokenDecimals(client, coinAddress);
   const expectedRaw = BigInt(toRawTokenAmount(amount, decimals));
-  const latestBlock = await client.getBlockNumber();
   const logs = await client.getLogs({
     address: coinAddress,
     event: ERC20_TRANSFER_EVENT,
     args: { to: toAddress.toLowerCase() as `0x${string}` },
     fromBlock,
-    toBlock: "latest",
+    toBlock,
   });
 
   for (const log of logs) {
@@ -2224,11 +2548,11 @@ async function findDirectTransfer({
     return {
       txHash: txHash as `0x${string}`,
       fromAddress: typeof args.from === "string" ? args.from.toLowerCase() : null,
-      latestBlock,
+      latestBlock: toBlock,
     };
   }
 
-  return { txHash: null, fromAddress: null, latestBlock };
+  return { txHash: null, fromAddress: null, latestBlock: toBlock };
 }
 
 /**
@@ -2270,7 +2594,7 @@ async function waitForReceiptViaWs(
         } catch { /* not yet mined, wait for next block */ }
       },
       onError: (err: Error) => {
-        console.warn("[ws] block subscription error:", err);
+        console.warn("[ws] block subscription error");
         cleanup(undefined, err);
       },
     }).then((unwatchFn: () => void) => {
@@ -2306,7 +2630,7 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     try {
       receipt = await waitForReceiptViaWs(sepoliaWsClient, txHash, 180_000);
     } catch (e) {
-      console.warn("[verify] WebSocket receipt wait failed, falling back to polling:", e);
+      console.warn("[verify] WebSocket receipt wait failed; falling back to polling");
     }
   }
 
@@ -2321,8 +2645,16 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     }
   }
 
-  if (!receipt || receipt.status !== "success") {
-    console.warn(`[verify] txHash ${txHash} failed or timed out`);
+  if (!receipt) {
+    // RPCs and chains can be slow. A timeout is not evidence that the transfer
+    // failed, so keep it confirming and allow a later status poll to retry.
+    console.warn("[verify] Transaction is still pending after the receipt wait window");
+    notifySseClients(txId, { status: "confirming", txHash });
+    return;
+  }
+
+  if (receipt.status !== "success") {
+    console.warn("[verify] Transaction reverted");
     await updateTransaction(txId, { status: "failed" });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "failed", paymentId: txId, transactionId: txId }).catch(() => undefined);
     if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
@@ -2331,20 +2663,17 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   }
 
   // Verify the Transfer event matches expected coin, toAddress, and amount
-  const coinAddress = COIN_CONTRACTS[tx.coin]?.[chainId];
-  if (!coinAddress) {
+  const token = await resolveSeraTokenForChain(chainId, tx.coin).catch(() => null);
+  const coinAddress = token?.address as `0x${string}` | undefined;
+  if (!token || !coinAddress) {
     console.warn(`[verify] Unknown coin ${tx.coin} on chain ${chainId}`);
-    // Accept anyway — we at least have a mined tx
-    await updateTransaction(txId, { status: "confirmed", verified: 1 });
-    if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
-    notifySseClients(txId, { status: "confirmed", txHash, verified: true });
+    await failTransactionRecord(tx, `Token ${tx.coin} is not in the active Sera registry for chain ${chainId}.`);
     return;
   }
 
   // Parse Transfer logs from the ERC-20 contract
   let transferVerified = false;
-  const tokenDecimals = await getTokenDecimals(client, coinAddress);
+  const tokenDecimals = token.decimals;
   const expectedRaw = BigInt(toRawTokenAmount(String(tx.amount), tokenDecimals));
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== coinAddress.toLowerCase()) continue;
@@ -2364,12 +2693,9 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   }
 
   if (!transferVerified) {
-    console.warn(`[verify] Transfer event not found or amount mismatch for txId ${txId}`);
-    // Still mark as confirmed — the tx mined, just log the discrepancy
-    await updateTransaction(txId, { status: "confirmed", verified: 0 });
-    if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
-    notifySseClients(txId, { status: "confirmed", txHash, verified: false });
+    console.warn("[verify] Transfer event not found or amount mismatch");
+    await failTransactionRecord(tx, "The submitted transaction did not contain the expected token transfer, recipient, and amount.");
+    return;
   } else {
     await updateTransaction(txId, { status: "confirmed", verified: 1 });
     if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
@@ -2388,8 +2714,16 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
       merchant.webhookSecret,
       { event: "payment.confirmed", txId, txHash, coin: tx.coin, amount: tx.amount, fromAddress: tx.fromAddress, toAddress: tx.toAddress, verified: transferVerified },
       { merchantId: merchant.id, txId, txHash }
-    ).catch(console.error);
+    ).catch((error) => logSeraOperationFailure("payment-notification", error));
   }
+}
+
+function scheduleTransactionVerification(txId: string, txHash: `0x${string}`) {
+  if (transactionVerificationInFlight.has(txId)) return;
+  transactionVerificationInFlight.add(txId);
+  void verifyTransactionAsync(txId, txHash)
+    .catch((error) => logSeraOperationFailure("verify", error))
+    .finally(() => transactionVerificationInFlight.delete(txId));
 }
 
 async function sendWebhook(
@@ -2418,7 +2752,7 @@ async function sendWebhook(
     try { responseBody = (await resp.text()).slice(0, 2000); } catch {}
   } catch (e: any) {
     errorMsg = e?.message || String(e);
-    console.error("[webhook] failed:", e);
+    console.error("[webhook] delivery failed");
   }
   // Persist delivery log
   if (logCtx) {
@@ -2434,7 +2768,7 @@ async function sendWebhook(
         responseBody: responseBody ?? null,
         error: errorMsg ?? null,
       });
-    } catch (logErr) { console.error("[webhook-log] failed:", logErr); }
+    } catch { console.error("[webhook-log] persistence failed"); }
   }
 }
 
@@ -2466,7 +2800,7 @@ paymentRouter.get("/payer/history", async (req, res) => {
       memo: t.memo,
       createdAt: t.createdAt.getTime(),
     })));
-  } catch (e) { console.error(e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
 /** GET /api/healthz */
@@ -2481,33 +2815,7 @@ const rateCache = new Map<string, { rate: number; ts: number }>();
 const CACHE_TTL_MS = 60_000; // 1 minute
 
 // Strict allowlist of known stablecoin symbols (alphanumeric only, 2–8 chars)
-const SYMBOL_RE = /^[A-Z0-9]{2,8}$/;
-
 const USD_BRIDGE: Record<string, string> = { USDC: "USDT", EURC: "EURT" };
-const TOKEN_CURRENCY: Record<string, string> = {
-  USDT: "USD", USDC: "USD", DAI: "USD", PYUSD: "USD", USD1: "USD", USDE: "USD", USDE0: "USD",
-  XSGD: "SGD", TNSGD: "SGD",
-  MYRT: "MYR",
-  IDRX: "IDR", IDRT: "IDR", XIDR: "IDR",
-  EURC: "EUR", EURT: "EUR", TNEUR: "EUR", VEUR: "EUR", EUR0: "EUR", EURI: "EUR",
-  JPYC: "JPY", GYEN: "JPY",
-  AUDD: "AUD", AUDF: "AUD",
-  CADC: "CAD", QCAD: "CAD",
-  BRZ: "BRL", BRLA: "BRL",
-  MXNT: "MXN", MXNB: "MXN",
-  NZDD: "NZD", NZDS: "NZD",
-  THBT: "THB", THBK: "THB",
-  ZARP: "ZAR", ZARU: "ZAR",
-  KRW1: "KRW", KRWO: "KRW", KRWIN: "KRW",
-  CCHF: "CHF", VCHF: "CHF",
-  TRYB: "TRY", ITRY: "TRY",
-  PHPC: "PHP",
-  HKDR: "HKD",
-  CNHT: "CNH",
-  CNGN: "NGN",
-  A7A5: "RUB",
-  ARZ: "ARS", ARC: "ARS", WARS: "ARS",
-};
 
 type SeraFxRateResponse = {
   pair: string;
@@ -2582,61 +2890,71 @@ async function fetchSeraRate(from: string, to: string): Promise<number> {
   return rate;
 }
 
-async function fetchSeraRestFxRate(from: string, to: string, debug = false, chainId?: number): Promise<{ rate: number; upstream: unknown }> {
-  if (from === to) return { rate: 1, upstream: { source: "identity" } };
-
-  const resolvedFrom = USD_BRIDGE[from] ?? from;
-  const resolvedTo = USD_BRIDGE[to] ?? to;
-  if (resolvedFrom === resolvedTo) {
-    return { rate: 1, upstream: { source: "identity", reason: "same resolved currency" } };
+async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): Promise<{ rate: number; source: string }> {
+  if (chainId !== undefined && chainId !== SERA_MAINNET_CHAIN_ID && chainId !== SERA_TESTNET_CHAIN_ID) {
+    throw new Error(`Sera payments are not supported on chain ${chainId}`);
   }
-
   const cacheScope = chainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
-  const cacheKey = `sera-rest:${cacheScope}:${from}:${to}`;
+  const cacheKey = `sera-quote:${cacheScope}:${from}:${to}`;
   const cached = rateCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-    return { rate: cached.rate, upstream: { source: "cache", cacheKey } };
+    return { rate: cached.rate, source: "cache" };
   }
 
-  const base = TOKEN_CURRENCY[resolvedFrom] ?? resolvedFrom;
-  const quote = TOKEN_CURRENCY[resolvedTo] ?? resolvedTo;
-  const seraApiBaseUrl = getSeraApiBaseUrlForChain(chainId);
-  const url = `${seraApiBaseUrl}/fx/rate?base=${encodeURIComponent(base)}&quote=${encodeURIComponent(quote)}`;
-  const requestLog = {
-    method: "GET",
-    url,
-    query: { base, quote },
-    mappedFrom: { token: from, resolvedToken: resolvedFrom },
-    mappedTo: { token: to, resolvedToken: resolvedTo },
+  // Use the active Sera registry for both token support and its represented
+  // fiat currency. A local token-to-currency table goes stale as assets change.
+  const resolvedChainId = chainId === SERA_TESTNET_CHAIN_ID ? SERA_TESTNET_CHAIN_ID : SERA_MAINNET_CHAIN_ID;
+  const baseUrl = getSeraApiBaseUrlForChain(resolvedChainId);
+  const [fromToken, toToken, seraNowSec] = await Promise.all([
+    resolveSeraTokenForChain(resolvedChainId, from),
+    resolveSeraTokenForChain(resolvedChainId, to),
+    getSeraServerTimestamp(baseUrl),
+  ]);
+  if (fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
+    return { rate: 1, source: "identity" };
+  }
+
+  // Payment conversion runs in the reverse direction: the customer spends
+  // `to` and the merchant receives `from`. A public swap quote therefore gives
+  // both the current Sera price and proof that this payment direction has
+  // executable liquidity. This also remains usable when the reference-only
+  // /fx/rate service is temporarily unavailable.
+  const scale = 10n ** BigInt(toToken.decimals);
+  const minimumRaw = BigInt(String(toToken.min_trade_amount_raw || "0"));
+  const referenceInputRaw = minimumRaw > 10n * scale ? minimumRaw : 10n * scale;
+  const quoteRequest = {
+    from_token: toToken.address,
+    to_token: fromToken.address,
+    from_amount: referenceInputRaw.toString(),
+    owner_address: "0x0000000000000000000000000000000000000001",
+    recipient: "0x0000000000000000000000000000000000000001",
+    expiration: seraNowSec + 180,
+    gas_mode: "pay_more",
   };
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(8000),
+  const rawQuote = await callSeraApi<unknown>({
+    baseUrl,
+    path: "/swap/quote",
+    method: "POST",
+    body: quoteRequest,
+    authMode: "none",
   });
-  const json = await response.json().catch(() => null) as SeraFxRateResponse | { detail?: string } | null;
-  if (!response.ok) {
-    throw new Error(`Sera FX fetch failed: ${response.status} ${JSON.stringify(json)}`);
-  }
-
-  const rate = Number((json as SeraFxRateResponse)?.rate);
+  const quote = unwrapSeraQuote(rawQuote);
+  const routeParams = getRouteParams(quote);
+  const outputRaw = BigInt(String(routeParams.minOutputAmount));
+  if (outputRaw <= 0n) throw new Error(`Sera returned no executable output for ${to}/${from}`);
+  const referenceInput = Number(fromRawTokenAmount(referenceInputRaw, toToken.decimals));
+  const quotedOutput = Number(fromRawTokenAmount(outputRaw, fromToken.decimals));
+  const rate = referenceInput / quotedOutput;
   if (!Number.isFinite(rate) || rate <= 0) {
-    throw new Error(`Invalid Sera FX rate for ${base}/${quote}: ${JSON.stringify(json)}`);
+    throw new Error(`Invalid Sera swap quote rate for ${from}/${to}`);
   }
 
   rateCache.set(cacheKey, { rate, ts: Date.now() });
-  rateCache.set(`sera-rest:${cacheScope}:${to}:${from}`, { rate: 1 / rate, ts: Date.now() });
-
-  const upstream = { source: "sera-rest", request: requestLog, response: json };
-  if (debug || ENV.seraApiDebug) {
-    console.info("[rates:sera]", JSON.stringify(upstream));
-  }
-  return { rate, upstream };
+  return { rate, source: "sera-swap-quote" };
 }
 
 /**
- * GET /api/rates?from=USDT&to=IDRX
+ * GET /api/rates?from=XSGD&to=USDC
  * Returns { rate: number, from: string, to: string, source: "sera" }
  * rate = how many units of `to` coin equal 1 unit of `from` coin
  */
@@ -2645,18 +2963,12 @@ paymentRouter.get("/rates", async (req, res) => {
     const from = (req.query.from as string)?.toUpperCase();
     const to = (req.query.to as string)?.toUpperCase();
     if (!from || !to) { res.status(400).json({ error: "Missing from/to query params" }); return; }
-    if (!SYMBOL_RE.test(from)) { res.status(400).json({ error: `Invalid symbol: ${from}` }); return; }
-    if (!SYMBOL_RE.test(to)) { res.status(400).json({ error: `Invalid symbol: ${to}` }); return; }
-    if (from === to) { res.json({ from, to, rate: 1, source: "identity" }); return; }
-    // Treat bridged equivalents as 1:1 (e.g. USDC↔USDT, EURC↔EURT)
-    const bridgedFrom = USD_BRIDGE[from] ?? from;
-    const bridgedTo   = USD_BRIDGE[to]   ?? to;
-    if (bridgedFrom === bridgedTo) { res.json({ from, to, rate: 1, source: "identity" }); return; }
+    if (!COIN_SYMBOL_RE.test(from)) { res.status(400).json({ error: `Invalid symbol: ${from}` }); return; }
+    if (!COIN_SYMBOL_RE.test(to)) { res.status(400).json({ error: `Invalid symbol: ${to}` }); return; }
 
-    const debug = req.query.debug === "1" || req.query.debug === "true";
     const requestedChainId = Number(req.query.chainId ?? req.query.chain_id ?? 1);
     const chainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : 1;
-    const { rate, upstream } = await fetchSeraRestFxRate(from, to, debug, chainId);
+    const { rate, source } = await fetchSeraRestFxRate(from, to, chainId);
     /*
     // Apply SeraPay's 0.5% silent spread — customer pays slightly more than the raw Sera rate.
     // The merchant receives exactly what they requested; SeraPay keeps the difference.
@@ -2665,9 +2977,24 @@ paymentRouter.get("/rates", async (req, res) => {
     */
     // Cache exchange rates for 10 seconds — matches server-side TTL
     res.setHeader("Cache-Control", "public, max-age=10, stale-while-revalidate=30");
-    res.json({ from, to, rate, source: "sera-rest", ...(debug ? { upstream } : {}) });
+    res.json({ from, to, rate, source });
   } catch (e: any) {
-    console.error("[rates]", e?.message);
-    res.status(502).json({ error: "Failed to fetch exchange rate from Sera", detail: e?.message });
+    if (typeof e?.message === "string" && e.message.startsWith("Unsupported Sera token:")) {
+      res.status(400).json({ error: e.message });
+      return;
+    }
+    if (typeof e?.message === "string" && e.message.startsWith("Sera payments are not supported on chain")) {
+      res.status(400).json({ error: e.message });
+      return;
+    }
+    if (e instanceof SeraApiError && (e.errorCode === "no_liquidity" || e.errorCode === "NO_LIQUIDITY")) {
+      res.status(409).json({
+        error: "Currently there's no liquidity on this exchange in Sera.cx. Please try another option.",
+        errorCode: "no_liquidity",
+      });
+      return;
+    }
+    logSeraOperationFailure("rates", e);
+    res.status(502).json({ error: "Failed to fetch exchange rate from Sera" });
   }
 });

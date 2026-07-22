@@ -1,13 +1,17 @@
 import { Check, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { StablecoinLogo } from "@/components/StablecoinLogo";
 import { groupCurrenciesByRegion, type SeraCurrency } from "@/lib/currencyCalculator";
 
 function CurrencyMark({ coin }: { coin: SeraCurrency }) {
-  const logo = coin.logoUri || (/^https?:\/\//.test(coin.icon) ? coin.icon : undefined);
-  if (logo) {
-    return <img src={logo} alt={`${coin.symbol} logo`} className="h-7 w-7 rounded-full object-cover" />;
-  }
-  return <span className="flex h-7 w-7 items-center justify-center text-lg leading-none">{coin.icon}</span>;
+  return (
+    <StablecoinLogo
+      symbol={coin.symbol}
+      logoUri={coin.logoUri || (/^https?:\/\//.test(coin.icon) ? coin.icon : undefined)}
+      className="h-7 w-7 shrink-0 rounded-full bg-gray-100 object-contain"
+      fallbackClassName="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-100 text-[10px] font-bold leading-none text-gray-600"
+    />
+  );
 }
 
 export function CurrencySelectModal({
@@ -46,7 +50,7 @@ export function CurrencySelectModal({
           </button>
         </div>
 
-        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4 pb-5">
+        <div className="serapay-modal-scrollbar flex-1 space-y-4 overflow-y-auto px-5 py-4 pb-5">
           {Object.entries(groups).map(([region, coins]) => (
             <div key={region}>
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-400">{region}</p>

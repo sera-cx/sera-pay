@@ -8,7 +8,6 @@ import { SeraPayHeader } from "@/components/SeraPayHeader";
 import { SeraPayFooter } from "@/components/SeraPayFooter";
 import { CurrencySelectModal } from "@/components/CurrencySelectModal";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
-import { STABLECOINS } from "@/lib/stablecoins";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -483,11 +482,7 @@ export default function MenuPublicPage() {
     const value = Number(new URLSearchParams(window.location.search).get("chainId") || 1);
     return Number.isInteger(value) && value > 0 ? value : 1;
   }, []);
-  const currencyList = useMemo(() => {
-    const supported = new Set(STABLECOINS.map((coin) => coin.symbol));
-    const options = currencyOptions.length ? currencyOptions : STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const }));
-    return options.filter((coin) => supported.has(coin.symbol));
-  }, [currencyOptions]);
+  const currencyList = currencyOptions;
   const startSessionKey = params.slug ? `serapay_menu_started_${params.slug}` : "";
 
   useEffect(() => {
@@ -522,8 +517,13 @@ export default function MenuPublicPage() {
   }, [paymentChainId]);
 
   useEffect(() => {
-    if (data && !displayCoin) setDisplayCoin(data.merchant.receiveCoin || data.items[0]?.coin || "USDC");
-  }, [data, displayCoin]);
+    if (!data || currencyOptions.length === 0) return;
+    const preferred = String(data.merchant.receiveCoin || data.items[0]?.coin || "").toUpperCase();
+    setDisplayCoin((current) => {
+      if (current && currencyOptions.some((coin) => coin.symbol === current)) return current;
+      return currencyOptions.find((coin) => coin.symbol === preferred)?.symbol || currencyOptions[0].symbol;
+    });
+  }, [currencyOptions, data]);
 
   useEffect(() => {
     if (!data) return;
@@ -592,6 +592,14 @@ export default function MenuPublicPage() {
     const { merchant, menu } = data;
     setCreatingOrder(true);
     try {
+      if (currencyOptions.length === 0) throw new Error("The Sera currency registry is unavailable. Please try again.");
+      const requestedReceiveCoin = String(merchant.receiveCoin || cart[0]?.item.coin || "").toUpperCase();
+      if (!currencyOptions.some((coin) => coin.symbol === requestedReceiveCoin)) {
+        throw new Error(`${requestedReceiveCoin || "The merchant currency"} is not supported by Sera on this network.`);
+      }
+      if (!currencyOptions.some((coin) => coin.symbol === displayCoin)) {
+        throw new Error(`${displayCoin || "The payment currency"} is not supported by Sera on this network.`);
+      }
       const response = await fetch(`/api/public/menu/${menu.slug}/orders`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -1,4 +1,4 @@
-import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "./stablecoins";
+import { getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "./stablecoins";
 
 export type SeraCurrency = Stablecoin & {
   source: "sera" | "fallback";
@@ -110,24 +110,20 @@ function buildCurrency(token: SeraTokenPayload): SeraCurrency {
 }
 
 export async function loadSeraCurrencies(chainId?: number): Promise<SeraCurrency[]> {
-  try {
-    const params = new URLSearchParams();
-    if (chainId) params.set("chainId", String(chainId));
-    const response = await fetch(`/api/sera/tokens${params.size ? `?${params.toString()}` : ""}`);
-    if (!response.ok) throw new Error("Unable to load Sera currencies");
-    const data = await response.json() as { tokens?: SeraTokenPayload[] };
-    const tokens = Array.isArray(data.tokens) ? data.tokens : [];
-    const bySymbol = new Map<string, SeraCurrency>();
-    for (const token of tokens) {
-      const symbol = String(token.symbol || "").toUpperCase();
-      if (!symbol) continue;
-      bySymbol.set(symbol, buildCurrency(token));
-    }
-    if (bySymbol.size === 0) throw new Error("No Sera currencies returned");
-    return Array.from(bySymbol.values()).sort((a, b) => a.region.localeCompare(b.region) || a.symbol.localeCompare(b.symbol));
-  } catch {
-    return STABLECOINS.map((coin) => ({ ...coin, source: "fallback" as const }));
+  const params = new URLSearchParams();
+  if (chainId) params.set("chainId", String(chainId));
+  const response = await fetch(`/api/sera/tokens${params.size ? `?${params.toString()}` : ""}`);
+  const data = await response.json().catch(() => ({})) as { tokens?: SeraTokenPayload[]; error?: string };
+  if (!response.ok) throw new Error(data.error || "Unable to load Sera currencies");
+  const tokens = Array.isArray(data.tokens) ? data.tokens : [];
+  const bySymbol = new Map<string, SeraCurrency>();
+  for (const token of tokens) {
+    const symbol = String(token.symbol || "").toUpperCase();
+    if (!symbol || !token.address || !/^0x[0-9a-fA-F]{40}$/.test(token.address)) continue;
+    bySymbol.set(symbol, buildCurrency(token));
   }
+  if (bySymbol.size === 0) throw new Error("Sera returned an empty token registry");
+  return Array.from(bySymbol.values()).sort((a, b) => a.region.localeCompare(b.region) || a.symbol.localeCompare(b.symbol));
 }
 
 export async function getCurrencyRate(from: string, to: string, chainId?: number): Promise<RateResult> {

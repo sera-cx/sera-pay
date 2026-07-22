@@ -109,7 +109,7 @@ function parseJson(text: string): unknown {
   if (!text) return null;
   try {
     return JSON.parse(text);
-  } catch {
+  } catch (error) {
     return text;
   }
 }
@@ -142,6 +142,25 @@ function redactedPayload(label: "request" | "response") {
   return { redacted: true, reason: `Sensitive Sera API ${label} omitted from logs` };
 }
 
+/**
+ * These endpoints carry reusable signatures, API credentials, wallet-specific
+ * permits, or short-lived executable quotes. Keep their payloads out of both
+ * console output and the database-backed API audit log by default.
+ */
+export function isSensitiveSeraAuditPayload(path: string, label: "request" | "response"): boolean {
+  const normalized = `/${path}`.replace(/\/{2,}/g, "/").toLowerCase();
+  const sensitiveEndpoint = normalized.startsWith("/api-keys")
+    || normalized.startsWith("/swap")
+    || normalized.startsWith("/orders")
+    || normalized.startsWith("/fills")
+    || normalized.startsWith("/balances")
+    || normalized.startsWith("/permit")
+    || normalized.startsWith("/transfer")
+    || normalized.startsWith("/withdraw")
+    || normalized.includes("signature");
+  return sensitiveEndpoint && (label === "request" || label === "response");
+}
+
 async function writeSeraApiLog(input: {
   merchantId?: string | null;
   baseUrl: string;
@@ -170,8 +189,10 @@ async function writeSeraApiLog(input: {
       errorMessage: input.error ?? null,
       durationMs: input.durationMs,
     });
-  } catch (error) {
-    console.warn("[Sera API] Failed to write request log:", error);
+  } catch {
+    // Do not print the database error object: driver errors can contain host,
+    // query, or connection metadata. The API request itself must still work.
+    console.warn("[Sera API] Request audit log unavailable");
   }
 }
 
@@ -184,6 +205,8 @@ export async function callSeraApi<T>(options: SeraRequestOptions): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (options.credential) headers.Authorization = `Bearer ${options.credential}`;
+  const redactRequest = Boolean(options.sensitiveRequest) || isSensitiveSeraAuditPayload(options.path, "request");
+  const redactResponse = Boolean(options.sensitiveResponse) || isSensitiveSeraAuditPayload(options.path, "response");
 
   try {
     const response = await fetch(`${baseUrl}${pathWithQuery}`, {
@@ -202,10 +225,10 @@ export async function callSeraApi<T>(options: SeraRequestOptions): Promise<T> {
       path: options.path,
       method,
       authMode,
-      query: options.query,
-      body: options.sensitiveRequest && options.body !== undefined ? redactedPayload("request") : options.body,
+      query: redactRequest ? undefined : options.query,
+      body: redactRequest && options.body !== undefined ? redactedPayload("request") : options.body,
       status: response.status,
-      response: options.sensitiveResponse && parsed !== undefined ? redactedPayload("response") : parsed,
+      response: redactResponse && parsed !== undefined ? redactedPayload("response") : parsed,
       durationMs,
     });
 
@@ -229,8 +252,8 @@ export async function callSeraApi<T>(options: SeraRequestOptions): Promise<T> {
       path: options.path,
       method,
       authMode,
-      query: options.query,
-      body: options.sensitiveRequest && options.body !== undefined ? redactedPayload("request") : options.body,
+      query: redactRequest ? undefined : options.query,
+      body: redactRequest && options.body !== undefined ? redactedPayload("request") : options.body,
       error: error instanceof Error ? error.message : "Unknown Sera API error",
       durationMs,
     });
@@ -295,7 +318,7 @@ export async function getSeraSystemSnapshot(
       sorAddress: config.sor_address ?? null,
       message: health.status === "healthy" ? "Sera API is healthy." : `Sera API status: ${health.status ?? "unknown"}`,
     };
-  } catch (error) {
+  } catch {
     return {
       mode,
       baseUrl: normalizedBaseUrl,
@@ -304,7 +327,7 @@ export async function getSeraSystemSnapshot(
       seraAddress: null,
       vaultAddress: null,
       sorAddress: null,
-      message: error instanceof Error ? error.message : "Unable to reach Sera API",
+      message: "Unable to reach Sera API",
     };
   }
 }
@@ -339,10 +362,10 @@ export async function verifySeraApiCredential(baseUrl: string, credential: strin
       ownerAddress: result.owner_address,
       message: result.valid ? "Sera API key verified." : "Sera API key was not accepted.",
     };
-  } catch (error) {
+  } catch {
     return {
       ok: false,
-      message: error instanceof Error ? error.message : "Unable to verify Sera API key",
+      message: "Unable to verify Sera API key",
     };
   }
 }

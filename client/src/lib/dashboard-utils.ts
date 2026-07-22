@@ -149,6 +149,6 @@ export function playNotificationSound() {
     sub.start(ctx.currentTime);
     sub.stop(ctx.currentTime + 0.12);
   } catch (error) {
-    console.error("Audio playback failed", error);
+    if (import.meta.env.DEV) console.error("Audio playback failed", error);
   }
 }

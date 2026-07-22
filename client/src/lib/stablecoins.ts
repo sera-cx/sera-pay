@@ -103,18 +103,27 @@ export function getStablecoinBySymbol(symbol: string): Stablecoin | undefined {
   return STABLECOINS.find((c) => c.symbol.toUpperCase() === symbol.toUpperCase());
 }
 
-const ETHEREUM_TOKEN_LOGOS: Record<string, string> = {
-  USDC: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48/logo.png",
-  USDT: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0xdAC17F958D2ee523a2206206994597C13D831ec7/logo.png",
-  DAI: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x6B175474E89094C44Da98b954EedeAC495271d0F/logo.png",
-  EURC: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x1aBaEA1f7C830bD89Acc67eC4af516284b1bC33c/logo.png",
-  PYUSD: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x6c3ea9036406852006290770BEdFcAbA0e23A0e8/logo.png",
-  XSGD: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/ethereum/assets/0x70e8dE73cE538DA2bEEd35d14187F6959a8ecA96/logo.png",
-};
+// The Sera API /tokens registry intentionally contains contract/routing data
+// only. Sera's own web app resolves presentation assets from this official
+// path and falls back to default.png when a token has no dedicated image.
+// Keep SeraPay on that same source instead of mixing in unrelated third-party
+// token artwork.
+const SERA_STABLECOIN_ASSET_BASE_URL = "https://app.sera.cx/stablecoins";
+
+function normalizeStablecoinLogoSymbol(symbol: string): string | null {
+  const normalized = String(symbol || "").trim().toLowerCase();
+  return /^[a-z0-9]{2,20}$/.test(normalized) ? normalized : null;
+}
 
 export function getStablecoinLogoUrl(symbol: string): string | undefined {
   const coin = getStablecoinBySymbol(symbol);
-  return coin?.logoUri || ETHEREUM_TOKEN_LOGOS[symbol.toUpperCase()];
+  if (coin?.logoUri) return coin.logoUri;
+  const normalized = normalizeStablecoinLogoSymbol(symbol);
+  return normalized ? `${SERA_STABLECOIN_ASSET_BASE_URL}/${normalized}.png` : undefined;
+}
+
+export function getStablecoinDefaultLogoUrl(): string {
+  return `${SERA_STABLECOIN_ASSET_BASE_URL}/default.png`;
 }
 
 export function getRegions(): string[] {

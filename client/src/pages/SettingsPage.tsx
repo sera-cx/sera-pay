@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { AppLayout } from "@/components/AppLayout";
+import { StablecoinLogo } from "@/components/StablecoinLogo";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, Label, Input, Button, Skeleton } from "@/components/dashboard-ui";
 import { useMerchantProfile, useUpdateProfile } from "@/hooks/use-merchant";
 import { useToast } from "@/components/toast-system";
@@ -28,13 +29,13 @@ function normalizeSettingsQrMode(value: string | null | undefined): QrMode {
 
 function CurrencyMark({ coin, fallbackSymbol, className = "w-7 h-7" }: { coin?: Pick<SeraCurrency, "symbol" | "icon" | "logoUri">; fallbackSymbol?: string; className?: string }) {
   const label = (coin?.symbol || fallbackSymbol || "?").slice(0, 4).toUpperCase();
-  if (coin?.logoUri) {
-    return <img src={coin.logoUri} alt={`${coin.symbol} logo`} className={`${className} rounded-full object-contain bg-white border border-border/40`} />;
-  }
   return (
-    <span className={`${className} rounded-full bg-muted border border-border/40 flex items-center justify-center text-[10px] font-bold text-muted-foreground leading-none`}>
-      {coin?.icon || label.slice(0, 2)}
-    </span>
+    <StablecoinLogo
+      symbol={coin?.symbol || label}
+      logoUri={coin?.logoUri}
+      className={`${className} rounded-full object-contain bg-white border border-border/40`}
+      fallbackClassName={`${className} rounded-full bg-muted border border-border/40 flex items-center justify-center text-[10px] font-bold text-muted-foreground leading-none`}
+    />
   );
 }
 

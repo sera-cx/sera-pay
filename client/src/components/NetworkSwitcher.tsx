@@ -98,7 +98,7 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
         }
         onClose();
       } catch (addErr) {
-        console.error("[NetworkSwitch] Failed:", addErr);
+        if (import.meta.env.DEV) console.error("[NetworkSwitch] Failed:", addErr);
       }
     }
   };

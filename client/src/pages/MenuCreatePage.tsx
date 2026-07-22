@@ -6,9 +6,12 @@ import { Input } from "@/components/ui/input";
 import { AppLayout } from "@/components/AppLayout";
 import { MENU_TEMPLATES, SCRATCH_TEMPLATE } from "@/lib/menuTemplates";
 import { fetchApi } from "@/lib/api";
-import { STABLECOINS } from "@/lib/stablecoins";
 import { AdvancedSelect } from "@/components/AdvancedSelect";
 import { limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
+import { loadSeraCurrencies } from "@/lib/currencyCalculator";
+import { resolvePaymentChainId } from "@/lib/payment";
+import { useSeraApiConfig } from "@/hooks/use-gateway";
+import { useChainId } from "wagmi";
 
 interface EditableItem {
   name: string;
@@ -17,8 +20,6 @@ interface EditableItem {
   price: string;
   coin: string;
 }
-
-const COINS = STABLECOINS.map(coin => coin.symbol);
 
 export default function MenuCreatePage() {
   const [, navigate] = useLocation();
@@ -37,6 +38,16 @@ export default function MenuCreatePage() {
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [coinOptions, setCoinOptions] = useState<string[]>([]);
+  const walletChainId = useChainId();
+  const { data: seraConfig } = useSeraApiConfig();
+  const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
+
+  useEffect(() => {
+    loadSeraCurrencies(paymentChainId)
+      .then((coins) => setCoinOptions(coins.map((coin) => coin.symbol)))
+      .catch(() => setCoinOptions([]));
+  }, [paymentChainId]);
 
   const addItem = () => setItems(prev => [...prev, { name: "", description: "", category: "", price: "", coin: "USDC" }]);
   const removeItem = (idx: number) => setItems(prev => prev.filter((_, i) => i !== idx));
@@ -50,6 +61,11 @@ export default function MenuCreatePage() {
     const invalidIndex = items.findIndex(i => !i.name.trim() || !i.category.trim() || !i.coin.trim() || !normalizeDecimalAmountText(i.price));
     if (invalidIndex >= 0) {
       setError(`Item ${invalidIndex + 1} needs a name, category, price greater than 0, and coin`);
+      return;
+    }
+    const unsupportedIndex = items.findIndex((item) => !coinOptions.includes(item.coin));
+    if (unsupportedIndex >= 0) {
+      setError(`${items[unsupportedIndex].coin || "That coin"} is not supported by Sera on the active network`);
       return;
     }
     const validItems = items.map(i => ({
@@ -193,7 +209,7 @@ export default function MenuCreatePage() {
                       <AdvancedSelect
                         value={item.coin}
                         onValueChange={value => updateItem(idx, "coin", value)}
-                        options={COINS.map(c => ({ value: c, label: c }))}
+                        options={coinOptions.map(c => ({ value: c, label: c }))}
                         className="flex-1"
                         triggerClassName="h-10 rounded-lg"
                       />

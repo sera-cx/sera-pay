@@ -3,8 +3,9 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import jsQR from "jsqr";
 import { useLocation } from "wouter";
 import { useChainId } from "wagmi";
-import { STABLECOINS, getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "@/lib/stablecoins";
-import { buildPaymentUrl, buildWalletPaymentUri, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId } from "@/lib/payment";
+import { type Stablecoin } from "@/lib/stablecoins";
+import { buildPaymentQrValue, buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, resolvePaymentChainId, SERA_NO_LIQUIDITY_MESSAGE } from "@/lib/payment";
+import { loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { useMerchantProfile } from "@/hooks/use-merchant";
@@ -18,6 +19,7 @@ import { NetworkModeButton, NetworkSwitcherModal } from "@/components/NetworkSwi
 import { MAX_IMAGE_UPLOAD_BYTES, loadImage, readFileAsDataUrl, renderCroppedImageForUpload } from "@/lib/imageUpload";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 import { downloadPaymentQrCard } from "@/lib/qrDownload";
+import { StablecoinLogo } from "@/components/StablecoinLogo";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 const SERAPAY_LOGO_URL = "/icon-512.png";
@@ -25,6 +27,13 @@ const QR_PREVIEW_URL = buildClientAppUrl("/pay/preview");
 const EDITABLE_QR_STYLES = QR_STYLES.filter((styleOption) => styleOption.id !== "classy");
 const QR_STYLE_IDS = new Set(EDITABLE_QR_STYLES.map((styleOption) => styleOption.id));
 type PaymentMode = "test" | "live";
+
+function qrConversionErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /no[_ ]liquidity|no executable liquidity/i.test(message)
+    ? SERA_NO_LIQUIDITY_MESSAGE
+    : message || "Unable to fetch the Sera exchange rate";
+}
 
 function normalizeQrStyleValue(value: string | null | undefined, fallback: QrStyle = "rounded"): QrStyle {
   if (value === "classy") return "classy-rounded";
@@ -197,45 +206,14 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-const TOKEN_COLORS: Record<string, string> = {
-  USDT: "#26A17B", USDC: "#2775CA", XSGD: "#EF3E42", MYRT: "#CC0001",
-  IDRX: "#E4002B", IDRT: "#E4002B", EURC: "#003399", AUDD: "#00843D",
-  JPYC: "#BC002D", THBT: "#A51931", CADC: "#FF0000", BRZ: "#009C3B",
-  VGBP: "#012169", MXNT: "#006847", ZARP: "#007A4D", CNGN: "#008751",
-};
-function TokenIcon({ symbol, size = 28 }: { symbol: string; size?: number }) {
-  const [imageFailed, setImageFailed] = useState(false);
-  const logoUrl = !imageFailed ? getStablecoinLogoUrl(symbol) : undefined;
-  if (logoUrl) {
-    return (
-      <img
-        src={logoUrl}
-        alt={`${symbol} logo`}
-        onError={() => setImageFailed(true)}
-        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", background: "rgba(0,0,0,0.05)", flexShrink: 0 }}
-      />
-    );
-  }
-  const coin = getStablecoinBySymbol(symbol);
-  const flagEmoji = coin?.icon;
-  if (flagEmoji) {
-    return (
-      <div style={{ width: size, height: size, borderRadius: "50%", background: "rgba(0,0,0,0.05)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: size * 0.55 }}>
-        <span role="img" aria-label={symbol}>{flagEmoji}</span>
-      </div>
-    );
-  }
-  const color = TOKEN_COLORS[symbol] ?? "#888";
+function TokenIcon({ symbol, logoUri, size = 28 }: { symbol: string; logoUri?: string; size?: number }) {
   return (
-    <div style={{
-      width: size, height: size, borderRadius: "50%",
-      background: color, display: "flex", alignItems: "center", justifyContent: "center",
-      flexShrink: 0,
-    }}>
-      <span style={{ fontSize: size * 0.38, fontWeight: 700, color: "#fff", letterSpacing: "-0.5px" }}>
-        {symbol.slice(0, 2)}
-      </span>
-    </div>
+    <StablecoinLogo
+      symbol={symbol}
+      logoUri={logoUri}
+      style={{ width: size, height: size, borderRadius: "50%", objectFit: "contain", background: "rgba(0,0,0,0.05)", flexShrink: 0 }}
+      fallbackClassName="inline-flex items-center justify-center bg-gray-100 text-[10px] font-bold text-gray-600"
+    />
   );
 }
 
@@ -269,21 +247,23 @@ function StatusBadge({ status }: { status: string }) {
 
 // ── Coin Sheet Modal ───────────────────────────────────────────────────────
 function CoinSheet({
-  title, onClose, onSelect, selectedSymbol,
+  title, onClose, onSelect, onClear, selectedSymbol, coins,
 }: {
   title: string;
   onClose: () => void;
   onSelect: (c: Stablecoin) => void;
+  onClear?: () => void;
   selectedSymbol?: string;
+  coins: Stablecoin[];
 }) {
   const [query, setQuery] = useState("");
   const filtered = query
-    ? STABLECOINS.filter(c =>
+    ? coins.filter(c =>
         c.symbol.toLowerCase().includes(query.toLowerCase()) ||
         c.name.toLowerCase().includes(query.toLowerCase()) ||
         c.currency.toLowerCase().includes(query.toLowerCase())
       )
-    : STABLECOINS;
+    : coins;
 
   return (
     <>
@@ -299,22 +279,38 @@ function CoinSheet({
         width: "min(440px, calc(100vw - 32px))",
         maxHeight: "min(560px, 80dvh)",
         borderRadius: 20,
-        display: "flex", flexDirection: "column",
+        display: "flex", flexDirection: "column", overflow: "hidden",
         animation: "coinModalIn 0.22s cubic-bezier(0.34,1.2,0.64,1) both",
         boxShadow: "0 8px 48px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08)",
       }}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 20px 12px" }}>
           <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1C1C1E", letterSpacing: "-0.3px", margin: 0 }}>{title}</h3>
-          <button onClick={onClose} style={{
-            width: 28, height: 28, borderRadius: "50%", background: "#F2F2F7",
-            border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-            color: "rgba(60,60,67,0.5)",
-          }}>
-            <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {onClear ? (
+              <button
+                type="button"
+                onClick={() => { onClear(); onClose(); }}
+                disabled={!selectedSymbol}
+                style={{
+                  minHeight: 28, padding: "0 2px", border: "none", background: "transparent",
+                  color: selectedSymbol ? "#00A87A" : "rgba(60,60,67,0.28)",
+                  fontSize: 13, fontWeight: 700, cursor: selectedSymbol ? "pointer" : "default",
+                }}
+              >
+                Clear
+              </button>
+            ) : null}
+            <button onClick={onClose} aria-label="Close currency selector" style={{
+              width: 28, height: 28, borderRadius: "50%", background: "#F2F2F7",
+              border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+              color: "rgba(60,60,67,0.5)",
+            }}>
+              <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
         {/* Search */}
         <div style={{ padding: "0 16px 12px" }}>
@@ -336,7 +332,7 @@ function CoinSheet({
           </div>
         </div>
         {/* List */}
-        <div style={{ flex: 1, overflowY: "auto", paddingBottom: 16 }}>
+        <div className="serapay-modal-scrollbar" style={{ flex: 1, overflowY: "auto", paddingBottom: 16 }}>
           <div style={{ margin: "0 12px" }}>
             <div style={{ background: "#F9F9FB", borderRadius: 14, overflow: "hidden" }}>
               {filtered.map((c, i) => (
@@ -346,7 +342,7 @@ function CoinSheet({
                   borderTop: i > 0 ? "1px solid rgba(60,60,67,0.06)" : "none",
                   transition: "background 0.12s",
                 }}>
-                  <TokenIcon symbol={c.symbol} size={34} />
+                  <TokenIcon symbol={c.symbol} logoUri={c.logoUri} size={34} />
                   <div style={{ flex: 1, textAlign: "left" }}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: "#1C1C1E" }}>{c.symbol}</div>
                     <div style={{ fontSize: 12, color: "rgba(60,60,67,0.5)" }}>{c.name}</div>
@@ -1761,6 +1757,9 @@ export default function Home() {
 
   const [step, setStep] = useState<1 | 2>(1); // 1 = form, 2 = QR display
   const [selectedCoin, setSelectedCoin] = useState<Stablecoin | null>(null);
+  const [currencies, setCurrencies] = useState<SeraCurrency[]>([]);
+  const [currenciesLoading, setCurrenciesLoading] = useState(true);
+  const [currenciesError, setCurrenciesError] = useState("");
   const [amount, setAmount] = useState("");
   const [customerCoin, setCustomerCoin] = useState<Stablecoin | null>(null);
   const [customerAmount, setCustomerAmount] = useState("");
@@ -1768,6 +1767,7 @@ export default function Home() {
   const [lastEdited, setLastEdited] = useState<"receive" | "pay">("receive");
   const [exchangeRate, setExchangeRate] = useState<number | null>(null);
   const [rateLoading, setRateLoading] = useState(false);
+  const [conversionError, setConversionError] = useState("");
   const rateAbortRef = useRef<AbortController | null>(null);
   const [paymentUrl, setPaymentUrl] = useState("");
   const [guestReceiverAddress, setGuestReceiverAddress] = useState("");
@@ -1801,6 +1801,7 @@ export default function Home() {
   const [showQrCoinSheet, setShowQrCoinSheet] = useState(false);
   const [showQrReceiveCoinSheet, setShowQrReceiveCoinSheet] = useState(false);
   const [qrRateLoading, setQrRateLoading] = useState(false);
+  const qrRateRequestRef = useRef(0);
   const directQrScanFromBlockRef = useRef<string | null>(null);
   const directQrScanKeyRef = useRef("");
   const [directQrPayment, setDirectQrPayment] = useState<{ amount: string; coin: string } | null>(null);
@@ -1811,9 +1812,38 @@ export default function Home() {
     "";
   const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress || walletAddress || guestReceiverAddress;
   const qrDisplayCoin = customerCoin ?? selectedCoin;
+  const qrDisplayToken = currencies.find((coin) => coin.symbol === qrDisplayCoin?.symbol) ?? null;
   const qrDisplayAmount = normalizeDecimalAmountText(customerAmount || amount);
+  const conversionReady = !customerCoin || customerCoin.symbol === selectedCoin?.symbol || Boolean(exchangeRate && customerAmount && !conversionError);
   const isConnected = authenticated;
   const merchantWorkspaceReady = Boolean(dashboardApiKey && walletAddress);
+
+  useEffect(() => {
+    let active = true;
+    setCurrenciesLoading(true);
+    setCurrenciesError("");
+    loadSeraCurrencies(paymentChainId)
+      .then((loaded) => {
+        if (!active) return;
+        setCurrencies(loaded);
+        const savedCoin = walletAddress
+          ? localStorage.getItem(`serapay_coin_${walletAddress}`) || localStorage.getItem("serapay_receive_coin")
+          : null;
+        setSelectedCoin((current) => loaded.find((coin) => coin.symbol === (current?.symbol || savedCoin)) ?? null);
+        setCustomerCoin((current) => current ? loaded.find((coin) => coin.symbol === current.symbol) ?? null : null);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setCurrencies([]);
+        setSelectedCoin(null);
+        setCustomerCoin(null);
+        setCurrenciesError(error instanceof Error ? error.message : "Unable to load currencies from Sera");
+      })
+      .finally(() => {
+        if (active) setCurrenciesLoading(false);
+      });
+    return () => { active = false; };
+  }, [paymentChainId, walletAddress]);
 
   // AuthProvider owns Privy token verification and merchant registration.
   // Home only mirrors the verified dashboard key into QR/profile state.
@@ -1861,15 +1891,22 @@ export default function Home() {
 
   // ── Fetch exchange rate whenever coins change ──────────────────────────
   useEffect(() => {
-    if (!selectedCoin || !customerCoin) { setExchangeRate(null); return; }
-    if (selectedCoin.symbol === customerCoin.symbol) { setExchangeRate(1); return; }
+    if (step === 2) return;
+    if (!selectedCoin || !customerCoin) { setExchangeRate(null); setConversionError(""); return; }
+    if (selectedCoin.symbol === customerCoin.symbol) { setExchangeRate(1); setConversionError(""); return; }
     // Abort previous in-flight request
     rateAbortRef.current?.abort();
     const ctrl = new AbortController();
     rateAbortRef.current = ctrl;
     setRateLoading(true);
+    setExchangeRate(null);
+    setConversionError("");
     fetch(`/api/rates?from=${selectedCoin.symbol}&to=${customerCoin.symbol}&chainId=${paymentChainId}`, { signal: ctrl.signal })
-      .then(r => r.json())
+      .then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+        return data;
+      })
       .then(data => {
         if (data.rate) {
           setExchangeRate(data.rate);
@@ -1881,13 +1918,20 @@ export default function Home() {
             const calc = (parseFloat(customerAmount) / data.rate);
             setAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));
           }
+        } else {
+          throw new Error("Sera did not return an exchange rate");
         }
       })
-      .catch(e => { if (e.name !== "AbortError") setExchangeRate(null); })
+      .catch(e => {
+        if (e.name !== "AbortError") {
+          setExchangeRate(null);
+          setConversionError(e instanceof Error ? e.message : "Unable to fetch the Sera exchange rate");
+        }
+      })
       .finally(() => setRateLoading(false));
     return () => ctrl.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCoin?.symbol, customerCoin?.symbol, paymentChainId]);
+  }, [selectedCoin?.symbol, customerCoin?.symbol, paymentChainId, step]);
 
   // Persist selected coin (wallet-scoped key)
   useEffect(() => {
@@ -1899,13 +1943,6 @@ export default function Home() {
   useEffect(() => {
     if (!isConnected || !walletAddress) return;
     try {
-      // Coin
-      const savedCoin = localStorage.getItem(`serapay_coin_${walletAddress}`) ||
-        localStorage.getItem("serapay_receive_coin"); // migrate legacy key
-      if (savedCoin) {
-        const coin = STABLECOINS.find(c => c.symbol === savedCoin);
-        if (coin) setSelectedCoin(coin);
-      }
       // QR prefs
       const fg = localStorage.getItem(`serapay_qr_fgColor_${walletAddress}`);
       const bg = localStorage.getItem(`serapay_qr_bgColor_${walletAddress}`);
@@ -1947,11 +1984,11 @@ export default function Home() {
     receiverAddress?: string;
     includeExpiry?: boolean;
   } = {}) => {
-    const receiveCoin = overrides.receiveCoin ?? selectedCoin;
+    const receiveCoin = overrides.receiveCoin === undefined ? selectedCoin : overrides.receiveCoin;
     const receiveAddress = overrides.receiverAddress ?? receiverAddress;
     if (!receiveCoin || !receiveAddress) return "";
     const receiveAmount = overrides.receiveAmount ?? amount;
-    const payCoin = overrides.payCoin ?? customerCoin;
+    const payCoin = overrides.payCoin === undefined ? customerCoin : overrides.payCoin;
     const payAmount = overrides.payAmount ?? customerAmount;
     const includeExpiry = overrides.includeExpiry ?? true;
 
@@ -1981,8 +2018,29 @@ export default function Home() {
     setLastEdited("receive");
   }, [selectedCoin, customerCoin, amount, customerAmount]);
 
+  const handleClearCustomerCoin = useCallback(() => {
+    rateAbortRef.current?.abort();
+    qrRateRequestRef.current += 1;
+    setCustomerCoin(null);
+    setCustomerAmount("");
+    setExchangeRate(null);
+    setConversionError("");
+    setRateLoading(false);
+    setQrRateLoading(false);
+    setLastEdited("receive");
+
+    if (step === 2) {
+      const directPaymentUrl = createPaymentUrl({ payCoin: null, payAmount: "" });
+      if (directPaymentUrl) setPaymentUrl(directPaymentUrl);
+    }
+  }, [createPaymentUrl, step]);
+
   const handleGenerateQR = useCallback(() => {
     if (!selectedCoin) return;
+    if (customerCoin && customerCoin.symbol !== selectedCoin.symbol && (!exchangeRate || !customerAmount)) {
+      setConversionError("A current Sera exchange rate is required before generating this payment");
+      return;
+    }
     if (!receiverAddress) {
       setShowGuestReceiverModal(true);
       return;
@@ -1991,7 +2049,7 @@ export default function Home() {
     if (!url) return;
     setPaymentUrl(url);
     setStep(2);
-  }, [createPaymentUrl, receiverAddress, selectedCoin]);
+  }, [createPaymentUrl, customerAmount, customerCoin, exchangeRate, receiverAddress, selectedCoin]);
 
   const handleGuestReceiverSubmit = useCallback((address: string) => {
     if (!selectedCoin) return;
@@ -2018,12 +2076,16 @@ export default function Home() {
     try {
       const displayCoin = customerCoin ?? selectedCoin;
       const displayAmount = customerAmount || amount;
-      const walletQrValue = buildWalletPaymentUri({
+      const walletQrValue = buildPaymentQrValue({
         receiverAddress,
         coin: displayCoin?.symbol,
+        receiveCoin: selectedCoin?.symbol,
         amount: displayAmount || undefined,
         chainId: paymentChainId,
-      }) || paymentUrl;
+        tokenAddress: currencies.find((coin) => coin.symbol === displayCoin?.symbol)?.contractAddress,
+        tokenDecimals: currencies.find((coin) => coin.symbol === displayCoin?.symbol)?.decimals,
+        paymentUrl,
+      });
       await downloadPaymentQrCard({
         qrValue: walletQrValue,
         receiverAddress,
@@ -2037,11 +2099,11 @@ export default function Home() {
         qrMode: localQrMode || merchantProfile?.qrMode || "standard",
       });
     } catch (e) {
-      console.error("QR card download failed:", e);
+      if (import.meta.env.DEV) console.error("QR card download failed:", e);
     } finally {
       setQrDownloading(false);
     }
-  }, [amount, customerAmount, customerCoin, localLogoData, localQrBgColor, localQrFgColor, localQrMode, localQrStyle, merchantName, merchantProfile, paymentChainId, paymentUrl, receiverAddress, selectedCoin]);
+  }, [amount, currencies, customerAmount, customerCoin, localLogoData, localQrBgColor, localQrFgColor, localQrMode, localQrStyle, merchantName, merchantProfile, paymentChainId, paymentUrl, receiverAddress, selectedCoin]);
 
   const handleReset = useCallback(() => {
     setStep(1);
@@ -2058,6 +2120,9 @@ export default function Home() {
     const coin = qrDisplayCoin?.symbol;
     const scanAmount = qrDisplayAmount;
     if (step !== 2 || !paymentUrl || !receiverAddress || !coin || !scanAmount || Number(scanAmount) <= 0) return;
+    // A cross-currency QR opens SeraPay checkout and is tracked by the Sera
+    // swap transaction. This scanner is only for raw same-token wallet QR.
+    if (!selectedCoin || coin !== selectedCoin.symbol) return;
     if (directQrPayment) return;
 
     const scanKey = `${receiverAddress.toLowerCase()}:${coin}:${scanAmount}:${paymentChainId}:${paymentUrl}`;
@@ -2089,7 +2154,7 @@ export default function Home() {
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (data.fromBlock && !directQrScanFromBlockRef.current) {
+        if (data.fromBlock) {
           directQrScanFromBlockRef.current = String(data.fromBlock);
         }
         if (data.status === "confirmed") {
@@ -2111,7 +2176,7 @@ export default function Home() {
       stopped = true;
       window.clearInterval(interval);
     };
-  }, [directQrPayment, paymentChainId, paymentUrl, qrDisplayAmount, qrDisplayCoin?.symbol, queryClient, receiverAddress, step]);
+  }, [directQrPayment, paymentChainId, paymentUrl, qrDisplayAmount, qrDisplayCoin?.symbol, queryClient, receiverAddress, selectedCoin, step]);
 
   const handleNameSaved = useCallback((newName: string) => {
     setMerchantName(newName);
@@ -2247,12 +2312,16 @@ export default function Home() {
     // Determine display values: show what customer pays
     const displayCoin = customerCoin ?? selectedCoin;
     const displayAmount = customerAmount || amount;
-    const activeQrValue = buildWalletPaymentUri({
+    const activeQrValue = buildPaymentQrValue({
       receiverAddress,
       coin: displayCoin?.symbol,
+      receiveCoin: selectedCoin?.symbol,
       amount: displayAmount || undefined,
       chainId: paymentChainId,
-    }) || paymentUrl;
+      tokenAddress: qrDisplayToken?.contractAddress,
+      tokenDecimals: qrDisplayToken?.decimals,
+      paymentUrl,
+    });
     const activeQrRenderMode = localQrMode || (merchantProfile?.qrMode as QrMode) || "standard";
     const activeQrLogo = localLogoData || merchantProfile?.logoData || undefined;
     const activeQrFgColor = normalizeQrColor(localQrFgColor || merchantProfile?.qrFgColor, "#000000");
@@ -2277,32 +2346,52 @@ export default function Home() {
     };
 
     const handleQrCoinSelect = (coin: Stablecoin) => {
-      setCustomerCoin(coin);
       setShowQrCoinSheet(false);
+      const requestId = ++qrRateRequestRef.current;
       // Fetch new rate and rebuild URL
       if (!selectedCoin) return;
+      // Keep the last valid payment request active until the new Sera quote
+      // succeeds. A failed route must never erase a usable QR code.
+      setConversionError("");
       if (coin.symbol === selectedCoin.symbol) {
+        setQrRateLoading(false);
         const sameAmount = normalizeDecimalAmountText(amount);
+        setCustomerCoin(coin);
         setCustomerAmount(sameAmount);
+        setExchangeRate(1);
         const newUrl = createPaymentUrl({ payCoin: coin, payAmount: sameAmount });
         setPaymentUrl(newUrl);
         return;
       }
       setQrRateLoading(true);
       fetch(`/api/rates?from=${selectedCoin.symbol}&to=${coin.symbol}&chainId=${paymentChainId}`)
-        .then(r => r.json())
+        .then(async r => {
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+          return data;
+        })
         .then(data => {
+          if (requestId !== qrRateRequestRef.current) return;
           if (data.rate) {
             const calc = parseFloat(amount) * data.rate;
             const newPayAmount = isNaN(calc) ? "" : formatDecimalAmount(calc);
+            setCustomerCoin(coin);
             setExchangeRate(data.rate);
             setCustomerAmount(newPayAmount);
             const newUrl = createPaymentUrl({ payCoin: coin, payAmount: newPayAmount });
             setPaymentUrl(newUrl);
+          } else {
+            throw new Error("Sera did not return an exchange rate");
           }
         })
-        .catch(() => {})
-        .finally(() => setQrRateLoading(false));
+        .catch((error) => {
+          if (requestId === qrRateRequestRef.current) {
+            setConversionError(qrConversionErrorMessage(error));
+          }
+        })
+        .finally(() => {
+          if (requestId === qrRateRequestRef.current) setQrRateLoading(false);
+        });
     };
 
     return (
@@ -2399,6 +2488,27 @@ export default function Home() {
               </div>
             )}
             {/* Spacer — receiveLabel moved below QR */}
+            {conversionError ? (
+              <div
+                role="alert"
+                style={{
+                  width: "min(380px, calc(100vw - 64px))",
+                  boxSizing: "border-box",
+                  margin: "2px auto 14px",
+                  border: "1px solid #F04438",
+                  borderRadius: 12,
+                  background: "#FFF7F6",
+                  color: "#B42318",
+                  padding: "10px 12px",
+                  fontSize: 12,
+                  fontWeight: 650,
+                  lineHeight: 1.45,
+                  textAlign: "left",
+                }}
+              >
+                {conversionError}
+              </div>
+            ) : null}
             {/* QR Code */}
             <div style={{ display: "block", position: "relative", width: "fit-content", maxWidth: "100%", margin: "0 auto" }}>
               <div id="serapay-qr-wrapper" onClick={handleCopyLink} title="Click to copy payment link" style={{
@@ -2468,7 +2578,7 @@ export default function Home() {
                   color: "#0A1F1A",
                   fontSize: 12,
                   fontWeight: 800,
-                  cursor: qrDownloading ? "default" : "pointer",
+                  cursor: qrDownloading ? "not-allowed" : "pointer",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -2579,12 +2689,12 @@ export default function Home() {
                   height: 50, borderRadius: 14, background: "#F2F2F7", border: "none",
                   fontSize: 15, fontWeight: 600, color: "rgba(60,60,67,0.6)", cursor: "pointer",
                 }}>Cancel</button>
-                <button onClick={handleQrEditSave} style={{
+                <button onClick={handleQrEditSave} disabled={qrRateLoading || !!conversionError} style={{
                   height: 50, borderRadius: 14,
-                  background: "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none",
-                  fontSize: 15, fontWeight: 700, color: "#fff", cursor: "pointer",
+                  background: qrRateLoading || conversionError ? "rgba(0,0,0,0.08)" : "linear-gradient(135deg, #4ECE9A, #3AB882)", border: "none",
+                  fontSize: 15, fontWeight: 700, color: qrRateLoading || conversionError ? "rgba(60,60,67,0.35)" : "#fff", cursor: qrRateLoading || conversionError ? "not-allowed" : "pointer",
                   boxShadow: "0 4px 16px rgba(78,206,154,0.28)",
-                }}>Done</button>
+                }}>{qrRateLoading ? "Checking…" : "Done"}</button>
               </div>
             </div>
           </>
@@ -2596,7 +2706,9 @@ export default function Home() {
             title="Customer Pays With"
             onClose={() => setShowQrCoinSheet(false)}
             onSelect={handleQrCoinSelect}
+            onClear={handleClearCustomerCoin}
             selectedSymbol={displayCoin?.symbol}
+            coins={currencies}
           />
         )}
 
@@ -2606,17 +2718,26 @@ export default function Home() {
             title="Receive In"
             onClose={() => setShowQrReceiveCoinSheet(false)}
             onSelect={(coin) => {
-              setSelectedCoin(coin);
               setShowQrReceiveCoinSheet(false);
-              // Recalculate customer amount with new receive coin
+              const requestId = ++qrRateRequestRef.current;
+              const receiveAmount = normalizeDecimalAmountText(qrEditAmount || amount);
+              setConversionError("");
+              // As with the pay-coin picker, keep the last valid QR active
+              // until Sera confirms this new receive route is executable.
               if (customerCoin && customerCoin.symbol !== coin.symbol) {
+                setQrRateLoading(true);
                 fetch(`/api/rates?from=${coin.symbol}&to=${customerCoin.symbol}&chainId=${paymentChainId}`)
-                  .then(r => r.json())
+                  .then(async r => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+                    return data;
+                  })
                   .then(data => {
+                    if (requestId !== qrRateRequestRef.current) return;
                     if (data.rate) {
-                      const receiveAmount = normalizeDecimalAmountText(qrEditAmount || amount);
                       const calc = parseFloat(receiveAmount) * data.rate;
                       const newPayAmount = isNaN(calc) ? "" : formatDecimalAmount(calc);
+                      setSelectedCoin(coin);
                       setExchangeRate(data.rate);
                       setCustomerAmount(newPayAmount);
                       const newUrl = createPaymentUrl({
@@ -2626,21 +2747,35 @@ export default function Home() {
                         payAmount: newPayAmount,
                       });
                       setPaymentUrl(newUrl);
+                    } else {
+                      throw new Error("Sera did not return an exchange rate");
                     }
                   })
-                  .catch(() => {});
+                  .catch((error) => {
+                    if (requestId === qrRateRequestRef.current) {
+                      setConversionError(qrConversionErrorMessage(error));
+                    }
+                  })
+                  .finally(() => {
+                    if (requestId === qrRateRequestRef.current) setQrRateLoading(false);
+                  });
               } else {
                 // Same coin — rebuild URL with new receive coin
+                setQrRateLoading(false);
+                setSelectedCoin(coin);
+                setExchangeRate(1);
+                setCustomerAmount(receiveAmount);
                 const newUrl = createPaymentUrl({
                   receiveCoin: coin,
-                  receiveAmount: normalizeDecimalAmountText(qrEditAmount || amount),
+                  receiveAmount,
                   payCoin: coin,
-                  payAmount: normalizeDecimalAmountText(qrEditAmount || amount),
+                  payAmount: receiveAmount,
                 });
                 setPaymentUrl(newUrl);
               }
             }}
             selectedSymbol={selectedCoin?.symbol}
+            coins={currencies}
           />
         )}
       </div>
@@ -2928,17 +3063,17 @@ export default function Home() {
         {/* Generate QR button */}
         <button
           onClick={handleGenerateQR}
-          disabled={!selectedCoin}
+          disabled={!selectedCoin || currenciesLoading || !!currenciesError || rateLoading || !conversionReady}
           className="serapay-action-primary serapay-shine-button"
           style={{
             width: "100%", height: 54, borderRadius: 16,
-            background: selectedCoin
+            background: selectedCoin && !currenciesLoading && !currenciesError && !rateLoading && conversionReady
               ? "linear-gradient(135deg, #4ECE9A, #3AB882)"
               : "rgba(0,0,0,0.08)",
             border: "none",
-            color: selectedCoin ? "#fff" : "rgba(60,60,67,0.3)",
-            fontSize: 16, fontWeight: 700, cursor: selectedCoin ? "pointer" : "not-allowed",
-            boxShadow: selectedCoin ? "0 4px 12px rgba(78,206,154,0.18)" : "none",
+            color: selectedCoin && !currenciesLoading && !currenciesError && !rateLoading && conversionReady ? "#fff" : "rgba(60,60,67,0.3)",
+            fontSize: 16, fontWeight: 700, cursor: selectedCoin && !currenciesLoading && !currenciesError && !rateLoading && conversionReady ? "pointer" : "not-allowed",
+            boxShadow: selectedCoin && !currenciesLoading && !currenciesError && !rateLoading && conversionReady ? "0 4px 12px rgba(78,206,154,0.18)" : "none",
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             transition: "all 0.2s",
           }}
@@ -2947,8 +3082,18 @@ export default function Home() {
             <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
             <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
           </svg>
-          {!selectedCoin ? "Select a coin first" : "Generate QR"}
+          {currenciesLoading ? "Loading Sera currencies…" : rateLoading ? "Getting Sera rate…" : currenciesError ? "Currency registry unavailable" : conversionError ? "Exchange rate unavailable" : !selectedCoin ? "Select a coin first" : "Generate QR"}
         </button>
+        {currenciesError && (
+          <p style={{ margin: "10px 0 0", textAlign: "center", fontSize: 12, color: "#FF3B30" }}>
+            {currenciesError}. No payment QR was generated.
+          </p>
+        )}
+        {conversionError && (
+          <p style={{ margin: "10px 0 0", textAlign: "center", fontSize: 12, color: "#FF3B30" }}>
+            {conversionError}. The previous amount will not be used.
+          </p>
+        )}
 
         {/* Info strip */}
         <div style={{ marginTop: 20, background: "#F4FBF8", borderRadius: 14, padding: "12px 14px", border: "1px solid rgba(78,206,154,0.2)" }}>
@@ -3008,6 +3153,7 @@ export default function Home() {
           onClose={() => setShowCoinSheet(false)}
           onSelect={setSelectedCoin}
           selectedSymbol={selectedCoin?.symbol}
+          coins={currencies}
         />
       )}
 
@@ -3017,7 +3163,9 @@ export default function Home() {
           title="Customer Pays In"
           onClose={() => setShowCustomerCoinSheet(false)}
           onSelect={setCustomerCoin}
+          onClear={handleClearCustomerCoin}
           selectedSymbol={customerCoin?.symbol}
+          coins={currencies}
         />
       )}
 

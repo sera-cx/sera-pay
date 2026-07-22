@@ -8,8 +8,8 @@ import { useEvents } from "@/hooks/use-events";
 import { motion, AnimatePresence } from "framer-motion";
 import { SeraLogo } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal, useActiveNetworkMode } from "@/components/NetworkSwitcher";
-import { buildPaymentUrl, buildWalletPaymentUri, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
-import { STABLECOINS } from "@/lib/stablecoins";
+import { buildPaymentQrValue, buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
 import { downloadPaymentQrCard } from "@/lib/qrDownload";
@@ -51,14 +51,11 @@ function normalizeDashboardQrMode(value: unknown): QrMode {
   return value === "advanced" ? "advanced" : "standard";
 }
 
-function DashboardCoinDropdown({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function DashboardCoinDropdown({ value, onChange, currencies }: { value: string; onChange: (value: string) => void; currencies: SeraCurrency[] }) {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef<HTMLDivElement | null>(null);
-  const options = React.useMemo(() => [
-    { symbol: "", label: "Any coin" },
-    ...STABLECOINS.map((coin) => ({ symbol: coin.symbol, label: coin.symbol })),
-  ], []);
-  const selected = options.find((option) => option.symbol === value) || options[0];
+  const options = React.useMemo(() => currencies.map((coin) => ({ symbol: coin.symbol, label: coin.symbol })), [currencies]);
+  const selected = options.find((option) => option.symbol === value) || options[0] || { symbol: "", label: "Loading…" };
 
   React.useEffect(() => {
     if (!open) return;
@@ -210,6 +207,9 @@ function DashboardPaymentModal({
   const [amount, setAmount] = useState("");
   const [payAmount, setPayAmount] = useState("");
   const [rateLoading, setRateLoading] = useState(false);
+  const [rateError, setRateError] = useState("");
+  const [currencies, setCurrencies] = useState<SeraCurrency[]>([]);
+  const [registryError, setRegistryError] = useState("");
   const [copied, setCopied] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [description, setDescription] = useState("");
@@ -225,13 +225,15 @@ function DashboardPaymentModal({
   const qrBg = profile?.qrBgColor || "#ffffff";
   const receiveAmount = normalizeDecimalAmountText(amount);
   const displayPayAmount = normalizeDecimalAmountText(payAmount || amount);
-  const resolvedReceiveCoin = receiveCoin || "XSGD";
+  const resolvedReceiveCoin = receiveCoin;
   const resolvedPayCoin = payCoin || resolvedReceiveCoin;
+  const payToken = currencies.find((coin) => coin.symbol === resolvedPayCoin) ?? null;
+  const conversionReady = Boolean(resolvedReceiveCoin && resolvedPayCoin && (resolvedReceiveCoin === resolvedPayCoin || (displayPayAmount && !rateError)));
   const expiresAt = React.useMemo(() => {
     const duration = getDashboardExpiryMs(expiryOption);
     return duration > 0 ? expiryNow + duration : undefined;
   }, [expiryNow, expiryOption]);
-  const paymentUrl = React.useMemo(() => receiverAddress ? buildPaymentUrl({
+  const paymentUrl = React.useMemo(() => receiverAddress && conversionReady ? buildPaymentUrl({
     receiverAddress,
     receiveCoin: resolvedReceiveCoin,
     amount: receiveAmount || undefined,
@@ -243,33 +245,75 @@ function DashboardPaymentModal({
     description: description.trim() || undefined,
     expiresAt,
     singleUse: singleUse || undefined,
-  }) : "", [chainId, description, displayPayAmount, expiresAt, logo, merchantName, receiveAmount, receiverAddress, resolvedPayCoin, resolvedReceiveCoin, singleUse]);
-  const walletQrValue = React.useMemo(() => receiverAddress ? buildWalletPaymentUri({
+  }) : "", [chainId, conversionReady, description, displayPayAmount, expiresAt, logo, merchantName, receiveAmount, receiverAddress, resolvedPayCoin, resolvedReceiveCoin, singleUse]);
+  const paymentQrValue = React.useMemo(() => receiverAddress && paymentUrl ? buildPaymentQrValue({
     receiverAddress,
     coin: resolvedPayCoin,
+    receiveCoin: resolvedReceiveCoin,
     amount: displayPayAmount || undefined,
     chainId,
-  }) : "", [chainId, displayPayAmount, receiverAddress, resolvedPayCoin]);
+    tokenAddress: payToken?.contractAddress,
+    tokenDecimals: payToken?.decimals,
+    paymentUrl,
+  }) : "", [chainId, displayPayAmount, payToken, paymentUrl, receiverAddress, resolvedPayCoin, resolvedReceiveCoin]);
+
+  React.useEffect(() => {
+    let active = true;
+    setRegistryError("");
+    loadSeraCurrencies(chainId)
+      .then((loaded) => {
+        if (!active) return;
+        setCurrencies(loaded);
+        const configuredSymbol = String(profile?.receiveCoin || "").toUpperCase();
+        const configured = configuredSymbol ? loaded.find((coin) => coin.symbol === configuredSymbol) : undefined;
+        if (configuredSymbol && !configured) {
+          setReceiveCoin("");
+          setPayCoin("");
+          setRegistryError(`${configuredSymbol} is not supported by Sera on this network`);
+          return;
+        }
+        const preferred = configured || loaded.find((coin) => coin.symbol === "XSGD") || loaded[0];
+        setReceiveCoin(preferred?.symbol || "");
+        setPayCoin(preferred?.symbol || "");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setCurrencies([]);
+        setReceiveCoin("");
+        setPayCoin("");
+        setRegistryError(error instanceof Error ? error.message : "Unable to load Sera currencies");
+      });
+    return () => { active = false; };
+  }, [chainId, profile?.receiveCoin]);
 
   React.useEffect(() => {
     if (!receiveAmount) {
       setPayAmount("");
+      setRateError("");
       return;
     }
     if (resolvedReceiveCoin === resolvedPayCoin) {
       setPayAmount(receiveAmount);
+      setRateError("");
       return;
     }
     let cancelled = false;
     setRateLoading(true);
+    setPayAmount("");
+    setRateError("");
     fetch(`/api/rates?from=${resolvedReceiveCoin}&to=${resolvedPayCoin}&chainId=${chainId}`)
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+        return data;
+      })
       .then((data) => {
         if (cancelled) return;
         const rate = Number(data?.rate);
         if (Number.isFinite(rate) && rate > 0) setPayAmount(formatDecimalAmount(Number(receiveAmount) * rate));
+        else throw new Error("Sera did not return an exchange rate");
       })
-      .catch(() => undefined)
+      .catch((error) => { if (!cancelled) setRateError(error instanceof Error ? error.message : "Unable to fetch the Sera exchange rate"); })
       .finally(() => { if (!cancelled) setRateLoading(false); });
     return () => { cancelled = true; };
   }, [amount, chainId, receiveAmount, resolvedPayCoin, resolvedReceiveCoin]);
@@ -293,7 +337,7 @@ function DashboardPaymentModal({
   const downloadQr = async () => {
     if (!paymentUrl || !receiverAddress) return;
     await downloadPaymentQrCard({
-      qrValue: walletQrValue || paymentUrl,
+      qrValue: paymentQrValue || paymentUrl,
       receiverAddress,
       amount: displayPayAmount,
       coin: resolvedPayCoin,
@@ -324,7 +368,7 @@ function DashboardPaymentModal({
             <div>
               <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">I receive</p>
               <div className="flex overflow-visible rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-[#00C853] focus-within:ring-4 focus-within:ring-[#00C853]/10">
-                <DashboardCoinDropdown value={receiveCoin} onChange={setReceiveCoin} />
+                <DashboardCoinDropdown value={receiveCoin} onChange={setReceiveCoin} currencies={currencies} />
                 <input value={amount} onChange={(e) => setAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
               </div>
             </div>
@@ -338,7 +382,7 @@ function DashboardPaymentModal({
             <div>
               <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
               <div className="flex overflow-visible rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-[#00C853] focus-within:ring-4 focus-within:ring-[#00C853]/10">
-                <DashboardCoinDropdown value={payCoin} onChange={setPayCoin} />
+                <DashboardCoinDropdown value={payCoin} onChange={setPayCoin} currencies={currencies} />
                 <input value={payAmount} onChange={(e) => setPayAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
               </div>
             </div>
@@ -407,6 +451,12 @@ function DashboardPaymentModal({
             </div>
           </div>
 
+          {(registryError || rateError) ? (
+            <p className="mt-3 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">
+              {registryError || rateError}
+            </p>
+          ) : null}
+
           {paymentUrl ? (
             <div className="mt-5 rounded-3xl border border-gray-100 bg-[#F8FAFB] p-4 text-center">
               <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
@@ -414,7 +464,7 @@ function DashboardPaymentModal({
                 {(displayPayAmount || amount) ? `${displayPayAmount || amount} ` : ""}<span className="text-[#00C896]">{resolvedPayCoin}</span>
               </p>
               <div id="dashboard-payment-qr" onClick={copyLink} className="mx-auto mt-2 w-fit cursor-copy rounded-2xl bg-white p-2">
-                <QRStyled value={walletQrValue || paymentUrl} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
+                <QRStyled value={paymentQrValue || paymentUrl} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
               </div>
               <button
                 type="button"

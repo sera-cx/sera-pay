@@ -357,7 +357,7 @@ function TransactionDrawer({
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
-      console.error(e);
+      if (import.meta.env.DEV) console.error(e);
     } finally {
       setSaving(false);
     }

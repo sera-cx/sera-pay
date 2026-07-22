@@ -22,7 +22,7 @@ class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error) {
-    console.error("[App] Runtime error recovered by auto-refresh", error);
+    if (import.meta.env.DEV) console.error("[App] Runtime error recovered by auto-refresh", error);
 
     try {
       const key = "serapay_error_auto_reload";
