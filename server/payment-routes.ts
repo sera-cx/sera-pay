@@ -3143,7 +3143,7 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
       (inputAmountInTo, outputAmountInFrom) => inputAmountInTo / outputAmountInFrom,
     );
     rateCache.set(cacheKey, { rate, ts: Date.now() });
-    return { rate, source: "sera-swap-quote" };
+    return { rate, source: "sera-quote-rate" };
   } catch (error) {
     lastQuoteError = error;
   }
@@ -3155,7 +3155,7 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
       (_inputAmountInFrom, outputAmountInTo) => outputAmountInTo / _inputAmountInFrom,
     );
     rateCache.set(cacheKey, { rate, ts: Date.now() });
-    return { rate, source: "sera-swap-quote-reverse" };
+    return { rate, source: "sera-quote-rate-reverse" };
   } catch (error) {
     lastQuoteError = error;
   }

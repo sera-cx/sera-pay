@@ -460,6 +460,7 @@ export default function PayPage() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [req, setReq] = useState<ReturnType<typeof decodePaymentRequest> | null>(null);
   const [selectedCoin, setSelectedCoin] = useState<Stablecoin | null>(null);
+  const [payerChangedCoinInCheckout, setPayerChangedCoinInCheckout] = useState(false);
   const [supportedCoins, setSupportedCoins] = useState<SeraCurrency[]>([]);
   const [registryLoading, setRegistryLoading] = useState(true);
   const [registryError, setRegistryError] = useState("");
@@ -561,7 +562,7 @@ export default function PayPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req, selectedCoin?.symbol, rateRefreshKey, chainId]);
 
-  const requiresSeraSwap = Boolean(req?.swap && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
+  const requiresSeraSwap = Boolean(req?.swap === true && !payerChangedCoinInCheckout && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
   const selectedCoinSupported = Boolean(selectedCoin && supportedCoins.some((coin) => coin.symbol === selectedCoin.symbol));
   // True when the payment request has no fixed amount — customer types their own amount
   const isOpenAmount = !hasOrderItems && !req?.amount;
@@ -628,6 +629,7 @@ export default function PayPage() {
       const decoded = decodePaymentRequest(encoded);
       if (!decoded?.receiverAddress) { setPhase("invalid"); return; }
       setReq(decoded);
+      setPayerChangedCoinInCheckout(false);
       // Check expiry
       if (decoded.expiresAt && Date.now() > decoded.expiresAt) {
         setPhase("invalid"); return;
@@ -1760,7 +1762,12 @@ export default function PayPage() {
       {showCoinSheet && (
         <CoinSheet
           onClose={() => setShowCoinSheet(false)}
-          onSelect={(coin) => { setSelectedCoin(coin); setRegistryError(""); setTxError(""); }}
+          onSelect={(coin) => {
+            setPayerChangedCoinInCheckout(true);
+            setSelectedCoin(coin);
+            setRegistryError("");
+            setTxError("");
+          }}
           selectedSymbol={selectedCoin?.symbol}
           receiveCoin={req?.receiveCoin}
           supportedCoins={supportedCoins}
