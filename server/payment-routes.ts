@@ -1828,6 +1828,33 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
       return;
     }
 
+    if ("amountMismatch" in match && match.amountMismatch) {
+      const actualAmount = match.actualAmount || "0";
+      const recorded = await recordDirectTransferFailure({
+        txHash: match.txHash,
+        fromAddress: match.fromAddress,
+        toAddress,
+        coin,
+        expectedAmount: amount,
+        actualAmount,
+        chainId,
+        paymentUrl,
+        reason: `Expected ${amount} ${coin}, received ${actualAmount} ${coin}.`,
+      });
+      res.json({
+        status: "amount_mismatch",
+        fromBlock: (latestBlock + 1n).toString(),
+        latestBlock: (match.latestBlock ?? latestBlock).toString(),
+        expectedAmount: amount,
+        actualAmount,
+        coin,
+        message: `Received ${actualAmount} ${coin}, but this QR requires ${amount} ${coin}.`,
+        transaction: transactionToJson(recorded.transaction),
+        created: recorded.created,
+      });
+      return;
+    }
+
     const recorded = await recordDirectTransferPayment({
       txHash: match.txHash,
       fromAddress: match.fromAddress,
@@ -2508,6 +2535,86 @@ async function recordDirectTransferPayment({
   return { transaction: transaction!, created: true };
 }
 
+async function recordDirectTransferFailure({
+  txHash,
+  fromAddress,
+  toAddress,
+  coin,
+  expectedAmount,
+  actualAmount,
+  chainId,
+  paymentUrl,
+  reason,
+}: {
+  txHash: `0x${string}`;
+  fromAddress?: string | null;
+  toAddress: string;
+  coin: string;
+  expectedAmount: string;
+  actualAmount: string;
+  chainId: number;
+  paymentUrl?: string | null;
+  reason: string;
+}) {
+  const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
+  const existing = await getTransactionByHash(normalizedTxHash) || await getTransactionByHash(txHash);
+  if (existing) {
+    return { transaction: existing, created: false };
+  }
+
+  const resolved = await resolveMerchantForReceiver(toAddress);
+  if (!resolved) {
+    throw new Error("Receiver wallet is not attached to a SeraPay merchant.");
+  }
+
+  const txId = uuidv4();
+  const safeReason = reason.slice(0, 180);
+  const notes = JSON.stringify({
+    type: "direct_wallet_qr",
+    paymentUrl: typeof paymentUrl === "string" ? paymentUrl.slice(0, 1200) : null,
+    errorCode: "amount_mismatch",
+    expectedAmount,
+    actualAmount,
+    reason: safeReason,
+  });
+
+  await createTransaction({
+    id: txId,
+    merchantId: resolved.merchant.id,
+    txHash: normalizedTxHash,
+    fromAddress: fromAddress?.toLowerCase() || null,
+    toAddress: resolved.receiveAddress,
+    coin,
+    amount: actualAmount,
+    chainId,
+    status: "failed",
+    verified: 1,
+    payCoin: coin,
+    payAmount: actualAmount,
+    memo: safeReason,
+    notes,
+    notifiedAt: new Date(),
+  });
+
+  const transaction = await getTransactionById(txId);
+  notifyMerchantSse(resolved.merchant.id, {
+    event: "payment_failed",
+    transactionId: txId,
+    txHash: normalizedTxHash,
+    amount: actualAmount,
+    coin,
+    payAmount: actualAmount,
+    payCoin: coin,
+    from: fromAddress?.toLowerCase() || null,
+    verified: true,
+    source: "direct_wallet_qr",
+    errorCode: "amount_mismatch",
+    expectedAmount,
+  });
+
+  return { transaction: transaction!, created: true };
+}
+
 async function findDirectTransfer({
   toAddress,
   coin,
@@ -2538,13 +2645,30 @@ async function findDirectTransfer({
     toBlock,
   });
 
+  let mismatch: {
+    txHash: `0x${string}`;
+    fromAddress: string | null;
+    latestBlock: bigint;
+    amountMismatch: true;
+    actualAmount: string;
+  } | null = null;
+
   for (const log of logs) {
     const args = (log as any).args || {};
     const actualRaw = BigInt(String(args.value ?? 0));
-    const diff = actualRaw > expectedRaw ? actualRaw - expectedRaw : expectedRaw - actualRaw;
-    if (diff > 1n) continue;
     const txHash = String(log.transactionHash || "");
     if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) continue;
+    const diff = actualRaw > expectedRaw ? actualRaw - expectedRaw : expectedRaw - actualRaw;
+    if (diff > 1n) {
+      mismatch ??= {
+        txHash: txHash as `0x${string}`,
+        fromAddress: typeof args.from === "string" ? args.from.toLowerCase() : null,
+        latestBlock: toBlock,
+        amountMismatch: true,
+        actualAmount: fromRawTokenAmount(actualRaw, decimals),
+      };
+      continue;
+    }
     return {
       txHash: txHash as `0x${string}`,
       fromAddress: typeof args.from === "string" ? args.from.toLowerCase() : null,
@@ -2552,7 +2676,7 @@ async function findDirectTransfer({
     };
   }
 
-  return { txHash: null, fromAddress: null, latestBlock: toBlock };
+  return mismatch ?? { txHash: null, fromAddress: null, latestBlock: toBlock };
 }
 
 /**
@@ -2806,7 +2930,7 @@ paymentRouter.get("/payer/history", async (req, res) => {
 /** GET /api/healthz */
 paymentRouter.get("/healthz", (_req, res) => res.json({ status: "ok", ts: Date.now() }));
 
-// ─── Exchange Rates endpoint (Sera Goldsky GraphQL) ─────────────────────────
+// ─── Exchange Rates endpoint (Sera FX API with Sera-derived fallbacks) ───────
 
 const GOLDSKY_URL = ENV.goldskyGraphqlUrl;
 
@@ -2914,63 +3038,134 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
     return { rate: 1, source: "identity" };
   }
 
-  // Payment conversion runs in the reverse direction: the customer spends
-  // `to` and the merchant receives `from`. A public swap quote therefore gives
-  // both the current Sera price and proof that this payment direction has
-  // executable liquidity. This also remains usable when the reference-only
-  // /fx/rate service is temporarily unavailable.
-  const scale = 10n ** BigInt(toToken.decimals);
-  const minimumRaw = BigInt(String(toToken.min_trade_amount_raw || "0"));
-  const referenceInputs = Array.from(new Set([
-    minimumRaw > 10n * scale ? minimumRaw : 10n * scale,
-    minimumRaw > 100n * scale ? minimumRaw : 100n * scale,
-    minimumRaw > 1000n * scale ? minimumRaw : 1000n * scale,
-  ].map((value) => value.toString()))).map((value) => BigInt(value));
+  const fromCurrency = String(fromToken.currency || from).trim().toUpperCase();
+  const toCurrency = String(toToken.currency || to).trim().toUpperCase();
+  if (fromCurrency === toCurrency) {
+    rateCache.set(cacheKey, { rate: 1, ts: Date.now() });
+    return { rate: 1, source: "sera-fx-same-currency" };
+  }
 
-  let lastQuoteError: unknown = null;
-  let rate = 0;
-  for (const referenceInputRaw of referenceInputs) {
-    const quoteRequest = {
-      from_token: toToken.address,
-      to_token: fromToken.address,
-      from_amount: referenceInputRaw.toString(),
-      owner_address: "0x0000000000000000000000000000000000000001",
-      recipient: "0x0000000000000000000000000000000000000001",
-      expiration: seraNowSec + 180,
-      gas_mode: "pay_more",
-    };
+  let lastRateError: unknown = null;
+  if (/^[A-Z]{3}$/.test(fromCurrency) && /^[A-Z]{3}$/.test(toCurrency)) {
     try {
-      const rawQuote = await callSeraApi<unknown>({
+      const fx = await callSeraApi<SeraFxRateResponse>({
         baseUrl,
-        path: "/swap/quote",
-        method: "POST",
-        body: quoteRequest,
+        path: "/fx/rate",
+        method: "GET",
+        query: { base: fromCurrency, quote: toCurrency },
         authMode: "none",
       });
-      const quote = unwrapSeraQuote(rawQuote);
-      const routeParams = getRouteParams(quote);
-      const outputRaw = BigInt(String(routeParams.minOutputAmount));
-      if (outputRaw <= 0n) throw new Error(`Sera returned no executable output for ${to}/${from}`);
-      const referenceInput = Number(fromRawTokenAmount(referenceInputRaw, toToken.decimals));
-      const quotedOutput = Number(fromRawTokenAmount(outputRaw, fromToken.decimals));
-      rate = referenceInput / quotedOutput;
+      const rate = Number(fx.rate);
       if (!Number.isFinite(rate) || rate <= 0) {
-        throw new Error(`Invalid Sera swap quote rate for ${from}/${to}`);
+        throw new Error(`Invalid Sera FX rate for ${fromCurrency}/${toCurrency}`);
       }
-      break;
+      rateCache.set(cacheKey, { rate, ts: Date.now() });
+      return { rate, source: "sera-fx-rate" };
     } catch (error) {
-      lastQuoteError = error;
-      const canTryAnotherSize = error instanceof SeraApiError
-        && (error.status === 503 || error.errorCode === "no_liquidity" || error.errorCode === "NO_LIQUIDITY");
-      if (!canTryAnotherSize) throw error;
+      lastRateError = error;
     }
   }
-  if (!Number.isFinite(rate) || rate <= 0) {
-    throw lastQuoteError instanceof Error ? lastQuoteError : new Error(`Sera returned no executable quote for ${to}/${from}`);
+
+  try {
+    const rate = await fetchSeraRate(from, to);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      throw new Error(`Invalid Sera market rate for ${from}/${to}`);
+    }
+    rateCache.set(cacheKey, { rate, ts: Date.now() });
+    return { rate, source: "sera-goldsky" };
+  } catch (error) {
+    lastRateError = error;
   }
 
-  rateCache.set(cacheKey, { rate, ts: Date.now() });
-  return { rate, source: "sera-swap-quote" };
+  // Final fallback: Sera swap quotes can still provide a live price if the
+  // reference FX feed is temporarily unavailable. Direct QR payments do not
+  // require swap liquidity, so try both quote orientations before giving up.
+  const buildReferenceInputs = (inputToken: SeraToken) => {
+    const scale = 10n ** BigInt(inputToken.decimals);
+    const minimumRaw = BigInt(String(inputToken.min_trade_amount_raw || "0"));
+    return Array.from(new Set([
+      minimumRaw > 10n * scale ? minimumRaw : 10n * scale,
+      minimumRaw > 100n * scale ? minimumRaw : 100n * scale,
+      minimumRaw > 1000n * scale ? minimumRaw : 1000n * scale,
+    ].map((value) => value.toString()))).map((value) => BigInt(value));
+  };
+
+  const quoteRate = async (
+    inputToken: SeraToken,
+    outputToken: SeraToken,
+    rateFromQuote: (inputAmount: number, outputAmount: number) => number,
+  ) => {
+    let lastQuoteError: unknown = null;
+    for (const referenceInputRaw of buildReferenceInputs(inputToken)) {
+      const quoteRequest = {
+        from_token: inputToken.address,
+        to_token: outputToken.address,
+        from_amount: referenceInputRaw.toString(),
+        owner_address: "0x0000000000000000000000000000000000000001",
+        recipient: "0x0000000000000000000000000000000000000001",
+        expiration: seraNowSec + 180,
+        gas_mode: "pay_more",
+      };
+      try {
+        const rawQuote = await callSeraApi<unknown>({
+          baseUrl,
+          path: "/swap/quote",
+          method: "POST",
+          body: quoteRequest,
+          authMode: "none",
+        });
+        const quote = unwrapSeraQuote(rawQuote);
+        const routeParams = getRouteParams(quote);
+        const outputRaw = BigInt(String(routeParams.minOutputAmount));
+        if (outputRaw <= 0n) throw new Error(`Sera returned no executable output for ${inputToken.symbol}/${outputToken.symbol}`);
+        const referenceInput = Number(fromRawTokenAmount(referenceInputRaw, inputToken.decimals));
+        const quotedOutput = Number(fromRawTokenAmount(outputRaw, outputToken.decimals));
+        const rate = rateFromQuote(referenceInput, quotedOutput);
+        if (!Number.isFinite(rate) || rate <= 0) {
+          throw new Error(`Invalid Sera swap quote rate for ${from}/${to}`);
+        }
+        return rate;
+      } catch (error) {
+        lastQuoteError = error;
+        const canTryAnotherSize = error instanceof SeraApiError
+          && (error.status === 503 || error.errorCode === "no_liquidity" || error.errorCode === "NO_LIQUIDITY");
+        if (!canTryAnotherSize) throw error;
+      }
+    }
+    throw lastQuoteError instanceof Error ? lastQuoteError : new Error(`Sera returned no executable quote for ${from}/${to}`);
+  };
+
+  let lastQuoteError: unknown = null;
+  try {
+    const rate = await quoteRate(
+      toToken,
+      fromToken,
+      (inputAmountInTo, outputAmountInFrom) => inputAmountInTo / outputAmountInFrom,
+    );
+    rateCache.set(cacheKey, { rate, ts: Date.now() });
+    return { rate, source: "sera-swap-quote" };
+  } catch (error) {
+    lastQuoteError = error;
+  }
+
+  try {
+    const rate = await quoteRate(
+      fromToken,
+      toToken,
+      (_inputAmountInFrom, outputAmountInTo) => outputAmountInTo / _inputAmountInFrom,
+    );
+    rateCache.set(cacheKey, { rate, ts: Date.now() });
+    return { rate, source: "sera-swap-quote-reverse" };
+  } catch (error) {
+    lastQuoteError = error;
+  }
+
+  if (lastQuoteError instanceof SeraApiError && (lastQuoteError.errorCode === "no_liquidity" || lastQuoteError.errorCode === "NO_LIQUIDITY")) {
+    throw lastRateError instanceof Error
+      ? new Error(`No Sera FX rate available for ${from}/${to}: ${lastRateError.message}`)
+      : new Error(`No Sera FX rate available for ${from}/${to}`);
+  }
+  throw lastQuoteError instanceof Error ? lastQuoteError : new Error(`Sera returned no usable rate for ${from}/${to}`);
 }
 
 /**

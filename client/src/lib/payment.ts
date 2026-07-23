@@ -42,6 +42,7 @@ export interface PaymentRequest {
   merchantIcon?: string;
   payCoin?: string;
   payAmount?: string;
+  swap?: boolean;
   description?: string;
   expiresAt?: number; // Unix timestamp ms
   singleUse?: boolean;
@@ -194,7 +195,6 @@ export function buildWalletPaymentUri({
     }
     const params = new URLSearchParams({ address: receiver });
     if (rawAmount > 0n) params.set("uint256", rawAmount.toString());
-    params.set("gas", "65000");
     return `ethereum:${tokenAddress}@${resolvedChainId}/transfer?${params.toString()}`;
   }
 
@@ -204,14 +204,11 @@ export function buildWalletPaymentUri({
 }
 
 /**
- * Same-coin QR codes may safely open a wallet's exact ERC-20 transfer screen.
- * Cross-currency payments must open SeraPay checkout so Sera can quote and
- * execute the swap; a raw transfer would bypass conversion entirely.
+ * QR codes default to a direct ERC-20 transfer for the selected customer coin.
+ * Wallet-scanner amounts are still user-editable in many wallets, so the
+ * backend must confirm the exact token, recipient, chain, and amount on-chain.
  */
 export function buildPaymentQrValue(request: PaymentQrValueRequest): string {
-  const payCoin = String(request.coin || "").trim().toUpperCase();
-  const receiveCoin = String(request.receiveCoin || "").trim().toUpperCase();
-  if (payCoin && receiveCoin && payCoin !== receiveCoin) return request.paymentUrl;
   return buildWalletPaymentUri(request) || request.paymentUrl;
 }
 

@@ -561,7 +561,7 @@ export default function PayPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req, selectedCoin?.symbol, rateRefreshKey, chainId]);
 
-  const requiresSeraSwap = Boolean(req && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
+  const requiresSeraSwap = Boolean(req?.swap && selectedCoin && selectedCoin.symbol !== req.receiveCoin);
   const selectedCoinSupported = Boolean(selectedCoin && supportedCoins.some((coin) => coin.symbol === selectedCoin.symbol));
   // True when the payment request has no fixed amount — customer types their own amount
   const isOpenAmount = !hasOrderItems && !req?.amount;
@@ -1121,8 +1121,11 @@ export default function PayPage() {
     const invoiceId = `SP-${now.toISOString().slice(0,10).replace(/-/g,"")}${Math.random().toString(36).slice(2,8).toUpperCase()}`;
     const paidAmount = payAmount || req?.amount || "—";
     const paidCoin = selectedCoin?.symbol || req?.payCoin || req?.receiveCoin || "";
-    const receivedAmount = req?.amount || paidAmount;
-    const receivedCoin = req?.receiveCoin || paidCoin;
+    const receivedAmount = requiresSeraSwap ? (req?.amount || paidAmount) : paidAmount;
+    const receivedCoin = requiresSeraSwap ? (req?.receiveCoin || paidCoin) : paidCoin;
+    const referenceAmount = !requiresSeraSwap && req?.amount && req.receiveCoin && req.receiveCoin !== paidCoin
+      ? `${req.amount} ${req.receiveCoin}`
+      : null;
     const chainName = CHAIN_NAMES[chainId] || "Ethereum";
     const addrShort = req?.receiverAddress ? `${req.receiverAddress.slice(0,6)}...${req.receiverAddress.slice(-4)}` : "";
     const isCrossToken = paidCoin !== receivedCoin;
@@ -1146,7 +1149,7 @@ export default function PayPage() {
     // Calculate dynamic height
     // Header(11) + logo(18) + merchant name(5) + addr(5) + divider(8) + invoice meta(18) + divider(8)
     // + conversion box(8 + boxRows*5.5 + 2) + network(10) + txHash(txHash ? 18 : 0) + divider(10) + footer(20)
-    const boxRows = isCrossToken ? 4 : 3;
+    const boxRows = isCrossToken || referenceAmount ? 4 : 3;
     const boxH = 8 + boxRows * 5.5;
     const estimatedH = 11 + 18 + (addrShort ? 10 : 5) + 8 + 18 + 8 + boxH + 2 + 10 + (txHash ? 20 : 0) + 10 + 20;
     const doc = new jsPDF({ unit: "mm", format: [W, Math.max(estimatedH, 140)] });
@@ -1209,7 +1212,7 @@ export default function PayPage() {
     doc.roundedRect(5, y, W - 10, boxH, 2, 2, "FD");
     y += 5;
     doc.setFont("helvetica", "bold"); doc.setFontSize(7); doc.setTextColor(0, 140, 80);
-    doc.text("Currency Conversion", 9, y);
+    doc.text("Payment Details", 9, y);
     y += 5.5;
     const row = (label: string, value: string, bold = false, accent = false) => {
       doc.setFont("helvetica", bold ? "bold" : "normal");
@@ -1221,11 +1224,14 @@ export default function PayPage() {
     };
     row("Customer Paid:", `${paidAmount} ${paidCoin}`, true);
     row("Merchant Receives:", `${receivedAmount} ${receivedCoin}`, true);
+    if (referenceAmount) {
+      row("Reference:", referenceAmount);
+    }
     if (isCrossToken) {
       const rateNum = parseFloat(paidAmount) / parseFloat(receivedAmount);
       row("Rate:", `1 ${receivedCoin} = ${isNaN(rateNum) ? "—" : rateNum.toFixed(4)} ${paidCoin}`);
     }
-    row("Conversion Fee:", "$0.00 (0%)", true, true);
+    row("SeraPay Fee:", "$0.00 (0%)", true, true);
     y += 2;
 
     // ── Network info ──
@@ -1297,7 +1303,7 @@ export default function PayPage() {
     doc.text("Zero fees · Instant settlement · Self-custody", W / 2, y, { align: "center" });
 
     doc.save(`serapay-receipt-${invoiceId}.pdf`);
-  }, [req, txHash, payAmount, selectedCoin, merchantName, merchantLogo]);
+  }, [req, txHash, payAmount, selectedCoin, merchantName, merchantLogo, requiresSeraSwap]);
 
   const centredWrap: React.CSSProperties = {
     maxWidth: 480, margin: "0 auto", width: "100%",
@@ -1561,7 +1567,9 @@ export default function PayPage() {
                     </p>
                     {!isSameCoin && req.amount && req.receiveCoin && (
                       <p style={{ fontSize: 12, color: "rgba(60,60,67,0.4)", margin: "0 0 4px" }}>
-                        Merchant receives {req.amount} {req.receiveCoin}
+                        {requiresSeraSwap
+                          ? `Merchant receives ${req.amount} ${req.receiveCoin}`
+                          : `Direct payment equivalent to ${req.amount} ${req.receiveCoin}`}
                       </p>
                     )}
                     {displayRate && (

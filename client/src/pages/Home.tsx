@@ -2120,9 +2120,8 @@ export default function Home() {
     const coin = qrDisplayCoin?.symbol;
     const scanAmount = qrDisplayAmount;
     if (step !== 2 || !paymentUrl || !receiverAddress || !coin || !scanAmount || Number(scanAmount) <= 0) return;
-    // A cross-currency QR opens SeraPay checkout and is tracked by the Sera
-    // swap transaction. This scanner is only for raw same-token wallet QR.
-    if (!selectedCoin || coin !== selectedCoin.symbol) return;
+    // Direct wallet QR payments are confirmed only after the exact selected
+    // token, recipient, chain, and amount appear on-chain.
     if (directQrPayment) return;
 
     const scanKey = `${receiverAddress.toLowerCase()}:${coin}:${scanAmount}:${paymentChainId}:${paymentUrl}`;
@@ -2130,6 +2129,7 @@ export default function Home() {
       directQrScanKeyRef.current = scanKey;
       directQrScanFromBlockRef.current = null;
       setDirectQrPayment(null);
+      setConversionError("");
     }
 
     let stopped = false;
@@ -2159,9 +2159,14 @@ export default function Home() {
         }
         if (data.status === "confirmed") {
           setDirectQrPayment({ amount: scanAmount, coin });
+          setConversionError("");
           queryClient.invalidateQueries({ queryKey: ["/merchant/transactions"] });
           queryClient.invalidateQueries({ queryKey: ["/merchant/stats"] });
           stopped = true;
+        } else if (data.status === "amount_mismatch") {
+          setConversionError(data.message || `Received the wrong ${coin} amount for this QR.`);
+          queryClient.invalidateQueries({ queryKey: ["/merchant/transactions"] });
+          queryClient.invalidateQueries({ queryKey: ["/merchant/stats"] });
         }
       } catch {
         // Keep polling; RPC can be briefly slow right after a wallet submits.
@@ -2590,7 +2595,11 @@ export default function Home() {
               </button>
               <button
                 type="button"
-                onClick={() => { window.location.href = getClientAppPath(paymentUrl); }}
+                onClick={() => {
+                  window.location.href = activeQrValue.startsWith("ethereum:")
+                    ? activeQrValue
+                    : getClientAppPath(paymentUrl);
+                }}
                 className="serapay-action-secondary serapay-hover-green"
                 style={{
                   minHeight: 40,
@@ -3101,7 +3110,7 @@ export default function Home() {
               <circle cx="12" cy="12" r="10" /><path strokeLinecap="round" d="M12 8v4m0 4h.01" />
             </svg>
             <p style={{ fontSize: 12, color: "#3A5A52", margin: 0, lineHeight: 1.5 }}>
-              Share the QR code or payment link with your customer. They can pay with any stablecoin — you receive your chosen currency.
+              Share the QR code or payment link with your customer. SeraPay tracks the exact token, network, recipient, and amount on-chain.
             </p>
           </div>
         </div>

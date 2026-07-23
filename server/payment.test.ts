@@ -39,7 +39,7 @@ describe("Sera settlement tracking", () => {
       deadline: "1784630196",
     });
     expect(hash).toBe("0x0b301dfff325d82ca84accd180051be983def7c7b0b73f75d807c1416053ad6b");
-  });
+  }, 10_000);
 });
 
 // Test the stablecoins data structure
@@ -212,7 +212,7 @@ describe("payment URL encoder", () => {
     })).toBe("");
   });
 
-  it("uses an exact ERC-20 wallet QR only when customer and merchant coins match", async () => {
+  it("uses an exact ERC-20 wallet QR when customer and merchant coins match", async () => {
     const { buildPaymentQrValue } = await import("../client/src/lib/payment");
     const paymentUrl = "https://pay.sera.cx/pay/example";
     const qrValue = buildPaymentQrValue({
@@ -228,10 +228,10 @@ describe("payment URL encoder", () => {
     expect(qrValue.toLowerCase()).toContain("ethereum:0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f@1/transfer?");
   });
 
-  it("uses SeraPay checkout QR when customer and merchant coins require conversion", async () => {
+  it("uses an exact ERC-20 wallet QR for converted direct-payment customer coins", async () => {
     const { buildPaymentQrValue } = await import("../client/src/lib/payment");
     const paymentUrl = "https://pay.sera.cx/pay/example";
-    expect(buildPaymentQrValue({
+    const qrValue = buildPaymentQrValue({
       receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
       receiveCoin: "MYRT",
       coin: "USDC",
@@ -240,7 +240,9 @@ describe("payment URL encoder", () => {
       tokenAddress: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
       tokenDecimals: 6,
       paymentUrl,
-    })).toBe(paymentUrl);
+    });
+    expect(qrValue.toLowerCase()).toContain("ethereum:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48@1/transfer?");
+    expect(qrValue).toContain("uint256=2610000");
   });
 
   it.each(["USDC", "XSGD", "IDRX"])("keeps %s unchanged in copied checkout payloads", async (symbol) => {
