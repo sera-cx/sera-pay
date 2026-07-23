@@ -2921,32 +2921,52 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
   // /fx/rate service is temporarily unavailable.
   const scale = 10n ** BigInt(toToken.decimals);
   const minimumRaw = BigInt(String(toToken.min_trade_amount_raw || "0"));
-  const referenceInputRaw = minimumRaw > 10n * scale ? minimumRaw : 10n * scale;
-  const quoteRequest = {
-    from_token: toToken.address,
-    to_token: fromToken.address,
-    from_amount: referenceInputRaw.toString(),
-    owner_address: "0x0000000000000000000000000000000000000001",
-    recipient: "0x0000000000000000000000000000000000000001",
-    expiration: seraNowSec + 180,
-    gas_mode: "pay_more",
-  };
-  const rawQuote = await callSeraApi<unknown>({
-    baseUrl,
-    path: "/swap/quote",
-    method: "POST",
-    body: quoteRequest,
-    authMode: "none",
-  });
-  const quote = unwrapSeraQuote(rawQuote);
-  const routeParams = getRouteParams(quote);
-  const outputRaw = BigInt(String(routeParams.minOutputAmount));
-  if (outputRaw <= 0n) throw new Error(`Sera returned no executable output for ${to}/${from}`);
-  const referenceInput = Number(fromRawTokenAmount(referenceInputRaw, toToken.decimals));
-  const quotedOutput = Number(fromRawTokenAmount(outputRaw, fromToken.decimals));
-  const rate = referenceInput / quotedOutput;
+  const referenceInputs = Array.from(new Set([
+    minimumRaw > 10n * scale ? minimumRaw : 10n * scale,
+    minimumRaw > 100n * scale ? minimumRaw : 100n * scale,
+    minimumRaw > 1000n * scale ? minimumRaw : 1000n * scale,
+  ].map((value) => value.toString()))).map((value) => BigInt(value));
+
+  let lastQuoteError: unknown = null;
+  let rate = 0;
+  for (const referenceInputRaw of referenceInputs) {
+    const quoteRequest = {
+      from_token: toToken.address,
+      to_token: fromToken.address,
+      from_amount: referenceInputRaw.toString(),
+      owner_address: "0x0000000000000000000000000000000000000001",
+      recipient: "0x0000000000000000000000000000000000000001",
+      expiration: seraNowSec + 180,
+      gas_mode: "pay_more",
+    };
+    try {
+      const rawQuote = await callSeraApi<unknown>({
+        baseUrl,
+        path: "/swap/quote",
+        method: "POST",
+        body: quoteRequest,
+        authMode: "none",
+      });
+      const quote = unwrapSeraQuote(rawQuote);
+      const routeParams = getRouteParams(quote);
+      const outputRaw = BigInt(String(routeParams.minOutputAmount));
+      if (outputRaw <= 0n) throw new Error(`Sera returned no executable output for ${to}/${from}`);
+      const referenceInput = Number(fromRawTokenAmount(referenceInputRaw, toToken.decimals));
+      const quotedOutput = Number(fromRawTokenAmount(outputRaw, fromToken.decimals));
+      rate = referenceInput / quotedOutput;
+      if (!Number.isFinite(rate) || rate <= 0) {
+        throw new Error(`Invalid Sera swap quote rate for ${from}/${to}`);
+      }
+      break;
+    } catch (error) {
+      lastQuoteError = error;
+      const canTryAnotherSize = error instanceof SeraApiError
+        && (error.status === 503 || error.errorCode === "no_liquidity" || error.errorCode === "NO_LIQUIDITY");
+      if (!canTryAnotherSize) throw error;
+    }
+  }
   if (!Number.isFinite(rate) || rate <= 0) {
-    throw new Error(`Invalid Sera swap quote rate for ${from}/${to}`);
+    throw lastQuoteError instanceof Error ? lastQuoteError : new Error(`Sera returned no executable quote for ${to}/${from}`);
   }
 
   rateCache.set(cacheKey, { rate, ts: Date.now() });

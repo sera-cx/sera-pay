@@ -2706,7 +2706,6 @@ export default function Home() {
             title="Customer Pays With"
             onClose={() => setShowQrCoinSheet(false)}
             onSelect={handleQrCoinSelect}
-            onClear={handleClearCustomerCoin}
             selectedSymbol={displayCoin?.symbol}
             coins={currencies}
           />
