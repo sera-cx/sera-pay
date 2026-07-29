@@ -98,3 +98,17 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:latest
             ghcr.io/${{ github.repository }}:${{ github.sha }}
+      
+      - name: Notify on Success and send webhook to update deployment
+        # This condition ensures it ONLY runs if all previous steps succeeded
+        if: success() 
+        run: |
+          curl -X POST ${{ secrets.NOTIFICATION_WEBHOOK_URL }} \
+            -H "gh-actions: ${{ secrets.GH_WEBHOOK_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "success",
+              "repository": "${{ github.repository }}",
+              "actor": "${{ github.actor }}",
+              "run_id": "${{ github.run_id }}"
+            }'
