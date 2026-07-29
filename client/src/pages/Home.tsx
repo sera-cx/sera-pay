@@ -2596,9 +2596,10 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => {
-                  window.location.href = activeQrValue.startsWith("ethereum:")
-                    ? activeQrValue
-                    : getClientAppPath(paymentUrl);
+                  // The QR itself remains an EIP-681 URI for wallet scanners.
+                  // Same-device checkout must open SeraPay's hosted payment UI,
+                  // because desktop browsers may not have an ethereum: handler.
+                  window.location.assign(getClientAppPath(paymentUrl));
                 }}
                 className="serapay-action-secondary serapay-hover-green"
                 style={{

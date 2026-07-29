@@ -127,6 +127,19 @@ export function buildPaymentUrl(req: PaymentRequest): string {
   return buildClientAppUrl(`/pay/${encoded}`);
 }
 
+export function getCrossCurrencyReceiveLabel(
+  payCoin: string | null | undefined,
+  receiveCoin: string | null | undefined,
+  receiveAmount?: string | null,
+): string | null {
+  const normalizedPayCoin = String(payCoin || "").trim().toUpperCase();
+  const normalizedReceiveCoin = String(receiveCoin || "").trim().toUpperCase();
+  if (!normalizedPayCoin || !normalizedReceiveCoin || normalizedPayCoin === normalizedReceiveCoin) return null;
+
+  const normalizedAmount = normalizeDecimalAmountText(String(receiveAmount || ""));
+  return `Received in ${normalizedAmount ? `${normalizedAmount} ` : ""}${normalizedReceiveCoin}`;
+}
+
 export function parseAmountToRaw(amount: string, decimals: number): bigint {
   const normalized = amount.trim();
   if (!/^\d+(\.\d+)?$/.test(normalized) || parseFloat(normalized) <= 0) return 0n;

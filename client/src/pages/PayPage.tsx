@@ -4,7 +4,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
 import { ChevronDown, ChevronRight, Wallet } from "lucide-react";
 import { type Stablecoin } from "@/lib/stablecoins";
-import { decodePaymentRequest, SERA_NO_LIQUIDITY_MESSAGE, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { decodePaymentRequest, getCrossCurrencyReceiveLabel, SERA_NO_LIQUIDITY_MESSAGE, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
@@ -1035,6 +1035,16 @@ export default function PayPage() {
 
   const handleConnectWallet = useCallback(() => openPrivyLogin(["wallet"]), [openPrivyLogin]);
   const handleSeraLogin = useCallback(() => openPrivyLogin(["email", "google", "twitter"]), [openPrivyLogin]);
+  const handleCopyMerchantAddress = useCallback(async () => {
+    if (!req?.receiverAddress) return;
+    try {
+      await navigator.clipboard.writeText(req.receiverAddress);
+      setAddrCopied(true);
+      window.setTimeout(() => setAddrCopied(false), 2200);
+    } catch {
+      setAddrCopied(false);
+    }
+  }, [req?.receiverAddress]);
 
   const handlePay = useCallback(async () => {
     if (!req || !selectedCoin || !payAmount) return;
@@ -1421,7 +1431,9 @@ export default function PayPage() {
     );
   }
 
-  const isSameCoin = selectedCoin?.symbol === req?.receiveCoin;
+  const activePaymentCoin = selectedCoin?.symbol || req?.payCoin || req?.receiveCoin;
+  const crossCurrencyReceiveLabel = getCrossCurrencyReceiveLabel(activePaymentCoin, req?.receiveCoin, req?.amount);
+  const isSameCoin = Boolean(activePaymentCoin && req?.receiveCoin && activePaymentCoin.toUpperCase() === req.receiveCoin.toUpperCase());
   const showCountdown = !!rateExpiry && !!selectedCoin && (hasOrderItems || (!isSameCoin && !!req?.amount));
   const paymentAmountReady = Boolean(payAmount && Number.isFinite(parseDisplayAmount(payAmount)) && parseDisplayAmount(payAmount) > 0);
   const isPaymentTestnet = chainId === 11155111;
@@ -1474,21 +1486,33 @@ export default function PayPage() {
               ) : null}
             </div>
             {merchantName && (
-              <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-                <p style={{ fontSize: 16, fontWeight: 700, color: "#1C1C1E", margin: 0 }}>{merchantName}</p>
-                <button
-                  onClick={async () => { if (!req?.receiverAddress) return; await navigator.clipboard.writeText(req.receiverAddress); setAddrCopied(true); setTimeout(() => setAddrCopied(false), 2200); }}
-                  aria-label="Copy merchant wallet address"
-                  style={{ width: 28, height: 28, borderRadius: 10, border: "1px solid rgba(0,0,0,0.06)", background: addrCopied ? "#E6FAF5" : "#fff", color: addrCopied ? "#00A87A" : "#8A9E98", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
-                >
-                  {addrCopied
-                    ? <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                    : <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                  }
-                </button>
-              </div>
+              <p style={{ fontSize: 16, fontWeight: 700, color: "#1C1C1E", margin: 0 }}>{merchantName}</p>
             )}
-            {addrCopied && <p style={{ fontSize: 11, color: "#00A87A", margin: "4px 0 0", fontWeight: 650 }}>Copied merchant wallet address</p>}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: merchantName ? 6 : 0, minWidth: 0 }}>
+              <span
+                title={req.receiverAddress}
+                style={{ minWidth: 0, maxWidth: "calc(100% - 34px)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "rgba(60,60,67,0.48)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 }}
+              >
+                {`${req.receiverAddress.slice(0, 6)}...${req.receiverAddress.slice(-6)}`}
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyMerchantAddress}
+                aria-label={addrCopied ? "Merchant wallet address copied" : "Copy merchant wallet address"}
+                title={addrCopied ? "Copied" : "Copy wallet address"}
+                style={{ width: 26, height: 26, borderRadius: 9, border: "1px solid rgba(0,0,0,0.06)", background: addrCopied ? "#E6FAF5" : "#fff", color: addrCopied ? "#00A87A" : "#8A9E98", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}
+              >
+                {addrCopied
+                  ? <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                  : <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                }
+              </button>
+            </div>
+            {crossCurrencyReceiveLabel && (
+              <p style={{ fontSize: 11, color: "rgba(60,60,67,0.48)", margin: "4px 0 0", fontWeight: 600 }}>
+                {crossCurrencyReceiveLabel}
+              </p>
+            )}
           </div>
         )}
 
