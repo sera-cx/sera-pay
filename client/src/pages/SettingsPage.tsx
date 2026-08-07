@@ -797,7 +797,7 @@ export function Settings() {
                   >
                     <div className="rounded-lg overflow-hidden" style={{ background: qrBgColor || "#fff" }}>
                       <QRStyled
-                        value="https://serapay.io"
+                        value="https://pay.sera.cx"
                         size={68}
                         fgColor={qrFgColor}
                         bgColor={qrBgColor}
@@ -896,7 +896,7 @@ export function Settings() {
                     <QRStyled
                       value={profile?.walletAddress
                         ? buildClientAppUrl(`/?addr=${profile.walletAddress}&chainId=${paymentChainId}`)
-                        : "https://serapay.io"
+                        : "https://pay.sera.cx"
                       }
                       size={240}
                       fgColor={qrFgColor}
