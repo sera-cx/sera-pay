@@ -674,8 +674,8 @@ function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
   const [open, setOpen] = useState(false);
 
   const exampleCurl = ep.method === "GET"
-    ? `curl -H "x-api-key: ${apiKey}" \\\n  https://api.serapay.io${ep.path}`
-    : `curl -X ${ep.method} \\\n  -H "x-api-key: ${apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{}' \\\n  https://api.serapay.io${ep.path}`;
+    ? `curl -H "x-api-key: ${apiKey}" \\\n  https://pay.sera.cx${ep.path}`
+    : `curl -X ${ep.method} \\\n  -H "x-api-key: ${apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{}' \\\n  https://pay.sera.cx${ep.path}`;
 
   return (
     <div className="border border-border rounded-lg overflow-hidden">
