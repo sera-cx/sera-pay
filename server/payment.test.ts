@@ -94,6 +94,91 @@ describe("payment URL encoder", () => {
     expect(decoded!.chainId).toBe(req.chainId);
   });
 
+  it("resolves every non-test mode to Ethereum mainnet", async () => {
+    const { resolvePaymentChainId, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } =
+      await import("../client/src/lib/payment");
+
+    // "mock" is the historical database default for merchants who never opened
+    // the Sera API settings, and undefined is what the config query returns
+    // before it resolves. Both used to land on Sepolia.
+    expect(resolvePaymentChainId(undefined, undefined)).toBe(LIVE_PAYMENT_CHAIN_ID);
+    expect(resolvePaymentChainId(undefined, "mock" as any)).toBe(LIVE_PAYMENT_CHAIN_ID);
+    expect(resolvePaymentChainId(undefined, "live")).toBe(LIVE_PAYMENT_CHAIN_ID);
+    expect(resolvePaymentChainId(null, null)).toBe(LIVE_PAYMENT_CHAIN_ID);
+
+    // A stale chain id persisted by wagmi in the browser must not win.
+    expect(resolvePaymentChainId(TEST_PAYMENT_CHAIN_ID, undefined)).toBe(LIVE_PAYMENT_CHAIN_ID);
+    expect(resolvePaymentChainId(137, "live")).toBe(LIVE_PAYMENT_CHAIN_ID);
+
+    // Only an explicit saved test mode reaches Sepolia.
+    expect(resolvePaymentChainId(1, "test")).toBe(TEST_PAYMENT_CHAIN_ID);
+  });
+
+  it("keeps live QR codes on mainnet and test QR codes on Sepolia", async () => {
+    const { resolvePaymentChainId, buildWalletPaymentUri, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } =
+      await import("../client/src/lib/payment");
+    const receiverAddress = "0x1234567890abcdef1234567890abcdef12345678";
+
+    // A LIVE merchant must never mint a Sepolia QR, whatever the wallet or a
+    // stale persisted chain id says.
+    for (const walletChain of [undefined, null, 1, 11155111, 137]) {
+      const chainId = resolvePaymentChainId(walletChain as any, "live");
+      expect(chainId).toBe(LIVE_PAYMENT_CHAIN_ID);
+      const uri = buildWalletPaymentUri({
+        receiverAddress, coin: "USDC", amount: "10", chainId,
+        tokenAddress: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", tokenDecimals: 6,
+      });
+      expect(uri).toContain("@1/transfer?");
+      expect(uri).not.toContain("11155111");
+    }
+
+    // A TEST merchant must stay on Sepolia and never mint a mainnet QR.
+    for (const walletChain of [undefined, null, 1, 11155111]) {
+      const chainId = resolvePaymentChainId(walletChain as any, "test");
+      expect(chainId).toBe(TEST_PAYMENT_CHAIN_ID);
+      const uri = buildWalletPaymentUri({
+        receiverAddress, coin: "CNGN", amount: "111", chainId,
+        tokenAddress: "0x33d3c739c9ff714fd3d5c572eadaa1741902723d", tokenDecimals: 6,
+      });
+      expect(uri).toContain("@11155111/transfer?");
+    }
+  });
+
+  it("defaults a wallet QR to mainnet when the chain id is missing", async () => {
+    const { buildWalletPaymentUri } = await import("../client/src/lib/payment");
+    // TransactionsPage and MenuManagerPage pass a nullable chainId from a
+    // stored row; a Sepolia fallback here asked real customers to pay on a
+    // test network.
+    for (const chainId of [undefined, null, 0]) {
+      const uri = buildWalletPaymentUri({
+        receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
+        coin: "USDC",
+        amount: "5",
+        chainId: chainId as any,
+        tokenAddress: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        tokenDecimals: 6,
+      });
+      expect(uri).toContain("@1/transfer?");
+      expect(uri).not.toContain("@11155111");
+    }
+  });
+
+  it("scales an 18-decimal mainnet token correctly", async () => {
+    const { buildWalletPaymentUri } = await import("../client/src/lib/payment");
+    // JPYC, BRZ, CADC, EURE and ZARP are 18 decimals on mainnet while the local
+    // stablecoins.ts table claims 6 for every entry. Guessing 6 here would
+    // under-request the payment by a factor of 10^12.
+    const uri = buildWalletPaymentUri({
+      receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
+      coin: "JPYC",
+      amount: "1",
+      chainId: 1,
+      tokenAddress: "0x431d5dff03120afa4bdf332c61a6e1766ef37bdb",
+      tokenDecimals: 18,
+    });
+    expect(uri).toContain("uint256=1000000000000000000");
+  });
+
   it("should build a Sepolia wallet QR URI with token and amount", async () => {
     const { buildWalletPaymentUri } = await import("../client/src/lib/payment");
     const receiverAddress = "0x1234567890abcdef1234567890abcdef12345678";
@@ -277,7 +362,40 @@ describe("payment URL encoder", () => {
 
   it("uses the short public message for unavailable Sera liquidity", async () => {
     const { SERA_NO_LIQUIDITY_MESSAGE } = await import("../client/src/lib/payment");
-    expect(SERA_NO_LIQUIDITY_MESSAGE).toBe("Currently there's no liquidity on this exchange in Sera.cx. Please try another option.");
+    expect(SERA_NO_LIQUIDITY_MESSAGE).toBe("No liquidity for this pair — try another currency.");
+    // Short enough to fit the merchant QR banner on one line.
+    expect(SERA_NO_LIQUIDITY_MESSAGE.length).toBeLessThanOrEqual(60);
+  });
+
+  it("maps every rate failure to friendly copy, never raw upstream text", async () => {
+    const { seraRateErrorMessage, SERA_NO_LIQUIDITY_MESSAGE, SERA_RATE_UNAVAILABLE_MESSAGE } =
+      await import("../client/src/lib/payment");
+
+    // No market maker quoting this pair.
+    expect(seraRateErrorMessage(new Error("whatever"), "no_liquidity")).toBe(SERA_NO_LIQUIDITY_MESSAGE);
+    expect(seraRateErrorMessage(new Error("Sera API 400: no_liquidity"))).toBe(SERA_NO_LIQUIDITY_MESSAGE);
+    expect(seraRateErrorMessage(Object.assign(new Error(""), { errorCode: "no_liquidity" })))
+      .toBe(SERA_NO_LIQUIDITY_MESSAGE);
+
+    // Sera's FX service itself is down — this is what NGN/USD returns today.
+    expect(seraRateErrorMessage(new Error("x"), "sera_fx_unavailable")).toBe(SERA_RATE_UNAVAILABLE_MESSAGE);
+    expect(seraRateErrorMessage(new Error("Sera API 503: Service temporarily unavailable; please retry")))
+      .toBe(SERA_RATE_UNAVAILABLE_MESSAGE);
+
+    // An empty failure must still produce a sentence, not a blank banner.
+    expect(seraRateErrorMessage(undefined)).toBe(SERA_RATE_UNAVAILABLE_MESSAGE);
+    expect(seraRateErrorMessage(new Error(""))).toBe(SERA_RATE_UNAVAILABLE_MESSAGE);
+
+    // Raw 503 wording must never reach a merchant standing at a till.
+    for (const input of [
+      new Error("Sera API 503: Service temporarily unavailable; please retry"),
+      Object.assign(new Error(""), { errorCode: "sera_fx_unavailable" }),
+    ]) {
+      expect(seraRateErrorMessage(input)).not.toMatch(/503|Sera API/);
+    }
+
+    // Both must stay short enough for the inline banner.
+    expect(SERA_RATE_UNAVAILABLE_MESSAGE.length).toBeLessThanOrEqual(60);
   });
 });
 

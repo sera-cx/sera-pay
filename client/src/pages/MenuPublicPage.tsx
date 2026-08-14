@@ -2,7 +2,7 @@ import React, { useMemo, useState, useEffect, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { ShoppingCart, X, Plus, Minus, Image as ImageIcon, ChevronDown, ChevronUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { buildPaymentUrl, OrderItem } from "@/lib/payment";
+import { buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, OrderItem, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { getClientAppPath } from "@/lib/app-url";
 import { SeraPayHeader } from "@/components/SeraPayHeader";
 import { SeraPayFooter } from "@/components/SeraPayFooter";
@@ -477,10 +477,16 @@ export default function MenuPublicPage() {
   const [currencyOptions, setCurrencyOptions] = useState<SeraCurrency[]>([]);
   const [convertedPrices, setConvertedPrices] = useState<Record<string, string>>({});
   const [convertingPrices, setConvertingPrices] = useState(false);
+  // A menu QR printed while the merchant was in test mode carries
+  // ?chainId=11155111 forever. Accept mainnet only, unless this build has
+  // testnet explicitly enabled, so an old sticker cannot pin live customers
+  // to Sepolia after the merchant goes live.
   const paymentChainId = useMemo(() => {
-    if (typeof window === "undefined") return 1;
-    const value = Number(new URLSearchParams(window.location.search).get("chainId") || 1);
-    return Number.isInteger(value) && value > 0 ? value : 1;
+    if (typeof window === "undefined") return LIVE_PAYMENT_CHAIN_ID;
+    const value = Number(new URLSearchParams(window.location.search).get("chainId") || LIVE_PAYMENT_CHAIN_ID);
+    const testnetEnabled = import.meta.env.VITE_ENABLE_TESTNET === "true";
+    if (value === TEST_PAYMENT_CHAIN_ID) return testnetEnabled ? TEST_PAYMENT_CHAIN_ID : LIVE_PAYMENT_CHAIN_ID;
+    return LIVE_PAYMENT_CHAIN_ID;
   }, []);
   const currencyList = currencyOptions;
   const startSessionKey = params.slug ? `serapay_menu_started_${params.slug}` : "";

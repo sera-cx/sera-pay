@@ -8,7 +8,7 @@ import { useEvents } from "@/hooks/use-events";
 import { motion, AnimatePresence } from "framer-motion";
 import { SeraLogo } from "@/components/SeraPayHeader";
 import { NetworkModeButton, NetworkSwitcherModal, useActiveNetworkMode } from "@/components/NetworkSwitcher";
-import { buildPaymentQrValue, buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { buildPaymentQrValue, buildPaymentUrl, LIVE_PAYMENT_CHAIN_ID, seraRateErrorMessage, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
@@ -304,7 +304,7 @@ function DashboardPaymentModal({
     fetch(`/api/rates?from=${resolvedReceiveCoin}&to=${resolvedPayCoin}&chainId=${chainId}`)
       .then(async (res) => {
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+        if (!res.ok) throw Object.assign(new Error(data.detail || data.error || ""), { errorCode: data.errorCode });
         return data;
       })
       .then((data) => {
@@ -313,7 +313,7 @@ function DashboardPaymentModal({
         if (Number.isFinite(rate) && rate > 0) setPayAmount(formatDecimalAmount(Number(receiveAmount) * rate));
         else throw new Error("Sera did not return an exchange rate");
       })
-      .catch((error) => { if (!cancelled) setRateError(error instanceof Error ? error.message : "Unable to fetch the Sera exchange rate"); })
+      .catch((error) => { if (!cancelled) setRateError(seraRateErrorMessage(error)); })
       .finally(() => { if (!cancelled) setRateLoading(false); });
     return () => { cancelled = true; };
   }, [amount, chainId, receiveAmount, resolvedPayCoin, resolvedReceiveCoin]);

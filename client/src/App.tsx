@@ -6,7 +6,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { PrivyProvider } from "@privy-io/react-auth";
 import { WagmiProvider, createConfig, http } from "wagmi";
-import { mainnet, polygon, base, arbitrum, sepolia } from "wagmi/chains";
+import { mainnet, sepolia } from "wagmi/chains";
 import { AuthProvider } from "./hooks/use-auth";
 import { ToastProvider } from "./components/toast-system";
 import { getPrivyConfigError, privyConfig } from "./lib/privy-config";
@@ -61,13 +61,14 @@ const SeraPayVsCoinbaseCommercePage   = SeoPages("SeraPayVsCoinbaseCommercePage"
 const SeraPayVsBitPayPage             = SeoPages("SeraPayVsBitPayPage");
 const SeraPayVsNowPaymentsPage        = SeoPages("SeraPayVsNowPaymentsPage");
 
+// Sera settles only on Ethereum mainnet (live) and Sepolia (testnet), per
+// https://docs.sera.cx — so those are the only two chains wagmi may report.
+// Mainnet is listed first: wagmi seeds its persisted store from chains[0], so
+// a fresh browser starts on Ethereum rather than a testnet.
 const wagmiConfig = createConfig({
-  chains: [mainnet, polygon, base, arbitrum, sepolia],
+  chains: [mainnet, sepolia],
   transports: {
     [mainnet.id]:   http(import.meta.env.VITE_MAINNET_RPC_URL || "https://ethereum-rpc.publicnode.com"),
-    [polygon.id]:   http(import.meta.env.VITE_POLYGON_RPC_URL || "https://polygon-bor-rpc.publicnode.com"),
-    [base.id]:      http(import.meta.env.VITE_BASE_RPC_URL || "https://base-rpc.publicnode.com"),
-    [arbitrum.id]:  http(import.meta.env.VITE_ARBITRUM_RPC_URL || "https://arbitrum-one-rpc.publicnode.com"),
     [sepolia.id]:   http(import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com"),
   },
 });

@@ -7,9 +7,35 @@ export interface Stablecoin {
   icon: string;
   logoUri?: string;
   region: string;
+  /**
+   * Sera's minimum TRADE size for this token, populated from GET /tokens.
+   *
+   * Applies to Sera swaps and orders only — a swap is a trade. A plain ERC-20
+   * transfer never touches Sera's contracts, so a direct payment has no
+   * minimum at all. Undefined for entries in the static table below.
+   */
+  minTradeAmount?: number;
+  /**
+   * Whether a customer's wallet can name this token in a scanned payment
+   * request. An EIP-681 URI has no symbol field, so the wallet resolves the
+   * name from its own token list:
+   *   universal — named even at zero balance ("No IDRT balance")
+   *   detected  — named once the customer holds or imports it
+   *   unlisted  — shows "Unknown" / "Add a currency" in every wallet, always
+   * Populated from GET /tokens; undefined for the static table below.
+   */
+  walletRecognition?: "universal" | "detected" | "unlisted" | "unknown";
 }
 
-// All Sepolia contract addresses sourced from https://docs.sera.cx/tokens
+// DISPLAY METADATA ONLY — never use these for a payment.
+//
+// The `contractAddress` values below are stale SEPOLIA addresses and every
+// entry claims `decimals: 6`, which is wrong on mainnet (JPYC, BRZ, CADC,
+// EURE, ZARP and others are 18; EURS and IDRT are 2). Contract addresses and
+// decimals for anything that touches money MUST come from the live Sera
+// registry for the active chain via loadSeraCurrencies() -> GET /api/sera/tokens.
+// This table exists so the UI has a name, flag and region before the registry
+// responds. See client/src/lib/currencyCalculator.ts buildCurrency().
 export const STABLECOINS: Stablecoin[] = [
   // ── USD ──────────────────────────────────────────────────────────────────
   { symbol: "USDT", name: "Tether USD", currency: "USD", contractAddress: "0x1920bf0643ae49b4fb334586dad6bed29ff30f88", decimals: 6, icon: "🇺🇸", region: "Americas" },

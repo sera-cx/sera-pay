@@ -21,6 +21,10 @@ export const ENV = {
   seraApiBaseUrl: env("SERA_API_BASE_URL"),
   seraApiTestnetBaseUrl: env("SERA_API_TESTNET_BASE_URL"),
   seraApiKey: env("SERA_API_KEY"),
+  // Master switch for Sepolia. Off unless explicitly enabled, so no request
+  // parameter, stale database row, or old QR code can route real money to a
+  // test network. Sera itself only supports Ethereum mainnet and Sepolia.
+  seraEnableTestnet: env("SERA_ENABLE_TESTNET").toLowerCase() === "true",
   goldskyGraphqlUrl: env("GOLDSKY_GRAPHQL_URL"),
   alchemyApiKey: env("ALCHEMY_API_KEY"),
   rpcUrls: {

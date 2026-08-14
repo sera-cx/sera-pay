@@ -63,6 +63,15 @@ const CURRENCY_DECIMALS: Record<string, number> = {
   BHD: 3, KWD: 3,
 };
 
+/**
+ * Block explorer origin for a transaction's chain. Defaults to mainnet — a
+ * missing chainId must never send a payer to a testnet explorer, where a real
+ * transaction hash simply 404s.
+ */
+export function explorerBaseUrl(chainId?: number | null): string {
+  return chainId === 11155111 ? "https://sepolia.etherscan.io" : "https://etherscan.io";
+}
+
 export function getCoinCurrency(coinSymbol: string): string {
   return COIN_CURRENCY[coinSymbol?.toUpperCase()] ?? "USD";
 }

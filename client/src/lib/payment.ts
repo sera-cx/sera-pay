@@ -4,13 +4,55 @@ import type { SeraApiMode } from "@shared/gateway";
 
 export const LIVE_PAYMENT_CHAIN_ID = 1;
 export const TEST_PAYMENT_CHAIN_ID = 11155111;
-export const SERA_NO_LIQUIDITY_MESSAGE = "Currently there's no liquidity on this exchange in Sera.cx. Please try another option.";
+export const SERA_NO_LIQUIDITY_MESSAGE = "No liquidity for this pair — try another currency.";
+
+/** Sera's own rate feed is unreachable — nothing the merchant or payer can fix. */
+export const SERA_RATE_UNAVAILABLE_MESSAGE = "Live rates unavailable for this pair — try another currency.";
+
+/**
+ * Turns any exchange-rate failure into one short, friendly sentence.
+ *
+ * Three underlying causes need three different messages, and the raw upstream
+ * text ("Sera API 503: Service temporarily unavailable") is not something to
+ * show a merchant standing at a till:
+ *   - no_liquidity        — nobody is quoting this pair
+ *   - sera_fx_unavailable — Sera's FX service is down for this pair
+ *   - anything else       — surface it, since it may be actionable
+ */
+export function seraRateErrorMessage(error: unknown, errorCode?: string | null): string {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const code = String(errorCode ?? (error as any)?.errorCode ?? "");
+
+  // Sera enforces a per-token minimum on swaps. The server pre-flights it and
+  // sends back the exact figure, so pass that straight through.
+  if (code === "amount_below_min" || /AMOUNT_BELOW_MIN|minimum .* is required/i.test(message)) {
+    return message || "Amount is below Sera's minimum for this currency.";
+  }
+  if (code === "no_liquidity" || /no[_ ]liquidity|no executable liquidity/i.test(message)) {
+    return SERA_NO_LIQUIDITY_MESSAGE;
+  }
+  if (
+    code === "sera_fx_unavailable"
+    || /fx rate service|service temporarily unavailable|temporarily unavailable/i.test(message)
+  ) {
+    return SERA_RATE_UNAVAILABLE_MESSAGE;
+  }
+  return message || SERA_RATE_UNAVAILABLE_MESSAGE;
+}
 const LEGACY_LIVE_PAYMENT_CHAIN_IDS = new Set([10, 56, 137, 8453, 42161]);
 
-export function resolvePaymentChainId(chainId: number | null | undefined, mode?: SeraApiMode | null): number {
-  if (mode === "test") return TEST_PAYMENT_CHAIN_ID;
-  if (mode === "live") return LIVE_PAYMENT_CHAIN_ID;
-  return chainId === LIVE_PAYMENT_CHAIN_ID ? LIVE_PAYMENT_CHAIN_ID : TEST_PAYMENT_CHAIN_ID;
+/**
+ * Ethereum mainnet is the only production payment chain. Sepolia is reachable
+ * only when the merchant's saved Sera config explicitly says `mode: "test"`.
+ *
+ * Everything else — an unsaved config (which the database defaults to "mock"),
+ * a config request that has not resolved yet, or a stale chain id persisted by
+ * wagmi in the browser — resolves to mainnet. The previous default sent all of
+ * those cases to Sepolia, so merchants silently minted testnet QR codes while
+ * their wallet was on Ethereum.
+ */
+export function resolvePaymentChainId(_chainId: number | null | undefined, mode?: SeraApiMode | null): number {
+  return mode === "test" ? TEST_PAYMENT_CHAIN_ID : LIVE_PAYMENT_CHAIN_ID;
 }
 
 function normalizeCheckoutChainId(value: unknown): number | undefined | null {
@@ -127,17 +169,30 @@ export function buildPaymentUrl(req: PaymentRequest): string {
   return buildClientAppUrl(`/pay/${encoded}`);
 }
 
+/**
+ * Describes what the merchant actually ends up holding.
+ *
+ * Only a Sera swap converts the currency, and a swap needs the payer's signed
+ * intent. A direct ERC-20 transfer moves the payer's own coin, so the merchant
+ * receives THAT coin — the receive coin is merely the currency the price was
+ * quoted in. Claiming "Received in 100 MYRT" for a direct transfer would tell
+ * the merchant they are getting a currency that never arrives.
+ */
 export function getCrossCurrencyReceiveLabel(
   payCoin: string | null | undefined,
   receiveCoin: string | null | undefined,
   receiveAmount?: string | null,
+  settlesViaSwap = false,
 ): string | null {
   const normalizedPayCoin = String(payCoin || "").trim().toUpperCase();
   const normalizedReceiveCoin = String(receiveCoin || "").trim().toUpperCase();
   if (!normalizedPayCoin || !normalizedReceiveCoin || normalizedPayCoin === normalizedReceiveCoin) return null;
 
   const normalizedAmount = normalizeDecimalAmountText(String(receiveAmount || ""));
-  return `Received in ${normalizedAmount ? `${normalizedAmount} ` : ""}${normalizedReceiveCoin}`;
+  const pricedAs = `${normalizedAmount ? `${normalizedAmount} ` : ""}${normalizedReceiveCoin}`;
+  return settlesViaSwap
+    ? `Received in ${pricedAs}`
+    : `Priced at ${pricedAs} · merchant receives ${normalizedPayCoin}`;
 }
 
 export function parseAmountToRaw(amount: string, decimals: number): bigint {
@@ -186,7 +241,11 @@ export function buildWalletPaymentUri({
   tokenDecimals,
 }: WalletPaymentUriRequest): string {
   const receiver = receiverAddress.trim();
-  const resolvedChainId = chainId || TEST_PAYMENT_CHAIN_ID;
+  // Callers such as TransactionsPage and MenuManagerPage pass a nullable
+  // chainId straight from a stored row. Mainnet is the only safe default:
+  // falling back to Sepolia minted QR codes that asked a customer's wallet to
+  // send real payments on a test network.
+  const resolvedChainId = chainId || LIVE_PAYMENT_CHAIN_ID;
   if (!EVM_ADDRESS_RE.test(receiver)) return "";
 
   const symbol = String(coin || "").trim().toUpperCase();

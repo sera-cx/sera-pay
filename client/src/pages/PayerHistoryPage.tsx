@@ -4,7 +4,7 @@
  */
 import { useState, useEffect } from "react";
 import { useParams, Link } from "wouter";
-import { getTransactionStatusLabel } from "@/lib/dashboard-utils";
+import { explorerBaseUrl, getTransactionStatusLabel } from "@/lib/dashboard-utils";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 
@@ -19,6 +19,7 @@ type TxRecord = {
   merchantName: string;
   toAddress: string;
   memo: string | null;
+  chainId: number | null;
   createdAt: number;
 };
 
@@ -208,7 +209,7 @@ export default function PayerHistoryPage() {
                       <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
                     </button>
                     <a
-                      href={`https://sepolia.etherscan.io/tx/${tx.txHash}`}
+                      href={`${explorerBaseUrl(tx.chainId)}/tx/${tx.txHash}`}
                       target="_blank"
                       rel="noreferrer"
                       aria-label="View on Etherscan"

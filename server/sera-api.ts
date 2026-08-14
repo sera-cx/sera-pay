@@ -280,7 +280,7 @@ export async function getSeraFxRate(baseUrl: string | undefined, base: string, q
 
 export async function getSeraSystemSnapshot(
   baseUrl = DEFAULT_SERA_API_BASE_URL,
-  mode: SeraMode = "mock",
+  mode: SeraMode = "live",
   merchantId?: string | null
 ): Promise<SeraSystemSnapshot> {
   const normalizedBaseUrl = normalizeSeraBaseUrl(baseUrl);
@@ -289,7 +289,7 @@ export async function getSeraSystemSnapshot(
       mode,
       baseUrl: normalizedBaseUrl,
       healthy: true,
-      chainId: 11155111,
+      chainId: 1,
       seraAddress: null,
       vaultAddress: null,
       sorAddress: null,

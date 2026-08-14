@@ -2,28 +2,26 @@ import { Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { ZodError } from "zod";
 import { ENV } from "./_core/env";
+import { verifySeraTokens } from "./token-verify";
+import { getWalletRecognition } from "./token-recognition";
 import {
   createPaymentIntentInputSchema,
   createSubWalletInputSchema,
   seraApiConfigInputSchema,
   seraApiKeyGenerationInputSchema,
-  seraWebhookPayloadSchema,
 } from "../shared/gateway";
 import {
   createPaymentIntent,
   createSubWallet,
-  createTransaction,
   getApiKeyConfigRecord,
   getMerchantTransactions,
   getPaymentIntentById,
   getSubWalletById,
-  getTransactionByHash,
   listComplianceScreeningLogs,
   listSeraApiRequestLogs,
   listPaymentIntents,
   listSubWallets,
   updateMerchant,
-  updatePaymentIntent,
   updateSubWallet,
   upsertApiKeyConfig,
 } from "./db";
@@ -126,15 +124,25 @@ function encodeCheckoutPayload(payload: Record<string, unknown>): string {
     .replace(/=+$/, "");
 }
 
+/** Sepolia is only ever reachable when the server explicitly enables it. */
+function testnetAllowed(): boolean {
+  return ENV.seraEnableTestnet;
+}
+
 function normalizeSeraMode(value: unknown): SeraMode {
-  return value === "test" || value === "live" || value === "mock" ? value : "mock";
+  if (value === "test") return testnetAllowed() ? "test" : "live";
+  // "mock" was the historical default for merchants who never opened the Sera
+  // API settings, and it resolved to Sepolia everywhere downstream. Mainnet is
+  // now the resting state for anything that is not an explicit test opt-in.
+  return value === "live" || value === "mock" ? "live" : "live";
 }
 
 function querySeraMode(query: any): SeraMode {
-  if (query.mode === "test" || query.mode === "live" || query.mode === "mock") return query.mode;
+  if (query.mode === "test") return testnetAllowed() ? "test" : "live";
+  if (query.mode === "live" || query.mode === "mock") return "live";
   const requestedChainId = Number(query.chainId ?? query.chain_id);
-  if (Number.isInteger(requestedChainId) && requestedChainId > 0) {
-    return requestedChainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
+  if (Number.isInteger(requestedChainId) && requestedChainId === SERA_TESTNET_CHAIN_ID) {
+    return testnetAllowed() ? "test" : "live";
   }
   return "live";
 }
@@ -144,20 +152,37 @@ function defaultSeraBaseUrlForMode(mode: SeraMode): string {
   return ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL;
 }
 
+/**
+ * The allowlist is scoped to the mode. Previously it accepted either base URL
+ * for any mode, so a merchant row saying `mode: "live"` could still carry the
+ * testnet URL and silently send every authenticated Sera call to Sepolia while
+ * the dashboard displayed "Live".
+ */
 function resolveSeraBaseUrl(mode: SeraMode, configuredBaseUrl?: string | null): string {
   const candidate = normalizeSeraBaseUrl(configuredBaseUrl || defaultSeraBaseUrlForMode(mode));
-  const allowed = new Set([
-    normalizeSeraBaseUrl(DEFAULT_SERA_API_BASE_URL),
-    normalizeSeraBaseUrl(DEFAULT_SERA_API_TESTNET_BASE_URL),
-    ...(ENV.seraApiBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiBaseUrl)] : []),
-    ...(ENV.seraApiTestnetBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiTestnetBaseUrl)] : []),
-  ]);
-  if (!allowed.has(candidate)) throw new Error("Unsupported Sera API base URL");
+  const allowed = mode === "test" && testnetAllowed()
+    ? new Set([
+        normalizeSeraBaseUrl(DEFAULT_SERA_API_TESTNET_BASE_URL),
+        ...(ENV.seraApiTestnetBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiTestnetBaseUrl)] : []),
+      ])
+    : new Set([
+        normalizeSeraBaseUrl(DEFAULT_SERA_API_BASE_URL),
+        ...(ENV.seraApiBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiBaseUrl)] : []),
+      ]);
+  // A stale testnet URL on a live merchant must not silently downgrade the
+  // network — fall back to the correct base URL for the mode instead.
+  if (!allowed.has(candidate)) return normalizeSeraBaseUrl(defaultSeraBaseUrlForMode(mode));
   return candidate;
 }
 
 function modeFromBaseUrl(baseUrl: string): SeraMode {
-  return baseUrl.toLowerCase().includes("testnet") ? "test" : "live";
+  if (!testnetAllowed()) return "live";
+  const normalized = normalizeSeraBaseUrl(baseUrl);
+  const testnetUrls = new Set([
+    normalizeSeraBaseUrl(DEFAULT_SERA_API_TESTNET_BASE_URL),
+    ...(ENV.seraApiTestnetBaseUrl ? [normalizeSeraBaseUrl(ENV.seraApiTestnetBaseUrl)] : []),
+  ]);
+  return testnetUrls.has(normalized) ? "test" : "live";
 }
 
 function paymentIntentToJson(intent: any) {
@@ -265,7 +290,26 @@ gatewayRouter.get("/sera/system", async (req, res) => {
 gatewayRouter.get("/sera/tokens", async (req, res) => {
   try {
     const mode = querySeraMode(req.query);
-    res.json(await getSeraTokens(resolveSeraBaseUrl(mode)));
+    const registry = await getSeraTokens(resolveSeraBaseUrl(mode));
+    // Confirm each contract against the chain before it can back a payment QR.
+    // A wallet reads symbol()/decimals() from this address; if it has no code
+    // or reports different decimals, the customer sees "Unknown" and the
+    // transfer moves the wrong amount or reverts.
+    const chainId = mode === "test" ? SERA_TESTNET_CHAIN_ID : 1;
+    const { tokens, rejected } = await verifySeraTokens(chainId, registry.tokens ?? []);
+    if (rejected.length) {
+      console.warn(`[Sera tokens] Dropped ${rejected.length} token(s) failing on-chain verification on chain ${chainId}:`,
+        rejected.map((entry) => entry.reason).join("; "));
+    }
+    // A verified contract still renders as "Unknown" in a wallet that has never
+    // heard of it — the URI carries no symbol. Tell the merchant which of their
+    // currencies a customer's wallet will actually be able to name.
+    const recognitionOf = await getWalletRecognition(chainId);
+    const annotated = tokens.map((token) => ({
+      ...token,
+      walletRecognition: recognitionOf(token.address),
+    }));
+    res.json({ tokens: annotated, ...(rejected.length ? { rejected } : {}) });
   } catch (error) {
     res.status(502).json({ error: "Unable to fetch Sera tokens" });
   }
@@ -443,12 +487,27 @@ gatewayRouter.post("/compliance/screen-address", requireApiKey as any, async (re
   }
 });
 
+/**
+ * Scales a decimal amount to a token's raw integer units.
+ *
+ * Previously this capped input at 6 decimals and then did
+ * `fraction.padEnd(decimals).slice(0, decimals)`, which SILENTLY TRUNCATED any
+ * token with fewer than 6 decimals — "2000.251" against a 2-decimal token
+ * (EURS, IDRT) became 2000.25, undercharging the payer with no error. The 6
+ * decimal cap also made mainnet's 18-decimal tokens (JPYC, BRZ, CADC, EURE,
+ * ZARP) unusable at full precision. Precision loss on money must throw.
+ */
 function toRawTokenAmount(amount: string, decimals: number): string {
   const normalized = amount.replace(/,/g, "").trim();
-  if (!/^\d+(\.\d{1,6})?$/.test(normalized)) throw new Error("Invalid amount. Max 6 decimals.");
+  if (!/^\d+(\.\d+)?$/.test(normalized)) throw new Error("Invalid token amount.");
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+    throw new Error("Invalid token decimals.");
+  }
   const [whole, fraction = ""] = normalized.split(".");
-  const normalizedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
-  const raw = `${whole}${normalizedFraction}`.replace(/^0+(?=\d)/, "");
+  if (fraction.length > decimals) {
+    throw new Error(`Invalid amount. ${decimals} decimal places maximum for this token.`);
+  }
+  const raw = `${whole}${fraction.padEnd(decimals, "0")}`.replace(/^0+(?=\d)/, "");
   return raw || "0";
 }
 
@@ -837,55 +896,20 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
   }
 });
 
-gatewayRouter.post("/webhooks/sera", async (req, res) => {
-  try {
-    const payload = seraWebhookPayloadSchema.parse(req.body);
-    const intent = await getPaymentIntentById(payload.paymentIntentId);
-    if (!intent) {
-      res.status(404).json({ error: "Payment intent not found" });
-      return;
-    }
-
-    const config = await getApiKeyConfigRecord(intent.merchantId);
-    const secret = decryptSecret(config?.seraWebhookSecretEncrypted);
-    if (secret) {
-      // TODO(Sera API): replace this shared-secret check with the exact Sera
-      // webhook signature header and raw-body HMAC scheme once documented.
-      const supplied = req.header("x-sera-webhook-secret");
-      if (supplied !== secret) {
-        res.status(401).json({ error: "Invalid Sera webhook secret" });
-        return;
-      }
-    }
-
-    await updatePaymentIntent(intent.id, { status: payload.status });
-
-    if (payload.status === "paid" && payload.txHash) {
-      const existingTx = await getTransactionByHash(payload.txHash);
-      if (!existingTx) {
-        await createTransaction({
-          id: uuidv4(),
-          merchantId: intent.merchantId,
-          txHash: payload.txHash,
-          fromAddress: payload.fromAddress ?? null,
-          toAddress: payload.toAddress ?? intent.receiverAddress,
-          coin: payload.coin ?? intent.coin,
-          amount: payload.amount ?? intent.amount,
-          chainId: intent.chainId,
-          status: "confirmed",
-          verified: 1,
-          memo: intent.description,
-          notes: `Sera webhook paymentIntentId=${intent.id}`,
-          notifiedAt: new Date(),
-          webhookSentAt: new Date(),
-        });
-      }
-    }
-
-    res.json({ received: true });
-  } catch (error) {
-    if (validationError(res, error)) return;
-    safeGatewayLog("webhook", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
+// The Sera webhook receiver that used to live here has been removed.
+//
+// Sera has no push mechanism of any kind. Every page of docs.sera.cx was
+// checked: there are zero references to webhooks, callbacks, push
+// notifications, SSE, or subscriptions, and the FAQ states plainly that a
+// WebSocket API is "not currently for public users. Use polling with the REST
+// API for order status updates." The handler was therefore built against an
+// API that does not exist and could never have been called by Sera.
+//
+// It was also an unauthenticated way to mark any merchant's order paid: the
+// secret check ran only `if (secret)`, so a merchant with no webhook secret
+// configured — the default for every merchant — accepted anonymous requests
+// that inserted a `status: "confirmed", verified: 1` transaction row.
+//
+// Settlement is reconciled by polling instead: on-chain transfer scanning for
+// direct payments (see /payment/direct/scan in payment-routes.ts) and Sera's
+// GET /orders/{trade_id} for swaps.

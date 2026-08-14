@@ -76,6 +76,8 @@ type SeraTokenPayload = {
   logoUri?: string;
   logo_uri?: string;
   image?: string;
+  min_trade_amount?: string;
+  walletRecognition?: "universal" | "detected" | "unlisted" | "unknown";
 };
 
 function buildCurrency(token: SeraTokenPayload): SeraCurrency {
@@ -84,15 +86,28 @@ function buildCurrency(token: SeraTokenPayload): SeraCurrency {
   const existing = getStablecoinBySymbol(symbol);
   const logoUri = token.logoUri || token.logo_uri || token.logo || token.image || (/^https?:\/\//.test(token.icon || "") ? token.icon : undefined) || getStablecoinLogoUrl(symbol);
   const icon = token.icon && !/^https?:\/\//.test(token.icon) ? token.icon : existing?.icon || ICON_BY_CURRENCY[currency] || currency.slice(0, 2);
+  // The contract address and decimals MUST come from the live Sera registry for
+  // the active chain. The local stablecoins.ts table holds Sepolia addresses and
+  // hardcodes `decimals: 6` for every entry, while mainnet carries 18-decimal
+  // tokens (JPYC, BRZ, CADC, EURE, ZARP …) and 2-decimal tokens (EURS, IDRT).
+  // Falling back to it would build a payment URI against the wrong chain's
+  // contract, or off by a factor of 10^12. Only cosmetic fields may fall back.
+  const contractAddress = String(token.address);
+  const decimals = Number(token.decimals);
+  const parsedMin = Number(token.min_trade_amount);
+  const minTradeAmount = Number.isFinite(parsedMin) && parsedMin > 0 ? parsedMin : undefined;
+  const walletRecognition = token.walletRecognition;
   if (existing) {
     return {
       ...existing,
       name: token.name || existing.name,
       currency,
-      contractAddress: token.address || existing.contractAddress,
-      decimals: Number(token.decimals) || existing.decimals,
+      contractAddress,
+      decimals,
       icon,
       logoUri,
+      minTradeAmount,
+      walletRecognition,
       source: "sera",
     };
   }
@@ -100,11 +115,13 @@ function buildCurrency(token: SeraTokenPayload): SeraCurrency {
     symbol,
     name: token.name || `${currency} Stablecoin`,
     currency,
-    contractAddress: token.address || "",
-    decimals: Number(token.decimals) || 6,
+    contractAddress,
+    decimals,
     icon,
     logoUri,
     region: REGION_BY_CURRENCY[currency] || "Other",
+    minTradeAmount,
+    walletRecognition,
     source: "sera",
   };
 }
@@ -120,6 +137,10 @@ export async function loadSeraCurrencies(chainId?: number): Promise<SeraCurrency
   for (const token of tokens) {
     const symbol = String(token.symbol || "").toUpperCase();
     if (!symbol || !token.address || !/^0x[0-9a-fA-F]{40}$/.test(token.address)) continue;
+    // Drop any token whose decimals Sera did not report. Guessing them would
+    // silently scale the on-chain amount in a payment URI by orders of magnitude.
+    const decimals = Number(token.decimals);
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) continue;
     bySymbol.set(symbol, buildCurrency(token));
   }
   if (bySymbol.size === 0) throw new Error("Sera returned an empty token registry");

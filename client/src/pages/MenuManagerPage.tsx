@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { buildPaymentUrl, buildWalletPaymentUri, resolvePaymentChainId, OrderItem } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { useMerchantProfile } from "@/hooks/use-merchant";
+import { useSeraToken } from "@/hooks/use-sera-token";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig, useSetDefaultWallet, useWallets } from "@/hooks/use-gateway";
 import { useLocation, useSearch } from "wouter";
@@ -860,7 +861,17 @@ function CartPaymentModal({
   const qrBg = merchantProfile?.qrBgColor || "#ffffff";
   const logo = merchantProfile?.logoData || undefined;
   const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress || "";
-  const walletQrValue = buildWalletPaymentUri({ receiverAddress, coin, amount, chainId }) || paymentUrl;
+  // Without the registry's address and decimals this emitted no wallet URI at
+  // all and fell back to the http link, which no wallet scanner can pay.
+  const token = useSeraToken(coin, chainId);
+  const walletQrValue = buildWalletPaymentUri({
+    receiverAddress,
+    coin,
+    amount,
+    chainId,
+    tokenAddress: token?.contractAddress,
+    tokenDecimals: token?.decimals,
+  }) || paymentUrl;
 
   useEffect(() => {
     if (!apiKey || paidTx) return;

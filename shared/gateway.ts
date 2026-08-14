@@ -28,7 +28,7 @@ export const seraApiConfigInputSchema = z.object({
   seraApiKey: z.string().trim().min(1).max(512).optional().or(z.literal("")),
   seraApiBaseUrl: z.string().trim().url().max(255).default(DEFAULT_SERA_API_BASE_URL),
   seraWebhookSecret: z.string().trim().max(256).optional().or(z.literal("")),
-  mode: seraApiModeSchema.default("mock"),
+  mode: seraApiModeSchema.default("live"),
 });
 
 export const seraApiKeyGenerationInputSchema = z.object({
@@ -59,22 +59,14 @@ export const createPaymentIntentInputSchema = z.object({
   expiresAt: z.coerce.date().optional(),
 });
 
-export const seraWebhookPayloadSchema = z.object({
-  paymentIntentId: z.string().uuid(),
-  txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
-  status: z.enum(["created", "open", "paid", "expired", "canceled", "failed"]),
-  fromAddress: evmAddressSchema.optional(),
-  toAddress: evmAddressSchema.optional(),
-  amount: amountStringSchema.optional(),
-  coin: coinSymbolSchema.optional(),
-  timestamp: z.string().optional(),
-});
+// seraWebhookPayloadSchema was removed along with the POST /webhooks/sera
+// receiver. Sera publishes no webhooks — polling the REST API is the only
+// documented way to observe settlement.
 
 export type SeraApiConfigInput = z.infer<typeof seraApiConfigInputSchema>;
 export type SeraApiKeyGenerationInput = z.infer<typeof seraApiKeyGenerationInputSchema>;
 export type CreateSubWalletInput = z.infer<typeof createSubWalletInputSchema>;
 export type CreatePaymentIntentInput = z.infer<typeof createPaymentIntentInputSchema>;
-export type SeraWebhookPayload = z.infer<typeof seraWebhookPayloadSchema>;
 
 export interface Wallet {
   id: string;

@@ -56,8 +56,15 @@ const SERA_TESTNET_CHAIN_ID = sepolia.id;
 const SERA_MAINNET_CHAIN_ID = mainnet.id;
 const COIN_SYMBOL_RE = /^[A-Z0-9]{2,20}$/;
 
+/** Testnet is reachable only when SERA_ENABLE_TESTNET=true on the server. */
+function isTestnetChainEnabled(chainId?: number | null): boolean {
+  return chainId === SERA_TESTNET_CHAIN_ID && ENV.seraEnableTestnet;
+}
+
 function getSeraApiBaseUrlForChain(chainId?: number | null): string {
-  const baseUrl = chainId === SERA_TESTNET_CHAIN_ID
+  // A caller-supplied `chainId: 11155111` must not be able to redirect the
+  // token registry, quote, and FX pipeline at the testnet deployment.
+  const baseUrl = isTestnetChainEnabled(chainId)
     ? ENV.seraApiTestnetBaseUrl || DEFAULT_SERA_API_TESTNET_BASE_URL
     : ENV.seraApiBaseUrl || DEFAULT_SERA_API_BASE_URL;
   return normalizeSeraBaseUrl(baseUrl);
@@ -599,7 +606,7 @@ paymentRouter.get("/merchant/stats", requireApiKey as any, async (req: any, res)
     const canceled = await cancelStaleMerchantTransactions(req.merchant.id, txs);
     if (canceled > 0) txs = await getMerchantTransactions(req.merchant.id, 1000);
     if (Number.isInteger(requestedChainId) && requestedChainId > 0) {
-      txs = txs.filter((tx) => Number(tx.chainId ?? 11155111) === requestedChainId);
+      txs = txs.filter((tx) => Number(tx.chainId ?? SERA_MAINNET_CHAIN_ID) === requestedChainId);
     }
     const totalCount = txs.length;
     const confirmedCount = txs.filter(t => t.status === "confirmed").length;
@@ -771,7 +778,7 @@ paymentRouter.get("/merchant/transactions", requireApiKey as any, async (req: an
     const canceled = await cancelStaleMerchantTransactions(req.merchant.id, txs);
     if (canceled > 0) txs = await getMerchantTransactions(req.merchant.id, limit, offset);
     if (Number.isInteger(requestedChainId) && requestedChainId > 0) {
-      txs = txs.filter((tx) => Number(tx.chainId ?? 11155111) === requestedChainId);
+      txs = txs.filter((tx) => Number(tx.chainId ?? SERA_MAINNET_CHAIN_ID) === requestedChainId);
     }
     res.json({ transactions: txs.map(transactionToJson), pagination: { limit, offset } });
   } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
@@ -1116,7 +1123,62 @@ async function cancelAllStalePendingTransactions() {
   }
 }
 
-setInterval(() => { void cancelAllStalePendingTransactions(); }, 60_000);
+/**
+ * Detect direct ERC-20 payments without waiting to be asked.
+ *
+ * A plain transfer never touches Sera's contracts and Sera has no webhooks, so
+ * nothing tells us a customer paid — we have to find it by scanning Transfer
+ * logs to the merchant's receiving addresses. That scan only ever ran when a
+ * request carried `?syncDirect=1`, a parameter no client sends, so in practice
+ * it never ran at all: an order was confirmed only if the merchant happened to
+ * have a dashboard open at the right moment. A counter terminal cannot depend
+ * on that.
+ *
+ * Scoped to merchants holding a pending transaction — precisely the set with a
+ * payment outstanding — so RPC cost tracks real trade rather than the size of
+ * the merchant table. syncMerchantDirectTransfers throttles itself per
+ * merchant+chain, so an overlapping tick is a no-op rather than duplicate work.
+ */
+async function sweepPendingMerchantDirectActivity() {
+  const SWEEP_CONCURRENCY = 4;
+  try {
+    const pending = await getPendingTransactions();
+    // One sweep per merchant; the chain of their oldest pending payment is the
+    // one worth scanning first.
+    const chainByMerchant = new Map<string, number | null>();
+    for (const tx of pending) {
+      if (!chainByMerchant.has(tx.merchantId)) {
+        chainByMerchant.set(tx.merchantId, Number(tx.chainId) || null);
+      }
+    }
+
+    const entries = Array.from(chainByMerchant.entries());
+    for (let index = 0; index < entries.length; index += SWEEP_CONCURRENCY) {
+      // Bounded concurrency: each merchant fans out to one eth_getLogs per
+      // (receiving address × coin), and an unbounded burst would trip public
+      // RPC rate limits and starve the checkout path of the same providers.
+      await Promise.allSettled(entries.slice(index, index + SWEEP_CONCURRENCY).map(async ([merchantId, chainId]) => {
+        const merchant = await getMerchantById(merchantId).catch(() => null);
+        if (!merchant) return;
+        await syncMerchantDirectActivity(merchant, chainId).catch((error) => {
+          logSeraOperationFailure("payments/direct-sweep", error);
+        });
+      }));
+    }
+  } catch (error) {
+    logSeraOperationFailure("payments/direct-sweep", error);
+  }
+}
+
+setInterval(() => {
+  void (async () => {
+    // Detect arrivals *before* expiring anything: a payment that landed moments
+    // before the staleness cutoff must be confirmed, not cancelled out from
+    // under the customer who just sent real funds.
+    await sweepPendingMerchantDirectActivity();
+    await cancelAllStalePendingTransactions();
+  })();
+}, 60_000);
 
 type SeraTrackedOrder = {
   status?: string;
@@ -1273,7 +1335,7 @@ paymentRouter.post("/payment/create", async (req, res) => {
       res.status(403).json({ error: "Recipient address failed compliance screening", compliance: toAddressCompliance });
       return;
     }
-    const resolvedChainId = Number(chainId || SERA_TESTNET_CHAIN_ID);
+    const resolvedChainId = Number(chainId || SERA_MAINNET_CHAIN_ID);
     let paymentToken: SeraToken;
     try {
       paymentToken = await resolveSeraTokenForChain(resolvedChainId, coinSymbol);
@@ -1374,10 +1436,30 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       ? Math.min(requestedExpiration, seraNowSec + 300)
       : seraNowSec + 300;
 
+    const fromAmountRaw = toRawTokenAmount(payAmount, fromToken.decimals);
+
+    // Pre-flight Sera's per-token minimum so the payer gets a specific number
+    // instead of a bare AMOUNT_BELOW_MIN after a round trip. This constrains
+    // SWAPS only — a direct ERC-20 transfer never touches Sera's contracts and
+    // has no minimum, so this check lives on the swap path alone.
+    const minimumRaw = BigInt(String(fromToken.min_trade_amount_raw || "0"));
+    if (minimumRaw > 0n && BigInt(fromAmountRaw) < minimumRaw) {
+      res.status(400).json({
+        error: `Minimum ${fromToken.min_trade_amount} ${fromToken.symbol} is required to convert with Sera.`,
+        errorCode: "amount_below_min",
+        detail: {
+          coin: fromToken.symbol,
+          minimum: fromToken.min_trade_amount,
+          requested: payAmount,
+        },
+      });
+      return;
+    }
+
     const quoteRequest = {
       from_token: fromToken.address,
       to_token: toToken.address,
-      from_amount: toRawTokenAmount(payAmount, fromToken.decimals),
+      from_amount: fromAmountRaw,
       owner_address: payerAddress,
       recipient: toAddress,
       expiration,
@@ -1752,7 +1834,7 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
       memo: tx.memo || null,
       failureReason: transactionFailureReason(tx.notes) || tx.memo || null,
       createdAt: tx.createdAt,
-      chainId: tx.chainId ?? 11155111,
+      chainId: tx.chainId ?? SERA_MAINNET_CHAIN_ID,
       merchantName: merchant?.name || null,
       merchantLogo: merchant?.logoData || null,
       merchantDescription: (merchant as any)?.description || null,
@@ -1783,7 +1865,7 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
     const toAddress = String(req.body.toAddress ?? "").trim().toLowerCase();
     const coin = String(req.body.coin ?? "").trim().toUpperCase();
     const amount = String(req.body.amount ?? "").trim();
-    const chainId = Number(req.body.chainId ?? 11155111);
+    const chainId = Number(req.body.chainId ?? SERA_MAINNET_CHAIN_ID);
     const paymentUrl = typeof req.body.paymentUrl === "string" ? req.body.paymentUrl : null;
     const requestedFromBlock = req.body.fromBlock !== undefined && req.body.fromBlock !== null && req.body.fromBlock !== ""
       ? BigInt(String(req.body.fromBlock))
@@ -1936,10 +2018,15 @@ const sepoliaWsClient = ALCHEMY_API_KEY
     })
   : null;
 
+// Registering a Sepolia client is what makes every chain-scanning path accept
+// chainId 11155111. Gating it here turns the existing "Unsupported chain"
+// guards into the single enforcement point for accidental testnet work.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const CHAIN_CLIENTS: Record<number, any> = {
   1:        createPublicClient({ chain: mainnet,  transport: rpcHttpTransport(1) }),
-  11155111: createPublicClient({ chain: sepolia,  transport: rpcHttpTransport(11155111) }),
+  ...(ENV.seraEnableTestnet
+    ? { 11155111: createPublicClient({ chain: sepolia, transport: rpcHttpTransport(11155111) }) }
+    : {}),
 };
 
 const SERA_CHAIN_SCAN_INTERVAL_MS = 8_000;
@@ -2116,7 +2203,7 @@ async function tokenSymbolsForMerchantChain(merchant: Merchant, chainId: number)
   return Array.from(new Set([
     String(merchant.receiveCoin || "").toUpperCase(),
     ...recent
-      .filter((tx) => Number(tx.chainId ?? SERA_TESTNET_CHAIN_ID) === chainId)
+      .filter((tx) => Number(tx.chainId ?? SERA_MAINNET_CHAIN_ID) === chainId)
       .map((tx) => String(tx.coin || "").toUpperCase()),
   ])).filter((symbol) => supported.has(symbol));
 }
@@ -2155,7 +2242,7 @@ async function findMatchingPendingTransaction({
     if (tx.status !== "pending" && tx.status !== "confirming") return false;
     if (String(tx.toAddress || "").toLowerCase() !== toAddress.toLowerCase()) return false;
     if (String(tx.coin || "").toUpperCase() !== coin.toUpperCase()) return false;
-    if (Number(tx.chainId ?? 11155111) !== chainId) return false;
+    if (Number(tx.chainId ?? SERA_MAINNET_CHAIN_ID) !== chainId) return false;
     try {
       return rawAmountsNearlyEqual(BigInt(toRawTokenAmount(String(tx.amount), decimals)), rawAmount);
     } catch {
@@ -2737,7 +2824,7 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   const meta = transactionNotesMeta(tx.notes);
   const orderId = meta.orderId;
 
-  const chainId = tx.chainId ?? 11155111;
+  const chainId = tx.chainId ?? SERA_MAINNET_CHAIN_ID;
   const client = CHAIN_CLIENTS[chainId];
   if (!client) {
     console.error(`[verify] No client for chainId ${chainId}`);
@@ -3014,8 +3101,30 @@ async function fetchSeraRate(from: string, to: string): Promise<number> {
   return rate;
 }
 
+const SERA_NO_LIQUIDITY_RATE_MESSAGE =
+  "Currently there's no liquidity on this exchange in Sera.cx. Please try another option.";
+
+/**
+ * Raised when no Sera price source could produce a rate. `errorCode`
+ * distinguishes a Sera-wide FX outage from a pair with no market maker, so the
+ * merchant is told which one it is instead of a generic failure.
+ */
+class SeraRateUnavailableError extends Error {
+  errorCode: "sera_fx_unavailable" | "no_liquidity";
+  constructor(message: string, errorCode: "sera_fx_unavailable" | "no_liquidity") {
+    super(message);
+    this.name = "SeraRateUnavailableError";
+    this.errorCode = errorCode;
+  }
+}
+
 async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): Promise<{ rate: number; source: string }> {
   if (chainId !== undefined && chainId !== SERA_MAINNET_CHAIN_ID && chainId !== SERA_TESTNET_CHAIN_ID) {
+    throw new Error(`Sera payments are not supported on chain ${chainId}`);
+  }
+  // `?chainId=11155111` on the public /rates route must not price against the
+  // testnet deployment unless this server explicitly enables testnet.
+  if (chainId === SERA_TESTNET_CHAIN_ID && !ENV.seraEnableTestnet) {
     throw new Error(`Sera payments are not supported on chain ${chainId}`);
   }
   const cacheScope = chainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
@@ -3046,6 +3155,10 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
   }
 
   let lastRateError: unknown = null;
+  // Tracked separately from lastRateError: the Goldsky and quote fallbacks
+  // below overwrite lastRateError, which would otherwise mask a Sera /fx/rate
+  // outage and mislabel it as "no liquidity".
+  let fxFeedError: unknown = null;
   if (/^[A-Z]{3}$/.test(fromCurrency) && /^[A-Z]{3}$/.test(toCurrency)) {
     try {
       const fx = await callSeraApi<SeraFxRateResponse>({
@@ -3063,6 +3176,7 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
       return { rate, source: "sera-fx-rate" };
     } catch (error) {
       lastRateError = error;
+      fxFeedError = error;
     }
   }
 
@@ -3160,10 +3274,26 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
     lastQuoteError = error;
   }
 
-  if (lastQuoteError instanceof SeraApiError && (lastQuoteError.errorCode === "no_liquidity" || lastQuoteError.errorCode === "NO_LIQUIDITY")) {
-    throw lastRateError instanceof Error
-      ? new Error(`No Sera FX rate available for ${from}/${to}: ${lastRateError.message}`)
-      : new Error(`No Sera FX rate available for ${from}/${to}`);
+  // Every source failed. Say WHICH one and why rather than emitting a generic
+  // "unable to fetch rate" — the two causes need completely different actions.
+  // Sera's reference feed (GET /fx/rate) returning 503 is an outage on their
+  // side and affects every pair; no_liquidity is specific to this pair and
+  // means no market maker is quoting it.
+  const fxFeedDown = fxFeedError instanceof SeraApiError && fxFeedError.status >= 500;
+  const noLiquidity = lastQuoteError instanceof SeraApiError
+    && (lastQuoteError.errorCode === "no_liquidity" || lastQuoteError.errorCode === "NO_LIQUIDITY");
+
+  if (fxFeedDown) {
+    throw new SeraRateUnavailableError(
+      `Sera's FX rate service is currently unavailable, so ${from}/${to} cannot be priced. Same-coin payments are unaffected.`,
+      "sera_fx_unavailable",
+    );
+  }
+  if (noLiquidity) {
+    throw new SeraRateUnavailableError(
+      `${SERA_NO_LIQUIDITY_RATE_MESSAGE} (pair: ${from}/${to})`,
+      "no_liquidity",
+    );
   }
   throw lastQuoteError instanceof Error ? lastQuoteError : new Error(`Sera returned no usable rate for ${from}/${to}`);
 }
@@ -3202,9 +3332,16 @@ paymentRouter.get("/rates", async (req, res) => {
       res.status(400).json({ error: e.message });
       return;
     }
+    if (e instanceof SeraRateUnavailableError) {
+      // 503 for a Sera-side outage so callers and uptime checks can tell it
+      // apart from a pair-specific 409.
+      res.status(e.errorCode === "sera_fx_unavailable" ? 503 : 409)
+        .json({ error: e.message, errorCode: e.errorCode });
+      return;
+    }
     if (e instanceof SeraApiError && (e.errorCode === "no_liquidity" || e.errorCode === "NO_LIQUIDITY")) {
       res.status(409).json({
-        error: "Currently there's no liquidity on this exchange in Sera.cx. Please try another option.",
+        error: SERA_NO_LIQUIDITY_RATE_MESSAGE,
         errorCode: "no_liquidity",
       });
       return;

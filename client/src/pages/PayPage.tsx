@@ -4,7 +4,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
 import { ChevronDown, ChevronRight, Wallet } from "lucide-react";
 import { type Stablecoin } from "@/lib/stablecoins";
-import { decodePaymentRequest, getCrossCurrencyReceiveLabel, SERA_NO_LIQUIDITY_MESSAGE, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
+import { decodePaymentRequest, getCrossCurrencyReceiveLabel, LIVE_PAYMENT_CHAIN_ID, SERA_NO_LIQUIDITY_MESSAGE, seraRateErrorMessage, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
@@ -122,6 +122,37 @@ async function switchPaymentChain(provider: any, chainId: number) {
   }
 }
 
+/**
+ * EIP-747 `wallet_watchAsset`.
+ *
+ * An EIP-681 payment URI carries only the contract address — there is no field
+ * for the symbol or decimals. A wallet that does not already carry the token in
+ * its own list therefore renders the request as "Unknown" (MetaMask) or "Add a
+ * currency and try again" (OKX), even though the URI is perfectly valid. Only
+ * a handful of the Sera currencies ship in wallets' bundled lists, so for the
+ * rest this call is the supported way to register the token. Once accepted, the
+ * wallet names the token correctly for this account from then on.
+ */
+async function addTokenToWallet(
+  provider: any,
+  token: { address: string; symbol: string; decimals: number; image?: string },
+): Promise<boolean> {
+  const added = await provider.request({
+    method: "wallet_watchAsset",
+    params: {
+      type: "ERC20",
+      options: {
+        address: token.address,
+        // MetaMask rejects symbols longer than 11 characters outright.
+        symbol: token.symbol.slice(0, 11),
+        decimals: token.decimals,
+        ...(token.image ? { image: token.image } : {}),
+      },
+    },
+  });
+  return added !== false;
+}
+
 async function getActiveWalletAddress(provider: any, fallbackAddress?: string) {
   const accounts = await provider.request({ method: "eth_requestAccounts" }).catch(async () => {
     return provider.request({ method: "eth_accounts" }).catch(() => []);
@@ -201,6 +232,12 @@ function paymentFailureMessage(error: any): string {
   if (error?.errorCode === "no_liquidity" || /no liquidity|No liquidity is available/i.test(message)) {
     return SERA_NO_LIQUIDITY_MESSAGE;
   }
+  // Sera's own FX feed is down. Say so plainly — this is not a SeraPay fault
+  // and not something the customer can fix by retrying a different coin.
+  // Must be checked before the generic status >= 500 branch below.
+  if (error?.errorCode === "sera_fx_unavailable") {
+    return message || "Sera's FX rate service is currently unavailable, so this currency pair cannot be priced right now.";
+  }
   if (isQuoteStaleError(error)) {
     return "The quote closed before it could be submitted. Please try again.";
   }
@@ -279,8 +316,8 @@ function Spinner({ size = 32, color = "#00D1A0" }: { size?: number; color?: stri
   return <div style={{ width: size, height: size, border: `3px solid ${color}22`, borderTop: `3px solid ${color}`, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />;
 }
 
-function CoinSheet({ onClose, onSelect, selectedSymbol, receiveCoin, supportedCoins, searchPlaceholder }: {
-  onClose: () => void; onSelect: (c: Stablecoin) => void; selectedSymbol?: string; receiveCoin?: string; supportedCoins: Stablecoin[]; searchPlaceholder?: string;
+function CoinSheet({ onClose, onSelect, selectedSymbol, receiveCoin, supportedCoins, searchPlaceholder, settlesViaSwap }: {
+  onClose: () => void; onSelect: (c: Stablecoin) => void; selectedSymbol?: string; receiveCoin?: string; supportedCoins: Stablecoin[]; searchPlaceholder?: string; settlesViaSwap?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [focusIdx, setFocusIdx] = useState(-1);
@@ -334,7 +371,11 @@ function CoinSheet({ onClose, onSelect, selectedSymbol, receiveCoin, supportedCo
         <div style={{ padding: "16px 20px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h3 id="coin-sheet-title" style={{ fontSize: 17, fontWeight: 700, color: "#1C1C1E", margin: 0 }}>Pay With</h3>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {receiveCoin && <span style={{ fontSize: 12, color: "rgba(60,60,67,0.5)", background: "#F2F2F7", padding: "4px 10px", borderRadius: 20 }}>Merchant receives {receiveCoin}</span>}
+            {receiveCoin && (
+              <span style={{ fontSize: 12, color: "rgba(60,60,67,0.5)", background: "#F2F2F7", padding: "4px 10px", borderRadius: 20 }}>
+                {settlesViaSwap ? `Merchant receives ${receiveCoin}` : `Priced in ${receiveCoin}`}
+              </span>
+            )}
             <button onClick={onClose} aria-label="Close coin selector" style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "rgba(60,60,67,0.4)", display: "flex", alignItems: "center" }}>
               <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
             </button>
@@ -460,6 +501,7 @@ export default function PayPage() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [req, setReq] = useState<ReturnType<typeof decodePaymentRequest> | null>(null);
   const [selectedCoin, setSelectedCoin] = useState<Stablecoin | null>(null);
+  const [addTokenState, setAddTokenState] = useState<"idle" | "adding" | "added">("idle");
   const [payerChangedCoinInCheckout, setPayerChangedCoinInCheckout] = useState(false);
   const [supportedCoins, setSupportedCoins] = useState<SeraCurrency[]>([]);
   const [registryLoading, setRegistryLoading] = useState(true);
@@ -509,7 +551,9 @@ export default function PayPage() {
   const [unifiedLoading, setUnifiedLoading] = useState(false);
   const [orderMinimumPayAmount, setOrderMinimumPayAmount] = useState<string | null>(null);
   const [rateRefreshKey, setRateRefreshKey] = useState(0);
-  const chainId = req?.chainId ?? TEST_PAYMENT_CHAIN_ID;
+  // A checkout link that omits chainId is a legacy or hand-built link. Price it
+  // and resolve its tokens on mainnet, never on a test network.
+  const chainId = req?.chainId ?? LIVE_PAYMENT_CHAIN_ID;
   const hasOrderItems = !!req?.orderItems?.length;
 
   // Compute itemised order total in the currently selected payment coin.
@@ -600,7 +644,7 @@ export default function PayPage() {
       11155111: import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
       1: import.meta.env.VITE_MAINNET_RPC_URL || "https://ethereum-rpc.publicnode.com",
     };
-    const rpc = chainRpc[chainId] || chainRpc[11155111];
+    const rpc = chainRpc[chainId] || chainRpc[LIVE_PAYMENT_CHAIN_ID];
     let cancelled = false;
     (async () => {
       try {
@@ -701,7 +745,7 @@ export default function PayPage() {
     try {
       const res = await fetch(`/api/rates?from=${receiveCoin}&to=${payCoin}&chainId=${rateChainId}`);
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || data.error || "Unable to fetch the Sera exchange rate");
+      if (!res.ok) throw Object.assign(new Error(data.detail || data.error || ""), { errorCode: data.errorCode });
       if (requestId !== payRateRequestRef.current) return;
       if (data.rate) {
         const converted = parseFloat(amount) * data.rate;
@@ -724,7 +768,7 @@ export default function PayPage() {
       setRateExpiry(null);
       setCountdown(0);
       rateRef.current = null;
-      setTxError(error instanceof Error ? error.message : "Unable to fetch the Sera exchange rate");
+      setTxError(seraRateErrorMessage(error));
     } finally {
       if (requestId === payRateRequestRef.current) setRateLoading(false);
     }
@@ -805,6 +849,37 @@ export default function PayPage() {
     };
   }, [txId]);
 
+  // "Added" refers to one specific token; switching currency makes it stale.
+  useEffect(() => { setAddTokenState("idle"); }, [selectedCoin?.symbol]);
+
+  const handleAddTokenToWallet = useCallback(async () => {
+    if (!selectedCoin) return;
+    const address = String(selectedCoin.contractAddress || "");
+    const decimals = Number(selectedCoin.decimals);
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address) || !Number.isInteger(decimals)) return;
+    setAddTokenState("adding");
+    try {
+      const wallet = wallets?.[0];
+      if (!wallet) throw new Error("Connect a wallet first");
+      const provider = await wallet.getEthereumProvider();
+      // Register the token on the same chain the payment will settle on,
+      // otherwise the wallet files it under whatever network it happens to be
+      // showing and still cannot name it at confirmation time.
+      await switchPaymentChain(provider, req?.chainId ?? LIVE_PAYMENT_CHAIN_ID);
+      await addTokenToWallet(provider, {
+        address,
+        symbol: selectedCoin.symbol,
+        decimals,
+        image: selectedCoin.logoUri,
+      });
+      setAddTokenState("added");
+    } catch {
+      // Declining the prompt is a normal outcome, not an error worth shouting
+      // about — the payment still works, the wallet just shows "Unknown".
+      setAddTokenState("idle");
+    }
+  }, [selectedCoin, wallets, req?.chainId]);
+
   const executePay = useCallback(async (finalPayAmount: string, finalReceiveAmount?: string) => {
     if (!req || !selectedCoin) return;
     setPhase("paying");
@@ -813,7 +888,7 @@ export default function PayPage() {
       const wallet = wallets?.[0];
       if (!wallet) throw new Error("No wallet connected");
       const provider = await wallet.getEthereumProvider();
-      const cid = req.chainId ?? TEST_PAYMENT_CHAIN_ID;
+      const cid = req.chainId ?? LIVE_PAYMENT_CHAIN_ID;
 
       await switchPaymentChain(provider, cid);
       const activeWalletAddress = await getActiveWalletAddress(provider, wallet.address);
@@ -1432,7 +1507,7 @@ export default function PayPage() {
   }
 
   const activePaymentCoin = selectedCoin?.symbol || req?.payCoin || req?.receiveCoin;
-  const crossCurrencyReceiveLabel = getCrossCurrencyReceiveLabel(activePaymentCoin, req?.receiveCoin, req?.amount);
+  const crossCurrencyReceiveLabel = getCrossCurrencyReceiveLabel(activePaymentCoin, req?.receiveCoin, req?.amount, requiresSeraSwap);
   const isSameCoin = Boolean(activePaymentCoin && req?.receiveCoin && activePaymentCoin.toUpperCase() === req.receiveCoin.toUpperCase());
   const showCountdown = !!rateExpiry && !!selectedCoin && (hasOrderItems || (!isSameCoin && !!req?.amount));
   const paymentAmountReady = Boolean(payAmount && Number.isFinite(parseDisplayAmount(payAmount)) && parseDisplayAmount(payAmount) > 0);
@@ -1717,6 +1792,34 @@ export default function PayPage() {
                 </div>
               </div>
             )}
+            {/*
+              Wallets resolve a token's name from their own list, not from the
+              payment request, so a currency they have never seen confirms as
+              "Unknown". One tap registers it and the name appears correctly.
+            */}
+            {selectedCoin && selectedCoinSupported && selectedCoin.walletRecognition && selectedCoin.walletRecognition !== "universal" && (
+              <div style={{ background: "#F4F9FF", border: "1px solid rgba(0,122,255,0.18)", borderRadius: 14, padding: "12px 14px", marginBottom: 16 }}>
+                <p style={{ margin: "0 0 10px", fontSize: 12, lineHeight: 1.5, color: "#1C3D5A", fontWeight: 600 }}>
+                  {addTokenState === "added"
+                    ? `${selectedCoin.symbol} is now in your wallet — it will show by name when you confirm.`
+                    : `Your wallet may show ${selectedCoin.symbol} as "Unknown". Add it once and it will always show by name.`}
+                </p>
+                {addTokenState !== "added" && (
+                  <button
+                    type="button"
+                    onClick={handleAddTokenToWallet}
+                    disabled={addTokenState === "adding"}
+                    style={{
+                      width: "100%", height: 38, borderRadius: 11, border: "1px solid rgba(0,122,255,0.3)",
+                      background: "#fff", color: "#0A66C2", fontSize: 12.5, fontWeight: 700,
+                      cursor: addTokenState === "adding" ? "wait" : "pointer", fontFamily: font,
+                    }}
+                  >
+                    {addTokenState === "adding" ? "Check your wallet…" : `Add ${selectedCoin.symbol} to my wallet`}
+                  </button>
+                )}
+              </div>
+            )}
             {!selectedCoin && (
               <button disabled={registryLoading || supportedCoins.length === 0} onClick={() => setShowCoinSheet(true)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, background: "#F9F9FB", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 14, padding: "14px 16px", cursor: registryLoading || supportedCoins.length === 0 ? "not-allowed" : "pointer", marginBottom: 16 }}>
                 <span style={{ fontSize: 14, color: "rgba(60,60,67,0.4)", flex: 1, textAlign: "left" }}>{registryLoading ? "Loading currencies from Sera…" : "Choose a supported payment coin"}</span>
@@ -1796,6 +1899,7 @@ export default function PayPage() {
           receiveCoin={req?.receiveCoin}
           supportedCoins={supportedCoins}
           searchPlaceholder={t.searchCoins}
+          settlesViaSwap={requiresSeraSwap}
         />
       )}
 

@@ -8,6 +8,7 @@ import { formatAmount, getTransactionStatusLabel, shortenAddress } from "@/lib/d
 import { format, parseISO, startOfDay, endOfDay, startOfMonth, subDays } from "date-fns";
 import { Ban, ExternalLink, Search, X, QrCode, Download, Calendar, ChevronDown, FileText, ChevronRight } from "lucide-react";
 import { buildPaymentUrl, buildWalletPaymentUri } from "@/lib/payment";
+import { useSeraToken } from "@/hooks/use-sera-token";
 import { QRStyled } from "@/components/QRStyled";
 import type { QrStyle } from "@/components/QRStyled";
 import { cn } from "@/lib/dashboard-utils";
@@ -236,7 +237,17 @@ function QRModal({
   logo?: string; fgColor?: string; bgColor?: string; qrStyle?: string; onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
-  const walletQrValue = buildWalletPaymentUri({ receiverAddress: receiverAddress || "", coin, amount, chainId }) || paymentUrl;
+  // Without the registry's address and decimals this emitted no wallet URI at
+  // all and fell back to the http link, which no wallet scanner can pay.
+  const token = useSeraToken(coin, chainId);
+  const walletQrValue = buildWalletPaymentUri({
+    receiverAddress: receiverAddress || "",
+    coin,
+    amount,
+    chainId,
+    tokenAddress: token?.contractAddress,
+    tokenDecimals: token?.decimals,
+  }) || paymentUrl;
   const handleCopy = async () => {
     try { await navigator.clipboard.writeText(paymentUrl); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch {}
   };

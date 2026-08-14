@@ -263,11 +263,18 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "seraApiKeyLast4" varchar(12),
       "seraWebhookSecretEncrypted" text,
       "seraWebhookSecretLast4" varchar(12),
-      "mode" varchar(20) NOT NULL DEFAULT 'mock',
+      "mode" varchar(20) NOT NULL DEFAULT 'live',
       "createdAt" timestamptz NOT NULL DEFAULT now(),
       "updatedAt" timestamptz NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS "idx_api_key_configs_merchant" ON "api_key_configs" ("merchantId");
+    -- Converge databases created before mainnet became the default. 'mock' was
+    -- the old resting state for every merchant who never opened the Sera API
+    -- settings, and it resolved to Sepolia throughout the client.
+    ALTER TABLE "api_key_configs" ALTER COLUMN "mode" SET DEFAULT 'live';
+    UPDATE "api_key_configs" SET "mode" = 'live' WHERE "mode" = 'mock';
+    UPDATE "api_key_configs" SET "seraApiBaseUrl" = 'https://api.sera.cx/api/v1'
+      WHERE "mode" <> 'test' AND "seraApiBaseUrl" <> 'https://api.sera.cx/api/v1';
 
     CREATE TABLE IF NOT EXISTS "sub_wallets" (
       "id" varchar(36) PRIMARY KEY,

@@ -186,7 +186,7 @@ export const apiKeyConfigs = pgTable(
     seraApiKeyLast4: varchar("seraApiKeyLast4", { length: 12 }),
     seraWebhookSecretEncrypted: text("seraWebhookSecretEncrypted"),
     seraWebhookSecretLast4: varchar("seraWebhookSecretLast4", { length: 12 }),
-    mode: apiConfigModeEnum("mode").default("mock").notNull(),
+    mode: apiConfigModeEnum("mode").default("live").notNull(),
     createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
   },

@@ -10,6 +10,13 @@ import { DEFAULT_SERA_API_BASE_URL, DEFAULT_SERA_API_TESTNET_BASE_URL } from "@s
 
 export type NetworkMode = "test" | "live";
 
+/**
+ * Switching to Sepolia is the only remaining way a merchant can leave mainnet,
+ * so it is hidden unless this build explicitly enables testnet. Mirrors the
+ * server's SERA_ENABLE_TESTNET flag.
+ */
+export const TESTNET_ENABLED = import.meta.env.VITE_ENABLE_TESTNET === "true";
+
 export const NETWORKS: Record<number, { label: string; color: string; bg: string; isTest: boolean }> = {
   [sepolia.id]: { label: "Sepolia", color: "#00A87A", bg: "#E6FAF5", isTest: true },
   [mainnet.id]: { label: "Ethereum", color: "#627EEA", bg: "#EEF1FD", isTest: false },
@@ -18,7 +25,10 @@ export const NETWORKS: Record<number, { label: string; color: string; bg: string
 export function useActiveNetworkMode() {
   const chainId = useChainId();
   const { data: seraConfig } = useSeraApiConfig();
-  const activeMode: NetworkMode = seraConfig?.mode === "live" ? "live" : seraConfig?.mode === "test" ? "test" : chainId === mainnet.id ? "live" : "test";
+  // Mainnet unless the merchant explicitly saved test mode. The wallet's own
+  // chain id must never decide this — wallets connect through Privy, so the
+  // wagmi chain id is only a stale persisted value, not what MetaMask shows.
+  const activeMode: NetworkMode = seraConfig?.mode === "test" ? "test" : "live";
   const networkInfo = activeMode === "live" ? NETWORKS[mainnet.id] : NETWORKS[sepolia.id];
   return { activeMode, networkInfo, chainId };
 }
@@ -69,14 +79,23 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
   const { activeMode, networkInfo } = useActiveNetworkMode();
   const updateConfig = useUpdateSeraApiConfig();
 
+  const persistMode = (targetMode: NetworkMode) => updateConfig.mutateAsync({
+    mode: targetMode,
+    seraApiBaseUrl: targetMode === "test" ? DEFAULT_SERA_API_TESTNET_BASE_URL : DEFAULT_SERA_API_BASE_URL,
+  });
+
   const handleSwitch = async (targetChainId: number) => {
     const targetMode: NetworkMode = targetChainId === mainnet.id ? "live" : "test";
+    if (targetMode === "test" && !TESTNET_ENABLED) return;
     try {
-      await updateConfig.mutateAsync({
-        mode: targetMode,
-        seraApiBaseUrl: targetMode === "test" ? DEFAULT_SERA_API_TESTNET_BASE_URL : DEFAULT_SERA_API_BASE_URL,
-      });
+      // Switch the wallet FIRST when moving to a test network. Persisting the
+      // Sera mode before the wallet agreed left merchants recorded as "test" in
+      // the database while their wallet stayed on mainnet, and the dashboard
+      // then reported Test. Moving TO mainnet is always safe to persist, so it
+      // is recorded even if the wallet prompt is dismissed.
+      if (targetMode === "live") await persistMode("live");
       await switchChain({ chainId: targetChainId });
+      if (targetMode === "test") await persistMode("test");
       onClose();
     } catch {
       try {
@@ -140,29 +159,6 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
           <div className="space-y-2">
             <button
               type="button"
-              onClick={() => handleSwitch(sepolia.id)}
-              disabled={isPending || updateConfig.isPending || activeMode === "test"}
-              className={cn(
-                "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
-                activeMode === "test"
-                  ? "border-[#00D1A0] bg-[#E6FAF5]"
-                  : "border-border hover:border-[#00D1A0]/50 hover:bg-muted/40"
-              )}
-            >
-              <div className="w-8 h-8 rounded-full bg-[#E6FAF5] flex items-center justify-center shrink-0">
-                <span className="text-xs font-bold text-[#00A87A]">T</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-foreground">Sepolia Testnet</p>
-                <p className="text-xs text-muted-foreground">For testing only - no real value</p>
-              </div>
-              {activeMode === "test" && (
-                <span className="text-xs font-medium text-[#00A87A] bg-[#E6FAF5] px-2 py-0.5 rounded-full shrink-0">Active</span>
-              )}
-            </button>
-
-            <button
-              type="button"
               onClick={() => handleSwitch(mainnet.id)}
               disabled={isPending || updateConfig.isPending || activeMode === "live"}
               className={cn(
@@ -183,6 +179,34 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
                 <span className="text-xs font-medium text-[#627EEA] bg-[#EEF1FD] px-2 py-0.5 rounded-full shrink-0">Active</span>
               )}
             </button>
+
+            {TESTNET_ENABLED && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!window.confirm("Switch this merchant account to the Sepolia TEST network?\n\nEvery payment link and QR code you create will ask customers to pay on a test network, where tokens have no real value.")) return;
+                  void handleSwitch(sepolia.id);
+                }}
+                disabled={isPending || updateConfig.isPending || activeMode === "test"}
+                className={cn(
+                  "w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left",
+                  activeMode === "test"
+                    ? "border-[#00D1A0] bg-[#E6FAF5]"
+                    : "border-border hover:border-[#00D1A0]/50 hover:bg-muted/40"
+                )}
+              >
+                <div className="w-8 h-8 rounded-full bg-[#E6FAF5] flex items-center justify-center shrink-0">
+                  <span className="text-xs font-bold text-[#00A87A]">T</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-foreground">Sepolia Testnet</p>
+                  <p className="text-xs text-muted-foreground">For testing only - no real value</p>
+                </div>
+                {activeMode === "test" && (
+                  <span className="text-xs font-medium text-[#00A87A] bg-[#E6FAF5] px-2 py-0.5 rounded-full shrink-0">Active</span>
+                )}
+              </button>
+            )}
           </div>
 
           {(isPending || updateConfig.isPending) && (
