@@ -297,6 +297,46 @@ describe("payment URL encoder", () => {
     })).toBe("");
   });
 
+  it("never puts an http link inside a payment QR", async () => {
+    const { buildPaymentQrValue } = await import("../client/src/lib/payment");
+    const paymentUrl = "https://pay.sera.cx/pay/abc123";
+
+    // Token metadata missing — the case that used to silently degrade the QR
+    // into a web link that no wallet scanner can pay.
+    expect(buildPaymentQrValue({
+      receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
+      coin: "CNGN",
+      amount: "1",
+      chainId: 1,
+      paymentUrl,
+    })).toBe("");
+
+    // Amount finer than the token's precision — also refused, not downgraded.
+    expect(buildPaymentQrValue({
+      receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
+      coin: "IDRT",
+      amount: "2000.251",
+      chainId: 1,
+      tokenAddress: "0x998ffe1e43facffb941dc337dd0468d52ba5b48a",
+      tokenDecimals: 2,
+      paymentUrl,
+    })).toBe("");
+
+    // With full metadata it must be an ethereum: URI, never http(s).
+    const valid = buildPaymentQrValue({
+      receiverAddress: "0x43d671ad45b07309e91cedba0f74abb55ed8c3da",
+      coin: "CNGN",
+      amount: "1",
+      chainId: 1,
+      tokenAddress: "0x17cdb2a01e7a34cbb3dd4b83260b05d0274c8dab",
+      tokenDecimals: 6,
+      paymentUrl,
+    });
+    expect(valid.startsWith("ethereum:")).toBe(true);
+    expect(valid).not.toMatch(/https?:\/\//);
+    expect(valid).toContain("uint256=1000000");
+  });
+
   it("uses an exact ERC-20 wallet QR when customer and merchant coins match", async () => {
     const { buildPaymentQrValue } = await import("../client/src/lib/payment");
     const paymentUrl = "https://pay.sera.cx/pay/example";

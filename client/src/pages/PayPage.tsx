@@ -143,14 +143,20 @@ async function addTokenToWallet(
       type: "ERC20",
       options: {
         address: token.address,
-        // MetaMask rejects symbols longer than 11 characters outright.
-        symbol: token.symbol.slice(0, 11),
+        // Send the registry symbol verbatim. Truncating it here can only
+        // manufacture a mismatch against the symbol the wallet reads from the
+        // contract — which is a hard rejection, not a graceful shortening —
+        // and wallets apply their own display limits after reconciling anyway.
+        symbol: token.symbol,
         decimals: token.decimals,
         ...(token.image ? { image: token.image } : {}),
       },
     },
   });
-  return added !== false;
+  // EIP-747 returns `true` on success and `false` when the user declines.
+  // Anything else (undefined/null from a wallet that ignores the method) is
+  // not evidence the token was added, so it must not be reported as success.
+  return added === true;
 }
 
 async function getActiveWalletAddress(provider: any, fallbackAddress?: string) {
@@ -866,13 +872,16 @@ export default function PayPage() {
       // otherwise the wallet files it under whatever network it happens to be
       // showing and still cannot name it at confirmation time.
       await switchPaymentChain(provider, req?.chainId ?? LIVE_PAYMENT_CHAIN_ID);
-      await addTokenToWallet(provider, {
+      const added = await addTokenToWallet(provider, {
         address,
         symbol: selectedCoin.symbol,
         decimals,
         image: selectedCoin.logoUri,
       });
-      setAddTokenState("added");
+      // Some wallets accept the call and do nothing. Claiming success then
+      // would tell the customer the token is registered while their next
+      // screen still says "Unknown" — leave the offer up instead.
+      setAddTokenState(added ? "added" : "idle");
     } catch {
       // Declining the prompt is a normal outcome, not an error worth shouting
       // about — the payment still works, the wallet just shows "Unknown".

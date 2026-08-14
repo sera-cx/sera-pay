@@ -2111,6 +2111,10 @@ export default function Home() {
         tokenDecimals: currencies.find((coin) => coin.symbol === displayCoin?.symbol)?.decimals,
         paymentUrl,
       });
+      // A downloaded card gets printed and left on a counter. Shipping the http
+      // fallback into one would strand a non-payable QR in the physical world
+      // long after the session that produced it.
+      if (!walletQrValue) return;
       await downloadPaymentQrCard({
         qrValue: walletQrValue,
         receiverAddress,
@@ -2578,16 +2582,34 @@ export default function Home() {
                 maxWidth: "100%", boxSizing: "border-box" as const,
                 cursor: "copy",
               }}>
-                <QRStyled
-                  value={activeQrValue}
-                  size={Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320)}
-                  fgColor={activeQrFgColor}
-                  bgColor={activeQrBgColor}
-                  style={normalizeQrStyleValue(localQrStyle || merchantProfile?.qrStyle)}
-                  logo={activeQrLogo}
-                  mode={activeQrRenderMode}
-                  className="qr-step2-container"
-                />
+                {/* An http link in a QR is not a payment request — show the
+                    reason rather than a code that scans into a web page. */}
+                {activeQrValue ? (
+                  <QRStyled
+                    value={activeQrValue}
+                    size={Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320)}
+                    fgColor={activeQrFgColor}
+                    bgColor={activeQrBgColor}
+                    style={normalizeQrStyleValue(localQrStyle || merchantProfile?.qrStyle)}
+                    logo={activeQrLogo}
+                    mode={activeQrRenderMode}
+                    className="qr-step2-container"
+                  />
+                ) : (
+                  <div
+                    role="status"
+                    style={{
+                      width: Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320),
+                      height: Math.min(320, typeof window !== "undefined" ? window.innerWidth - 96 : 320),
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      padding: 24, boxSizing: "border-box", textAlign: "center",
+                      border: "1px dashed rgba(10,31,26,0.2)", borderRadius: 16, background: "#fff",
+                      fontSize: 12.5, fontWeight: 650, lineHeight: 1.5, color: "rgba(10,31,26,0.55)",
+                    }}
+                  >
+                    Payment QR unavailable — {displayCoin?.symbol ?? "this currency"} details are still loading from Sera.
+                  </div>
+                )}
               </div>
             </div>
             <button
@@ -3235,7 +3257,10 @@ export default function Home() {
         )}
         {conversionError && (
           <p style={{ margin: "10px 0 0", textAlign: "center", fontSize: 12, color: "#FF3B30" }}>
-            {conversionError}. The previous amount will not be used.
+            {/* conversionError already ends in a full stop — appending another
+                sentence produced a stray ".." and restated what the disabled
+                rate field above already makes obvious. */}
+            {conversionError}
           </p>
         )}
 

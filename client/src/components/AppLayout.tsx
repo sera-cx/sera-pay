@@ -335,9 +335,11 @@ function DashboardPaymentModal({
   };
 
   const downloadQr = async () => {
-    if (!paymentUrl || !receiverAddress) return;
+    // A downloaded card gets printed and stuck on a counter, so shipping the
+    // http fallback here would outlive the session that produced it.
+    if (!paymentUrl || !receiverAddress || !paymentQrValue) return;
     await downloadPaymentQrCard({
-      qrValue: paymentQrValue || paymentUrl,
+      qrValue: paymentQrValue,
       receiverAddress,
       amount: displayPayAmount,
       coin: resolvedPayCoin,
@@ -463,9 +465,20 @@ function DashboardPaymentModal({
               <p className="mt-1 text-2xl font-extrabold text-gray-950">
                 {(displayPayAmount || amount) ? `${displayPayAmount || amount} ` : ""}<span className="text-[#00C896]">{resolvedPayCoin}</span>
               </p>
-              <div id="dashboard-payment-qr" onClick={copyLink} className="mx-auto mt-2 w-fit cursor-copy rounded-2xl bg-white p-2">
-                <QRStyled value={paymentQrValue || paymentUrl} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
-              </div>
+              {/* Never substitute the http link here: a scanned web link is not
+                  a payment request, and rendering one would look identical to a
+                  working QR while quietly failing every wallet scanner. */}
+              {paymentQrValue ? (
+                <div id="dashboard-payment-qr" onClick={copyLink} className="mx-auto mt-2 w-fit cursor-copy rounded-2xl bg-white p-2">
+                  <QRStyled value={paymentQrValue} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
+                </div>
+              ) : (
+                <div className="mx-auto mt-2 flex h-[210px] w-[210px] items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-white p-4">
+                  <p className="text-[11px] font-semibold leading-relaxed text-gray-500">
+                    Payment QR unavailable — {resolvedPayCoin} details are still loading from Sera.
+                  </p>
+                </div>
+              )}
               <button
                 type="button"
                 onClick={copyLink}

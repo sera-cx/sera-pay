@@ -3025,6 +3025,52 @@ const GOLDSKY_URL = ENV.goldskyGraphqlUrl;
 const rateCache = new Map<string, { rate: number; ts: number }>();
 const CACHE_TTL_MS = 60_000; // 1 minute
 
+/**
+ * Negative cache + rate-limit backoff for Sera pricing.
+ *
+ * Successful rates are cached above, but failures were not, so every pair Sera
+ * cannot price re-hit their API on every keystroke and currency switch. With
+ * most cross-currency pairs currently answering 503, a merchant browsing the
+ * currency list generated a burst large enough to earn a 429 — at which point
+ * even the working pairs started failing. The outage was ours to amplify.
+ *
+ * So: remember which pairs just failed and answer from memory for a short
+ * while, and when Sera does rate-limit us, stop calling entirely until the
+ * window passes rather than digging deeper.
+ */
+const rateFailureCache = new Map<string, { error: unknown; ts: number }>();
+const RATE_FAILURE_TTL_MS = 30_000;
+let seraRateLimitedUntil = 0;
+
+export class SeraRateLimitedError extends Error {
+  readonly retryAfterMs: number;
+  constructor(retryAfterMs: number) {
+    super("Too many pricing requests right now. Try again in a moment.");
+    this.name = "SeraRateLimitedError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+const SERA_RATE_LIMIT_BACKOFF_MS = 20_000;
+
+function noteRateFailure(cacheKey: string, error: unknown) {
+  if (error instanceof SeraApiError && error.status === 429) {
+    // Global, not per-pair: the limit is on our client, not on the currency.
+    seraRateLimitedUntil = Date.now() + SERA_RATE_LIMIT_BACKOFF_MS;
+    return;
+  }
+  rateFailureCache.set(cacheKey, { error, ts: Date.now() });
+}
+
+function replayRateFailure(cacheKey: string) {
+  if (Date.now() < seraRateLimitedUntil) {
+    throw new SeraRateLimitedError(seraRateLimitedUntil - Date.now());
+  }
+  const failed = rateFailureCache.get(cacheKey);
+  if (failed && Date.now() - failed.ts < RATE_FAILURE_TTL_MS) throw failed.error;
+  if (failed) rateFailureCache.delete(cacheKey);
+}
+
 // Strict allowlist of known stablecoin symbols (alphanumeric only, 2–8 chars)
 const USD_BRIDGE: Record<string, string> = { USDC: "USDT", EURC: "EURT" };
 
@@ -3118,7 +3164,29 @@ class SeraRateUnavailableError extends Error {
   }
 }
 
+/**
+ * Wrapper so every caller — the /rates route, the swap-quote pre-flight, the
+ * checkout refresh — shares one negative cache and one backoff window. Recording
+ * the failure only at the route would leave the other paths free to keep
+ * hammering Sera and re-trip the limit for everyone.
+ */
 async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): Promise<{ rate: number; source: string }> {
+  const scope = chainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
+  const failureKey = `sera-quote:${scope}:${from}:${to}`;
+  try {
+    return await fetchSeraRestFxRateUncached(from, to, chainId);
+  } catch (error) {
+    // A bad symbol or unsupported chain is the caller's mistake, not a Sera
+    // outage — caching it would hide a fix the moment they correct the input.
+    const isCallerError = typeof (error as Error)?.message === "string"
+      && ((error as Error).message.startsWith("Unsupported Sera token:")
+        || (error as Error).message.startsWith("Sera payments are not supported on chain"));
+    if (!isCallerError && !(error instanceof SeraRateLimitedError)) noteRateFailure(failureKey, error);
+    throw error;
+  }
+}
+
+async function fetchSeraRestFxRateUncached(from: string, to: string, chainId?: number): Promise<{ rate: number; source: string }> {
   if (chainId !== undefined && chainId !== SERA_MAINNET_CHAIN_ID && chainId !== SERA_TESTNET_CHAIN_ID) {
     throw new Error(`Sera payments are not supported on chain ${chainId}`);
   }
@@ -3133,6 +3201,8 @@ async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): 
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return { rate: cached.rate, source: "cache" };
   }
+  // Answer a recently-failed pair from memory rather than asking Sera again.
+  replayRateFailure(cacheKey);
 
   // Use the active Sera registry for both token support and its represented
   // fiat currency. A local token-to-currency table goes stale as assets change.
@@ -3330,6 +3400,14 @@ paymentRouter.get("/rates", async (req, res) => {
     }
     if (typeof e?.message === "string" && e.message.startsWith("Sera payments are not supported on chain")) {
       res.status(400).json({ error: e.message });
+      return;
+    }
+    if (e instanceof SeraRateLimitedError) {
+      // Being throttled is not the same as Sera being down: it clears on its
+      // own in seconds, and calling it an outage sends merchants chasing a
+      // problem that does not exist.
+      res.setHeader("Retry-After", String(Math.ceil(e.retryAfterMs / 1000)));
+      res.status(429).json({ error: e.message, errorCode: "sera_rate_limited" });
       return;
     }
     if (e instanceof SeraRateUnavailableError) {

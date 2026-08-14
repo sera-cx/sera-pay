@@ -279,9 +279,17 @@ export function buildWalletPaymentUri({
  * QR codes default to a direct ERC-20 transfer for the selected customer coin.
  * Wallet-scanner amounts are still user-editable in many wallets, so the
  * backend must confirm the exact token, recipient, chain, and amount on-chain.
+ *
+ * Returns "" when a wallet URI cannot be built — never the http payment link.
+ * Falling back to the web link silently turned a scan-and-pay code into a
+ * "scan, open a browser, then pay" code: the payment still worked, so nobody
+ * noticed, but it is not the product. A caller that gets "" must show that the
+ * QR is unavailable rather than render a link the merchant believes is a
+ * payment request. The http link remains correct for the Pay button and for
+ * copy-link sharing — it is only wrong inside a QR.
  */
 export function buildPaymentQrValue(request: PaymentQrValueRequest): string {
-  return buildWalletPaymentUri(request) || request.paymentUrl;
+  return buildWalletPaymentUri(request);
 }
 
 const CURRENCY_FORMATS: Record<string, { symbol: string; prefix: boolean; decimals: number }> = {
