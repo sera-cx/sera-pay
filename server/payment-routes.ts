@@ -858,6 +858,25 @@ async function resolvePaymentMerchant(merchantAddress: string) {
 
 const paymentTokenRegistryCache = new Map<string, { expiresAt: number; tokens: SeraToken[]; request?: Promise<SeraToken[]> }>();
 
+/**
+ * Our own copy of the Sera token registry, kept indefinitely once fetched.
+ *
+ * The fresh cache above expires in 30s and used to be *deleted* whenever Sera
+ * errored, so an outage on their side erased every contract address and decimal
+ * we hold — and Sera's API is demonstrably flaky. A token's address, symbol and
+ * decimals are immutable, so there is no reason to ever discard them: the only
+ * risk of serving a stale registry is missing a newly-listed currency, which is
+ * vastly preferable to being unable to describe the currency a merchant is
+ * actively taking money in.
+ */
+const lastKnownGoodRegistry = new Map<string, { tokens: SeraToken[]; fetchedAt: number }>();
+
+/** Whether the registry currently being served came from a Sera failure path. */
+export function registrySnapshotAge(baseUrl: string): number | null {
+  const snapshot = lastKnownGoodRegistry.get(normalizeSeraBaseUrl(baseUrl));
+  return snapshot ? Date.now() - snapshot.fetchedAt : null;
+}
+
 async function getPaymentTokenRegistry(baseUrl: string): Promise<SeraToken[]> {
   const key = normalizeSeraBaseUrl(baseUrl);
   const cached = paymentTokenRegistryCache.get(key);
@@ -868,10 +887,18 @@ async function getPaymentTokenRegistry(baseUrl: string): Promise<SeraToken[]> {
     .then((registry) => {
       const tokens = registry.tokens.filter((token) => /^0x[0-9a-fA-F]{40}$/.test(token.address));
       paymentTokenRegistryCache.set(key, { tokens, expiresAt: Date.now() + 30_000 });
+      if (tokens.length > 0) lastKnownGoodRegistry.set(key, { tokens, fetchedAt: Date.now() });
       return tokens;
     })
     .catch((error) => {
       paymentTokenRegistryCache.delete(key);
+      // Fall back to our own copy rather than propagating Sera's outage into a
+      // checkout that only needed a contract address we already had.
+      const snapshot = lastKnownGoodRegistry.get(key);
+      if (snapshot?.tokens.length) {
+        logSeraOperationFailure("tokens/serving-cached-registry", error);
+        return snapshot.tokens;
+      }
       throw error;
     });
   paymentTokenRegistryCache.set(key, { tokens: cached?.tokens ?? [], expiresAt: cached?.expiresAt ?? 0, request });

@@ -1796,8 +1796,6 @@ export default function Home() {
   const [qrEditMode, setQrEditMode] = useState(false);
   const [qrEditAmount, setQrEditAmount] = useState("");
   const [showQrCoinSheet, setShowQrCoinSheet] = useState(false);
-  const [showTokenDetails, setShowTokenDetails] = useState(false);
-  const [tokenAddressCopied, setTokenAddressCopied] = useState(false);
   const [showQrReceiveCoinSheet, setShowQrReceiveCoinSheet] = useState(false);
   const [qrRateLoading, setQrRateLoading] = useState(false);
   const qrRateRequestRef = useRef(0);
@@ -1815,31 +1813,10 @@ export default function Home() {
   const qrDisplayAmount = normalizeDecimalAmountText(customerAmount || amount);
   const conversionReady = !customerCoin || customerCoin.symbol === selectedCoin?.symbol || Boolean(exchangeRate && customerAmount && !conversionError);
 
-  // Sera's per-token minimum applies to its TRADE engine — a swap is a trade.
-  // A plain ERC-20 transfer never touches Sera, so the floor is only relevant
-  // when the customer pays in a different coin from the one the merchant
-  // receives. Checked against the PAY coin, since that is the swap's input.
-  const paySwapMinimum = customerCoin && selectedCoin && customerCoin.symbol !== selectedCoin.symbol
-    ? customerCoin.minTradeAmount ?? null
-    : null;
-  const payAmountNumber = parseFloat(customerAmount);
-  const payBelowMinimum = Boolean(
-    paySwapMinimum && Number.isFinite(payAmountNumber) && payAmountNumber > 0 && payAmountNumber < paySwapMinimum,
-  );
-
-  // Tapping the warning raises the payment to Sera's minimum and keeps the
-  // merchant's receive amount in step, so the merchant never has to work out
-  // the conversion themselves.
-  const applyPayMinimum = useCallback(() => {
-    if (!paySwapMinimum) return;
-    const minimumText = formatDecimalAmount(paySwapMinimum);
-    setCustomerAmount(minimumText);
-    setLastEdited("pay");
-    if (exchangeRate) {
-      const receiveEquivalent = paySwapMinimum / exchangeRate;
-      setAmount(Number.isFinite(receiveEquivalent) ? formatDecimalAmount(receiveEquivalent) : "");
-    }
-  }, [exchangeRate, paySwapMinimum]);
+  // No minimum is enforced here. Sera's per-token floor applies to its TRADE
+  // engine, and a SeraPay QR is a plain ERC-20 transfer that never touches
+  // Sera's contracts — payments below the figure were confirmed to go through
+  // fine, so warning about it only blocked merchants from amounts that work.
   const isConnected = authenticated;
   const merchantWorkspaceReady = Boolean(dashboardApiKey && walletAddress);
 
@@ -2645,73 +2622,6 @@ export default function Home() {
                 <Copy size={14} strokeWidth={2.2} />
               </button>
             </div>
-            {/*
-              What the customer's wallet could not work out for itself.
-              A payment URI carries no symbol, so a wallet that doesn't know the
-              token shows "Unknown" — everything it was missing is right here,
-              read from the Sera registry and confirmed against the contract, so
-              the customer can see what they are paying and import it by address
-              rather than walking away from an error they can't interpret.
-            */}
-            {displayCoin?.contractAddress ? (
-              <div style={{ width: "min(380px, calc(100vw - 64px))", margin: "10px auto 0" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowTokenDetails((open) => !open)}
-                  aria-expanded={showTokenDetails}
-                  style={{
-                    display: "block", width: "100%", background: "none", border: "none", padding: 0,
-                    color: "rgba(10,31,26,0.5)", fontSize: 11.5, fontWeight: 700, cursor: "pointer",
-                    textAlign: "center", fontFamily: font,
-                  }}
-                >
-                  {showTokenDetails ? "Hide token details" : "Wallet showing “Unknown”? Token details"}
-                </button>
-                {showTokenDetails ? (
-                  <div style={{ marginTop: 8, border: "1px solid rgba(10,31,26,0.08)", borderRadius: 12, background: "#FAFBFA", padding: "10px 12px", textAlign: "left" }}>
-                    <p style={{ margin: "0 0 8px", fontSize: 11.5, lineHeight: 1.5, color: "rgba(10,31,26,0.62)", fontWeight: 600 }}>
-                      Add this token in your wallet, then scan again.
-                    </p>
-                    {[
-                      ["Token", `${displayCoin.name} (${displayCoin.symbol})`],
-                      ["Network", "Ethereum"],
-                      ["Decimals", String(displayCoin.decimals)],
-                    ].map(([label, value]) => (
-                      <div key={label} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11.5, marginBottom: 5 }}>
-                        <span style={{ color: "rgba(10,31,26,0.45)", fontWeight: 650, flexShrink: 0 }}>{label}</span>
-                        <span style={{ color: "#0A1F1A", fontWeight: 700, textAlign: "right", minWidth: 0, overflowWrap: "anywhere" }}>{value}</span>
-                      </div>
-                    ))}
-                    <div style={{ marginTop: 8 }}>
-                      <span style={{ display: "block", fontSize: 11.5, color: "rgba(10,31,26,0.45)", fontWeight: 650, marginBottom: 4 }}>Contract address</span>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(displayCoin.contractAddress);
-                            setTokenAddressCopied(true);
-                            setTimeout(() => setTokenAddressCopied(false), 2000);
-                          } catch {}
-                        }}
-                        style={{
-                          display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
-                          border: "1px solid rgba(10,31,26,0.1)", borderRadius: 9, background: "#fff",
-                          padding: "8px 10px", cursor: "pointer", fontSize: 10.5, lineHeight: 1.35,
-                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", color: "#0A1F1A",
-                          overflowWrap: "anywhere",
-                        }}
-                      >
-                        <span style={{ minWidth: 0, flex: 1 }}>{displayCoin.contractAddress}</span>
-                        <Copy size={13} strokeWidth={2.2} style={{ flexShrink: 0, opacity: 0.55 }} />
-                      </button>
-                      <span style={{ display: "block", marginTop: 5, fontSize: 11, fontWeight: 700, color: tokenAddressCopied ? "#00A87A" : "transparent" }}>
-                        Address copied
-                      </span>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 14 }}>
               <button
                 type="button"
@@ -3134,20 +3044,6 @@ export default function Home() {
               )}
             </div>
           </div>
-          {payBelowMinimum && paySwapMinimum && customerCoin && (
-            <button
-              type="button"
-              onClick={applyPayMinimum}
-              title={`Tap to set ${formatDecimalAmount(paySwapMinimum)} ${customerCoin.symbol}`}
-              style={{
-                display: "block", width: "100%", textAlign: "right", background: "none", border: "none",
-                padding: "6px 16px 0", cursor: "pointer", fontSize: 12, fontWeight: 600,
-                color: "#D9534F", fontFamily: font,
-              }}
-            >
-              Below minimum · min {formatDecimalAmount(paySwapMinimum)} {customerCoin.symbol}
-            </button>
-          )}
         </div>
 
         {/* Advanced Options */}

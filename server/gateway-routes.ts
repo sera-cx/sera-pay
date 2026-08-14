@@ -287,9 +287,21 @@ gatewayRouter.get("/sera/system", async (req, res) => {
   }
 });
 
+/**
+ * SeraPay's own copy of the verified token registry, one entry per mode.
+ *
+ * Token identity — address, symbol, decimals — is immutable once deployed, and
+ * we have already confirmed each entry against the chain. Holding it means a
+ * Sera outage can no longer empty the currency picker or strip the token
+ * details a customer needs to recognise what they are paying. Kept for the
+ * process lifetime rather than expired: a slightly stale list that names every
+ * currency correctly beats a fresh error that names none.
+ */
+const verifiedRegistrySnapshots = new Map<SeraMode, { tokens: Awaited<ReturnType<typeof verifySeraTokens>>["tokens"]; fetchedAt: number }>();
+
 gatewayRouter.get("/sera/tokens", async (req, res) => {
+  const mode = querySeraMode(req.query);
   try {
-    const mode = querySeraMode(req.query);
     const registry = await getSeraTokens(resolveSeraBaseUrl(mode));
     // Confirm each contract against the chain before it can back a payment QR.
     // A wallet reads symbol()/decimals() from this address; if it has no code
@@ -309,8 +321,25 @@ gatewayRouter.get("/sera/tokens", async (req, res) => {
       ...token,
       walletRecognition: recognitionOf(token.address),
     }));
+    if (tokens.length > 0) verifiedRegistrySnapshots.set(mode, { tokens, fetchedAt: Date.now() });
     res.json({ tokens: annotated, ...(rejected.length ? { rejected } : {}) });
   } catch (error) {
+    // Serve our own copy rather than an error. Every entry here was already
+    // verified against the chain, so it is safe to build a payment against —
+    // and a merchant mid-sale needs the contract far more than they need us to
+    // be pedantic about Sera being reachable this second.
+    const snapshot = verifiedRegistrySnapshots.get(mode);
+    if (snapshot?.tokens.length) {
+      safeGatewayLog("sera/tokens-serving-cached", error);
+      const chainId = mode === "test" ? SERA_TESTNET_CHAIN_ID : 1;
+      const recognitionOf = await getWalletRecognition(chainId);
+      res.json({
+        tokens: snapshot.tokens.map((token) => ({ ...token, walletRecognition: recognitionOf(token.address) })),
+        stale: true,
+        stableAsOf: new Date(snapshot.fetchedAt).toISOString(),
+      });
+      return;
+    }
     res.status(502).json({ error: "Unable to fetch Sera tokens" });
   }
 });

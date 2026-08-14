@@ -25,6 +25,15 @@ export interface Stablecoin {
    * Populated from GET /tokens; undefined for the static table below.
    */
   walletRecognition?: "universal" | "detected" | "unlisted" | "unknown";
+  /**
+   * True once SeraPay has read this contract on-chain and confirmed its symbol
+   * and decimals match the Sera registry. This is the claim that matters to a
+   * customer looking at an "Unknown" label: the token is real and the request
+   * is for the asset it claims to be, whether or not their wallet recognises it.
+   */
+  verified?: boolean;
+  /** The symbol the contract itself reports, when it could be read. */
+  onChainSymbol?: string;
 }
 
 // DISPLAY METADATA ONLY — never use these for a payment.
