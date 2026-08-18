@@ -50,6 +50,10 @@ Keep local notes and audit logs under `logs/`; the folder is ignored by git and 
 
 For production, `SESSION_SECRET` and `SERA_CONFIG_ENCRYPTION_KEY` must each be stable random values of at least 32 bytes. Generate each value separately:
 
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
 ## Scripts
 
 ```bash
