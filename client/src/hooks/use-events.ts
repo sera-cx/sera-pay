@@ -8,7 +8,7 @@ import { ApiError, fetchApi } from "@/lib/api";
 const POLL_INTERVAL_MS = 8000;
 
 export function useEvents() {
-  const { apiKey, isAuthenticated } = useAuth();
+  const { credential: apiKey, isAuthenticated } = useAuth();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const lastPollAt = useRef<number>(Date.now() - 30_000);

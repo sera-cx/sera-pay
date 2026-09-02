@@ -15,7 +15,11 @@ import { DEFAULT_SERA_API_BASE_URL, DEFAULT_SERA_API_TESTNET_BASE_URL, type Sera
 export function Developer() {
   const { data: profile, isLoading } = useMerchantProfile();
   const updateWebhook = useUpdateWebhook();
-  const { apiKey } = useAuth();
+  const { credential, freshApiKey } = useAuth();
+  // The raw API key is shown once: right after account creation, or right
+  // after an explicit regeneration. It is never stored client-side.
+  const [regeneratedKey, setRegeneratedKey] = useState<string | null>(null);
+  const displayedApiKey = freshApiKey || regeneratedKey;
   const { toast } = useToast();
 
   const [webhookUrl, setWebhookUrl] = useState("");
@@ -92,9 +96,23 @@ export function Developer() {
   };
 
   const copyApiKey = () => {
-    if (!apiKey) return;
-    navigator.clipboard.writeText(apiKey);
+    if (!displayedApiKey) return;
+    navigator.clipboard.writeText(displayedApiKey);
     toast({ title: "API Key Copied", type: "success" });
+  };
+
+  const handleRegenerateApiKey = async () => {
+    setRegenerating(true);
+    try {
+      const result = await fetchApi("/merchant/api-key/regenerate", { method: "POST" });
+      setRegeneratedKey(result.apiKey);
+      setShowRegenerateConfirm(false);
+      toast({ title: "API Key Rotated", description: "Copy it now — it is shown only this once, and the old key is invalid.", type: "success" });
+    } catch (err: any) {
+      toast({ title: "Failed", description: err?.message || "Could not regenerate API key", type: "error" });
+    } finally {
+      setRegenerating(false);
+    }
   };
 
   return (
@@ -250,26 +268,52 @@ export function Developer() {
           <CardContent>
             <div className="space-y-2">
               <Label>Secret Key</Label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    type={showKey ? "text" : "password"}
-                    value={apiKey || ""}
-                    readOnly
-                    className="font-mono text-xs pr-10"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey(!showKey)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
+              {displayedApiKey ? (
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Input
+                      type={showKey ? "text" : "password"}
+                      value={displayedApiKey}
+                      readOnly
+                      className="font-mono text-xs pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey(!showKey)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <Button variant="outline" size="icon" onClick={copyApiKey}>
+                    <Copy className="w-4 h-4" />
+                  </Button>
                 </div>
-                <Button variant="outline" size="icon" onClick={copyApiKey}>
-                  <Copy className="w-4 h-4" />
+              ) : (
+                <Input
+                  value={"sk_" + "\u2022".repeat(20)}
+                  readOnly
+                  className="font-mono text-xs text-muted-foreground"
+                />
+              )}
+              <p className="text-xs text-muted-foreground">
+                {displayedApiKey
+                  ? "Copy it now — it is shown only this once. SeraPay stores only its SHA-256 hash."
+                  : "Shown only when created or regenerated. Regenerate to get a new key — the old one stops working immediately."}
+              </p>
+              {showRegenerateConfirm ? (
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={handleRegenerateApiKey} disabled={regenerating}>
+                    {regenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                    Confirm rotation
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setShowRegenerateConfirm(false)}>Cancel</Button>
+                </div>
+              ) : (
+                <Button variant="outline" size="sm" onClick={() => setShowRegenerateConfirm(true)} className="w-fit">
+                  <RefreshCw className="w-4 h-4" /> Regenerate key
                 </Button>
-              </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -277,7 +321,7 @@ export function Developer() {
         {/* Webhook Delivery Log */}
         <WebhookDeliveryLog />
         {/* API Documentation */}
-        <ApiDocs apiKey={apiKey || "sk_your_api_key"} />
+        <ApiDocs apiKey={displayedApiKey || "sk_your_api_key"} />
       </div>
     </AppLayout>
   );
@@ -567,7 +611,7 @@ const ENDPOINTS: EndpointDef[] = [
       { name: "name", in: "body", type: "string", required: false, desc: "Display name for the store" },
       { name: "webhookUrl", in: "body", type: "string", required: false, desc: "HTTPS webhook endpoint" },
     ],
-    response: `{ "id": 1, "walletAddress": "0x...", "name": "My Store", "apiKey": "sk_...", "isNew": true }`,
+    response: `{ "id": 1, "walletAddress": "0x...", "name": "My Store", "apiKey": "sk_...", "apiKeyLast4": "a1b2", "sessionToken": "eyJ...", "isNew": true }  // apiKey is returned ONLY when isNew — shown once, stored hashed; sessions authenticate the dashboard`,
   },
   {
     method: "GET", path: "/api/merchant/profile", desc: "Get current merchant profile.", auth: true,
@@ -633,7 +677,7 @@ const ENDPOINTS: EndpointDef[] = [
   {
     method: "GET", path: "/api/merchant/events", desc: "Real-time payment event stream (Server-Sent Events). Replays recent successful payments on connect.", auth: true,
     params: [
-      { name: "apiKey", in: "query", type: "string", required: true, desc: "Your API key (passed as query param for SSE)" },
+      { name: "token", in: "query", type: "string", required: false, desc: "One-time token from POST /api/merchant/sse-token (recommended)" },
       { name: "since", in: "query", type: "string", required: false, desc: "ISO timestamp — replay events after this time" },
     ],
     response: `data: {"event":"connected","merchantId":1}\ndata: {"event":"payment_received","txHash":"0x...","amount":"98.5","coin":"USDT","verified":true}`,
@@ -790,7 +834,7 @@ function ApiDocs({ apiKey }: { apiKey: string }) {
             <p className="text-xs text-muted-foreground">All protected endpoints require your API key in the request header:</p>
             <CodeBlock>{`x-api-key: ${apiKey}`}</CodeBlock>
             <p className="text-xs text-muted-foreground">
-              For SSE (<code className="font-mono">/api/merchant/events</code>), pass the key as a query param: <code className="font-mono">?apiKey=sk_...</code>
+              For SSE (<code className="font-mono">/api/merchant/events</code>), POST to <code className="font-mono">/api/merchant/sse-token</code> with this header and connect with <code className="font-mono">?token=&lt;one-time-token&gt;</code> — credentials in URLs leak into logs.
             </p>
           </div>
 

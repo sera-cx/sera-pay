@@ -1,6 +1,10 @@
 const API_BASE = "/api";
 
 export const DASHBOARD_API_KEY_STORAGE_KEY = "serapay_dashboard_apiKey";
+// The dashboard's own credential is a short-lived session token issued by
+// /merchant/register (Privy-authenticated) - never the raw API key, which is
+// shown once at creation/regeneration for server-to-server use only.
+export const DASHBOARD_SESSION_STORAGE_KEY = "serapay_dashboard_session";
 export const DASHBOARD_WALLET_STORAGE_KEY = "serapay_dashboard_wallet";
 export const DASHBOARD_AUTH_INVALID_EVENT = "serapay:dashboard-auth-invalid";
 export const DASHBOARD_SESSION_EXPIRED_EVENT = "serapay:dashboard-session-expired";
@@ -24,13 +28,14 @@ function readTimestamp(key: string): number | null {
 
 export function hasStoredDashboardAuth(): boolean {
   if (typeof window === "undefined") return false;
-  return Boolean(localStorage.getItem(DASHBOARD_API_KEY_STORAGE_KEY) || localStorage.getItem(DASHBOARD_WALLET_STORAGE_KEY));
+  return Boolean(localStorage.getItem(DASHBOARD_SESSION_STORAGE_KEY) || localStorage.getItem(DASHBOARD_API_KEY_STORAGE_KEY) || localStorage.getItem(DASHBOARD_WALLET_STORAGE_KEY));
 }
 
 export function clearStoredDashboardAuth(walletAddress?: string | null) {
   if (typeof window === "undefined") return;
   const storedWallet = walletAddress || localStorage.getItem(DASHBOARD_WALLET_STORAGE_KEY);
   if (storedWallet) localStorage.removeItem(`serapay_apikey_${storedWallet}`);
+  localStorage.removeItem(DASHBOARD_SESSION_STORAGE_KEY);
   localStorage.removeItem(DASHBOARD_API_KEY_STORAGE_KEY);
   localStorage.removeItem(DASHBOARD_WALLET_STORAGE_KEY);
   localStorage.removeItem(DASHBOARD_SESSION_STARTED_STORAGE_KEY);
@@ -78,10 +83,13 @@ export async function fetchApi<T = any>(path: string, options: RequestInit = {})
     notifyExpiredDashboardSession("Dashboard session expired. Please sign in again.");
     throw new ApiError(401, "Dashboard session expired. Please sign in again.");
   }
-  const apiKey = typeof window !== "undefined" ? localStorage.getItem(DASHBOARD_API_KEY_STORAGE_KEY) : null;
+  // Prefer the session token; a pre-migration stored API key still works.
+  const sessionToken = typeof window !== "undefined" ? localStorage.getItem(DASHBOARD_SESSION_STORAGE_KEY) : null;
+  const legacyApiKey = typeof window !== "undefined" ? localStorage.getItem(DASHBOARD_API_KEY_STORAGE_KEY) : null;
+  const credential = sessionToken || legacyApiKey;
   const headers = new Headers(options.headers);
-  if (apiKey && !headers.has("x-api-key")) {
-    headers.set("x-api-key", apiKey);
+  if (credential && !headers.has("x-api-key")) {
+    headers.set("x-api-key", credential);
   }
   if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");

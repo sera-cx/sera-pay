@@ -4,6 +4,7 @@ import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   DASHBOARD_API_KEY_STORAGE_KEY,
+  DASHBOARD_SESSION_STORAGE_KEY,
   DASHBOARD_AUTH_INVALID_EVENT,
   DASHBOARD_SESSION_EXPIRED_EVENT,
   DASHBOARD_WALLET_STORAGE_KEY,
@@ -14,7 +15,10 @@ import {
 } from "@/lib/api";
 
 interface AuthContextType {
-  apiKey: string | null;
+  /** Dashboard credential: a short-lived session token, not the raw API key. */
+  credential: string | null;
+  /** The raw API key, present only right after creation or regeneration. */
+  freshApiKey: string | null;
   walletAddress: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
@@ -26,7 +30,8 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const STORAGE_KEY = DASHBOARD_API_KEY_STORAGE_KEY;
+const SESSION_KEY = DASHBOARD_SESSION_STORAGE_KEY;
+const LEGACY_KEY = DASHBOARD_API_KEY_STORAGE_KEY;
 const WALLET_KEY = DASHBOARD_WALLET_STORAGE_KEY;
 
 type WalletInfo = {
@@ -112,7 +117,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const { authenticated, user, login: privyLogin, logout: privyLogout, ready, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
   const queryClient = useQueryClient();
-  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [credential, setCredential] = useState<string | null>(null);
+  const [freshApiKey, setFreshApiKey] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,7 +148,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (abortRef.current) abortRef.current.abort();
       clearStoredDashboardAuth(walletAddress);
       clearDashboardQueryCache();
-      setApiKey(null);
+      setCredential(null);
+      setFreshApiKey(null);
       setError(null);
       setRetryCount((count) => count + 1);
     };
@@ -159,7 +166,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       clearStoredDashboardAuth(walletAddress);
       clearDashboardQueryCache();
-      setApiKey(null);
+      setCredential(null);
+      setFreshApiKey(null);
       setWalletAddress(null);
       setError(null);
       if (authenticated) void privyLogout();
@@ -170,7 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [authenticated, clearDashboardQueryCache, privyLogout, setLocation, walletAddress]);
 
   useEffect(() => {
-    if (!authenticated || !apiKey) return;
+    if (!authenticated || !credential) return;
 
     const checkOrTouch = (touch: boolean) => {
       if (isDashboardSessionExpired()) {
@@ -198,7 +206,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("pageshow", handleVisibility);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [authenticated, apiKey]);
+  }, [authenticated, credential]);
 
   const extractWalletInfo = useCallback((): WalletInfo | null => {
     if (!user) return null;
@@ -288,7 +296,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!ready) return;
 
     if (!authenticated || !user) {
-      setApiKey(null);
+      setCredential(null);
+      setFreshApiKey(null);
       setWalletAddress(null);
       setError(null);
       setIsLoading(false);
@@ -312,7 +321,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (storedWallet && storedWallet !== addr) {
       clearStoredDashboardAuth(storedWallet);
       clearDashboardQueryCache();
-      setApiKey(null);
+      setCredential(null);
+      setFreshApiKey(null);
     }
 
     setWalletAddress(addr);
@@ -322,10 +332,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       retryTimerRef.current = null;
     }
 
-    const existingKey = localStorage.getItem(STORAGE_KEY);
+    // The session token is the dashboard credential. A pre-migration stored
+    // API key still authenticates (hashed lookup) and is replaced on next login.
+    const existingCredential = localStorage.getItem(SESSION_KEY) || localStorage.getItem(LEGACY_KEY);
     const existingKeyWallet = localStorage.getItem(WALLET_KEY);
-    if (existingKey && existingKeyWallet === addr) {
-      setApiKey(existingKey);
+    if (existingCredential && existingKeyWallet === addr) {
+      setCredential(existingCredential);
       setIsLoading(false);
       return;
     }
@@ -420,11 +432,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               res = await registerMerchant(walletProof);
               if (res.ok) {
                 const data = await res.json();
-                const key = data.apiKey;
-                localStorage.setItem(STORAGE_KEY, key);
+                const token = data.sessionToken;
+                localStorage.setItem(SESSION_KEY, token);
                 localStorage.setItem(WALLET_KEY, addr);
                 startDashboardSession();
-                setApiKey(key);
+                setCredential(token);
+                setFreshApiKey(typeof data.apiKey === "string" ? data.apiKey : null);
                 setError(null);
                 setRetryCount(0);
                 const p = window.location.pathname;
@@ -441,14 +454,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw setupError;
         }
         const data = await res.json();
-        const key = data.apiKey;
+        const token = data.sessionToken as string;
+        const freshKey = typeof data.apiKey === "string" ? data.apiKey : null;
 
         if (controller.signal.aborted) return;
 
-        localStorage.setItem(STORAGE_KEY, key);
+        localStorage.setItem(SESSION_KEY, token);
         localStorage.setItem(WALLET_KEY, addr);
         startDashboardSession();
-        setApiKey(key);
+        setCredential(token);
+        setFreshApiKey(freshKey);
         setError(null);
         setRetryCount(0);
         // Only redirect to /dashboard if the user is on a non-app page (e.g. /404).
@@ -462,7 +477,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // A superseded run finishing late must not clear the key, the storage or
         // the error state belonging to the run that replaced it.
         if (err?.name === "AbortError" || controller.signal.aborted) return;
-        setApiKey(null);
+        setCredential(null);
+      setFreshApiKey(null);
         clearStoredDashboardAuth(addr);
         clearDashboardQueryCache();
         const rawMessage = err?.message || "";
@@ -523,7 +539,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     clearStoredDashboardAuth(walletAddress);
     clearDashboardQueryCache();
-    setApiKey(null);
+    setCredential(null);
+    setFreshApiKey(null);
     setWalletAddress(null);
     setError(null);
     if (authenticated) void privyLogout();
@@ -533,7 +550,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isAuthenticated = authenticated;
 
   return (
-    <AuthContext.Provider value={{ apiKey, walletAddress, isAuthenticated, isLoading: isLoading || !ready, error, login, retry, logout }}>
+    <AuthContext.Provider value={{ credential, freshApiKey, walletAddress, isAuthenticated, isLoading: isLoading || !ready, error, login, retry, logout }}>
       {children}
     </AuthContext.Provider>
   );

@@ -552,7 +552,7 @@ function DashboardPaymentModal({
 }
 
 export function AppLayout({ children, pendingCount = 0, noPadding = false }: { children: React.ReactNode; pendingCount?: number; noPadding?: boolean }) {
-  const { logout, walletAddress, apiKey, isAuthenticated, isLoading, login, retry, error } = useAuth();
+  const { logout, walletAddress, credential: apiKey, isAuthenticated, isLoading, login, retry, error } = useAuth();
   const [location] = useLocation();
   const { data: profile } = useMerchantProfile();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);

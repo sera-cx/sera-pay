@@ -1925,7 +1925,7 @@ function TransactionHistory({ apiKey, chainId }: { apiKey: string; chainId: numb
 // ── Main Home Page ─────────────────────────────────────────────────────────
 export default function Home() {
   const { login, authenticated, ready, user } = usePrivy();
-  const { apiKey: dashboardApiKey, walletAddress: authWalletAddress, logout: authLogout, retry: retryAccountSetup, error: accountSetupError, isLoading: accountSetupLoading } = useAuth();
+  const { credential: dashboardApiKey, walletAddress: authWalletAddress, logout: authLogout, retry: retryAccountSetup, error: accountSetupError, isLoading: accountSetupLoading } = useAuth();
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const walletChainId = useChainId();

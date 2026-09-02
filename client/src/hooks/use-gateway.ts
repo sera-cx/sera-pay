@@ -69,7 +69,7 @@ export interface SeraApiConfigView {
 }
 
 export function useWallets() {
-  const { apiKey, isAuthenticated } = useAuth();
+  const { credential: apiKey, isAuthenticated } = useAuth();
   return useQuery<{
     masterWallet: GatewayMasterWallet;
     subWallets: GatewaySubWallet[];
@@ -125,7 +125,7 @@ export function useSetDefaultWallet() {
 }
 
 export function usePaymentIntents(limit = 50) {
-  const { apiKey, isAuthenticated } = useAuth();
+  const { credential: apiKey, isAuthenticated } = useAuth();
   return useQuery<{ paymentIntents: GatewayPaymentIntent[] }>({
     queryKey: ["/payments", limit, apiKey || ""],
     queryFn: () => fetchApi(`/payments?limit=${limit}`),
@@ -158,7 +158,7 @@ export function useCreatePaymentIntent() {
 }
 
 export function useSeraApiConfig() {
-  const { apiKey, isAuthenticated } = useAuth();
+  const { credential: apiKey, isAuthenticated } = useAuth();
   return useQuery<SeraApiConfigView>({
     queryKey: ["/merchant/sera-config", apiKey || ""],
     queryFn: () => fetchApi("/merchant/sera-config"),

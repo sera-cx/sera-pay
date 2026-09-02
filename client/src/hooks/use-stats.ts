@@ -12,7 +12,7 @@ export interface MerchantStats {
 }
 
 export function useMerchantStats(chainId?: number) {
-  const { apiKey, isAuthenticated } = useAuth();
+  const { credential: apiKey, isAuthenticated } = useAuth();
   const suffix = chainId ? `?chainId=${chainId}` : "";
   return useQuery<MerchantStats>({
     queryKey: ["/merchant/stats", chainId || "all", apiKey || ""],
