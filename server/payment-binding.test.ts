@@ -11,6 +11,13 @@ import {
 
 const MERCHANT_ID = "merchant-1";
 const OTHER_MERCHANT_ID = "merchant-2";
+const RECEIVER_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678";
+const INTENT_BINDING = {
+  merchantId: MERCHANT_ID,
+  receiveCoin: "XSGD",
+  receiverAddress: RECEIVER_ADDRESS,
+  chainId: 1,
+};
 
 function makeIntent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
   return {
@@ -19,7 +26,7 @@ function makeIntent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
     subWalletId: null,
     amount: "100.5",
     coin: "XSGD",
-    receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
+    receiverAddress: RECEIVER_ADDRESS,
     chainId: 1,
     customerEmail: null,
     customerName: null,
@@ -102,16 +109,16 @@ describe("amount comparison", () => {
 
 describe("assertPaymentIntentBindable", () => {
   it("accepts a payable intent and returns its amount", () => {
-    expect(assertPaymentIntentBindable(makeIntent(), { merchantId: MERCHANT_ID, receiveCoin: "xsgd" })).toBe("100.5");
+    expect(assertPaymentIntentBindable(makeIntent(), { ...INTENT_BINDING, receiveCoin: "xsgd" })).toBe("100.5");
   });
 
   it("returns 404 for a missing intent without leaking ownership", () => {
-    expectBindingError(() => assertPaymentIntentBindable(undefined, { merchantId: MERCHANT_ID, receiveCoin: "XSGD" }), 404, "not found");
+    expectBindingError(() => assertPaymentIntentBindable(undefined, INTENT_BINDING), 404, "not found");
   });
 
   it("rejects an intent owned by another merchant", () => {
     expectBindingError(
-      () => assertPaymentIntentBindable(makeIntent({ merchantId: OTHER_MERCHANT_ID }), { merchantId: MERCHANT_ID, receiveCoin: "XSGD" }),
+      () => assertPaymentIntentBindable(makeIntent({ merchantId: OTHER_MERCHANT_ID }), INTENT_BINDING),
       403,
       "does not belong to this merchant",
     );
@@ -123,7 +130,7 @@ describe("assertPaymentIntentBindable", () => {
     ["expired", "no longer be paid"],
   ] as const)("rejects a %s intent", (status, message) => {
     expectBindingError(
-      () => assertPaymentIntentBindable(makeIntent({ status }), { merchantId: MERCHANT_ID, receiveCoin: "XSGD" }),
+      () => assertPaymentIntentBindable(makeIntent({ status }), INTENT_BINDING),
       409,
       message,
     );
@@ -131,20 +138,36 @@ describe("assertPaymentIntentBindable", () => {
 
   it("allows a retry after a failed attempt and honours an explicit open status", () => {
     for (const status of ["created", "open", "failed"] as const) {
-      expect(assertPaymentIntentBindable(makeIntent({ status }), { merchantId: MERCHANT_ID, receiveCoin: "XSGD" })).toBe("100.5");
+      expect(assertPaymentIntentBindable(makeIntent({ status }), INTENT_BINDING)).toBe("100.5");
     }
   });
 
   it("rejects an intent past its expiry timestamp", () => {
     const intent = makeIntent({ expiresAt: new Date(Date.now() - 1000) });
-    expectBindingError(() => assertPaymentIntentBindable(intent, { merchantId: MERCHANT_ID, receiveCoin: "XSGD" }), 410, "expired");
+    expectBindingError(() => assertPaymentIntentBindable(intent, INTENT_BINDING), 410, "expired");
   });
 
   it("rejects a payment in a different currency than the intent", () => {
     expectBindingError(
-      () => assertPaymentIntentBindable(makeIntent(), { merchantId: MERCHANT_ID, receiveCoin: "USDC" }),
+      () => assertPaymentIntentBindable(makeIntent(), { ...INTENT_BINDING, receiveCoin: "USDC" }),
       400,
       "does not match",
+    );
+  });
+
+  it("rejects a different receiver or network", () => {
+    expectBindingError(
+      () => assertPaymentIntentBindable(makeIntent(), {
+        ...INTENT_BINDING,
+        receiverAddress: "0x9999999999999999999999999999999999999999",
+      }),
+      400,
+      "receiver",
+    );
+    expectBindingError(
+      () => assertPaymentIntentBindable(makeIntent(), { ...INTENT_BINDING, chainId: 11155111 }),
+      400,
+      "network",
     );
   });
 });

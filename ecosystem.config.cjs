@@ -20,6 +20,8 @@ module.exports = {
         SERA_API_BASE_URL: process.env.SERA_API_BASE_URL || "https://api.sera.cx/api/v1",
         SERA_API_TESTNET_BASE_URL: process.env.SERA_API_TESTNET_BASE_URL || "https://api.testnet.sera.cx/api/v1",
         SERA_API_KEY: process.env.SERA_API_KEY || "",
+        SERA_PROVISIONAL_CONFIRMATIONS: process.env.SERA_PROVISIONAL_CONFIRMATIONS || "2",
+        ETHEREUM_RPC_URL: process.env.ETHEREUM_RPC_URL || "",
         VITE_PRIVY_APP_ID: process.env.VITE_PRIVY_APP_ID || "",
         VITE_PRIVY_CLIENT_ID: process.env.VITE_PRIVY_CLIENT_ID || "",
         PRIVY_SECRET: process.env.PRIVY_SECRET || process.env.PRIVY_APP_SECRET || "",

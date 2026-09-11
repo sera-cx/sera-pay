@@ -2039,11 +2039,16 @@ export default function Home() {
    * and the customer chooses how to pay on the Pay Now page. Nothing is being
    * converted, so no rate, no Sera floor and no swap has anything to act on.
    *
-   * Filled in, the merchant has named the exact token the customer must send —
-   * the only thing an EIP-681 wallet request can express, and the only case
-   * where a conversion exists to quote, floor, or settle.
+   * Filled in, the merchant has named the initial payment token and this screen
+   * preflights that exact pair. A same-token request may use EIP-681 directly;
+   * a different token opens PayPage for the Sera authorization flow. PayPage
+   * may still let the payer choose another supported token, which must obtain a
+   * new executable quote before it can be paid.
    */
   const isConversionMode = Boolean(customerCoin);
+  const isCrossCurrencyConversion = Boolean(
+    customerCoin && selectedCoin && customerCoin.symbol !== selectedCoin.symbol,
+  );
 
   // Sera's floor sits on the token the customer SENDS: that is the input of
   // the trade, and the same token the server checks before requesting a swap
@@ -2381,8 +2386,9 @@ export default function Home() {
     return undefined;
   }, [expiryOption]);
 
-  // Checkout links are signed server-side, so minting is a network call. An
-  // invalid request still resolves to "" so callers' empty-string guards hold.
+  // Checkout links are signed server-side, so minting is a network call. A
+  // cross-currency request is preflighted by requestSignedPaymentUrl first;
+  // callers decide whether an error belongs to their still-current edit.
   const createPaymentUrl = useCallback(async (overrides: {
     receiveCoin?: Stablecoin | null;
     receiveAmount?: string;
@@ -2402,22 +2408,18 @@ export default function Home() {
     const payAmount = normalizeDecimalAmountText(overrides.payAmount ?? customerAmount);
     const includeExpiry = overrides.includeExpiry ?? true;
 
-    try {
-      return await requestSignedPaymentUrl({
-        receiverAddress: receiveAddress,
-        receiveCoin: receiveCoin.symbol,
-        chainId: paymentChainId,
-        amount: receiveAmount || undefined,
-        payCoin: payCoin?.symbol || undefined,
-        payAmount: payAmount || undefined,
-        merchantName: merchantName || undefined,
-        description: description.trim() || undefined,
-        expiresAt: includeExpiry ? getExpiresAt() : undefined,
-        singleUse: includeExpiry ? singleUse || undefined : undefined,
-      });
-    } catch {
-      return "";
-    }
+    return requestSignedPaymentUrl({
+      receiverAddress: receiveAddress,
+      receiveCoin: receiveCoin.symbol,
+      chainId: paymentChainId,
+      amount: receiveAmount || undefined,
+      payCoin: payCoin?.symbol || undefined,
+      payAmount: payAmount || undefined,
+      merchantName: merchantName || undefined,
+      description: description.trim() || undefined,
+      expiresAt: includeExpiry ? getExpiresAt() : undefined,
+      singleUse: includeExpiry ? singleUse || undefined : undefined,
+    });
   }, [selectedCoin, receiverAddress, amount, customerCoin, customerAmount, merchantName, description, getExpiresAt, singleUse, paymentChainId]);
 
   const handleSwapCoins = useCallback(() => {
@@ -2446,7 +2448,7 @@ export default function Home() {
     if (step === 2) {
       void createPaymentUrl({ payCoin: null, payAmount: "" }).then((directPaymentUrl) => {
         if (directPaymentUrl) setPaymentUrl(directPaymentUrl);
-      });
+      }).catch(() => {});
     }
   }, [createPaymentUrl, step]);
 
@@ -2488,6 +2490,7 @@ export default function Home() {
     }
     signingLinkRef.current = true;
     setSigningLink(true);
+    setConversionError("");
     void createPaymentUrl({ receiveAmount, payAmount }).then((url) => {
       if (!url) return;
       clearPendingRequest();
@@ -2495,6 +2498,8 @@ export default function Home() {
       pendingResumeRef.current = false;
       setPaymentUrl(url);
       setStep(2);
+    }).catch((error) => {
+      setConversionError(qrConversionErrorMessage(error, (error as any)?.errorCode));
     }).finally(() => {
       signingLinkRef.current = false;
       setSigningLink(false);
@@ -2539,6 +2544,8 @@ export default function Home() {
       if (!url) return;
       setPaymentUrl(url);
       setStep(2);
+    }).catch((error) => {
+      setConversionError(qrConversionErrorMessage(error, (error as any)?.errorCode));
     }).finally(() => {
       signingLinkRef.current = false;
       setSigningLink(false);
@@ -2560,15 +2567,15 @@ export default function Home() {
     try {
       const displayCoin = customerCoin ?? selectedCoin;
       const displayAmount = customerAmount || amount;
-      // The card has to carry whatever the screen is showing. A receive-only
-      // request is answered on the Pay Now page, so its card holds that link;
-      // a named pay token is a wallet request, so its card holds the URI.
-      // Mirrors the on-screen rule: Customer Pays set -> always the wallet URI.
+      // The card has to carry whatever the screen is showing. Receive-only and
+      // cross-currency requests open PayPage; only a same-token request can be
+      // represented as a direct EIP-681 transfer.
       const cardQrValue = isConversionMode
         ? buildPaymentQrValue({
             receiverAddress,
             coin: displayCoin?.symbol,
             receiveCoin: selectedCoin?.symbol,
+            receiveAmount: amount || undefined,
             amount: displayAmount || undefined,
             chainId: paymentChainId,
             tokenAddress: currencies.find((coin) => coin.symbol === displayCoin?.symbol)?.contractAddress,
@@ -2623,7 +2630,15 @@ export default function Home() {
   useEffect(() => {
     const coin = qrDisplayCoin?.symbol;
     const scanAmount = qrDisplayAmount;
-    if (step !== 2 || !paymentUrl || !receiverAddress || !coin || !scanAmount || Number(scanAmount) <= 0) return;
+    if (
+      step !== 2
+      || isCrossCurrencyConversion
+      || !paymentUrl
+      || !receiverAddress
+      || !coin
+      || !scanAmount
+      || Number(scanAmount) <= 0
+    ) return;
     // Direct wallet QR payments are confirmed only after the exact selected
     // token, recipient, chain, and amount appear on-chain.
     if (directQrPayment) return;
@@ -2693,7 +2708,7 @@ export default function Home() {
       stopped = true;
       window.clearInterval(interval);
     };
-  }, [directQrPayment, paymentChainId, paymentUrl, qrDisplayAmount, qrDisplayCoin?.symbol, queryClient, receiverAddress, selectedCoin, step]);
+  }, [directQrPayment, isCrossCurrencyConversion, paymentChainId, paymentUrl, qrDisplayAmount, qrDisplayCoin?.symbol, queryClient, receiverAddress, selectedCoin, step]);
 
   /**
    * Notifies the merchant of every payment the scan above cannot see.
@@ -2924,19 +2939,20 @@ export default function Home() {
       customer signs in and picks what they hold. That holds whether or not an
       amount was set; an open-amount request is answered on the same page.
 
-      Once a pay token IS named there is exactly one transfer to encode, and the
-      wallet URI is what makes scan-and-pay work in OKX or MetaMask.
+      A named pay token that matches the receive token is one direct transfer,
+      so EIP-681 remains the shortest scan-and-pay path. When the tokens differ,
+      the QR must open PayPage so the payer can sign the Sera conversion.
     */
     /*
-      Customer Pays set -> the wallet URI with the preset amount, always — the
-      owner's rule, no per-token routing. walletScanPayable still arrives from
-      the server for future per-wallet work.
+      buildPaymentQrValue enforces that split and also refuses a stale signed
+      link whose exact direction or amounts no longer match the screen.
     */
     const activeQrValue = isConversionMode
       ? buildPaymentQrValue({
           receiverAddress,
           coin: displayCoin?.symbol,
           receiveCoin: selectedCoin?.symbol,
+          receiveAmount: amount || undefined,
           amount: displayAmount || undefined,
           chainId: paymentChainId,
           tokenAddress: qrDisplayToken?.contractAddress,
@@ -2988,12 +3004,21 @@ export default function Home() {
       applyChange: () => void,
     ) => {
       setQrRateLoading(true);
-      const newUrl = await createPaymentUrl(overrides);
+      let newUrl = "";
+      try {
+        newUrl = await createPaymentUrl(overrides);
+      } catch (error) {
+        if (requestId !== qrRateRequestRef.current) return;
+        setQrRateLoading(false);
+        setConversionError(qrConversionErrorMessage(error, (error as any)?.errorCode));
+        return;
+      }
       if (requestId !== qrRateRequestRef.current) return;
       setQrRateLoading(false);
       // Leave every figure and the QR exactly as they were; the code on
       // screen is still the earlier, still-valid request.
       if (!newUrl) return;
+      setConversionError("");
       applyChange();
       setPaymentUrl(newUrl);
     };
@@ -3261,8 +3286,8 @@ export default function Home() {
                 maxWidth: "100%", boxSizing: "border-box" as const,
                 cursor: "copy",
               }}>
-                {/* An http link in a QR is not a payment request — show the
-                    reason rather than a code that scans into a web page. */}
+                {/* A conversion intentionally opens PayPage. Same-token QRs
+                    remain direct wallet requests. */}
                 {activeQrValue ? (
                   <QRStyled
                     value={activeQrValue}
@@ -3377,9 +3402,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => {
-                  // The QR itself remains an EIP-681 URI for wallet scanners.
-                  // Same-device checkout must open SeraPay's hosted payment UI,
-                  // because desktop browsers may not have an ethereum: handler.
+                  // Same-device checkout always opens the hosted payment UI.
                   window.location.assign(getClientAppPath(paymentUrl));
                 }}
                 className="serapay-action-secondary serapay-hover-green"
@@ -3679,6 +3702,7 @@ export default function Home() {
                   const val = limitDecimalPlaces(e.target.value);
                   setAmount(val);
                   setLastEdited("receive");
+                  if (exchangeRate) setConversionError("");
                   if (exchangeRate && val) {
                     const calc = parseFloat(val) * exchangeRate;
                     setCustomerAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));
@@ -3781,6 +3805,7 @@ export default function Home() {
                     const val = limitDecimalPlaces(e.target.value);
                     setCustomerAmount(val);
                     setLastEdited("pay");
+                    if (exchangeRate) setConversionError("");
                     if (exchangeRate && val) {
                       const calc = parseFloat(val) / exchangeRate;
                       setAmount(isNaN(calc) ? "" : formatDecimalAmount(calc));

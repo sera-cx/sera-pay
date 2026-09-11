@@ -1,4 +1,5 @@
 import {
+  check,
   index,
   integer,
   numeric,
@@ -7,14 +8,38 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+
+/**
+ * Durable Sera submission states.
+ *
+ * These are deliberately separate from `transactionStatusEnum`: the latter is
+ * the user-facing payment state, while this state machine records whether a
+ * single-use Sera quote may already have reached Sera.  Keeping the values in a
+ * varchar (rather than a PostgreSQL enum) lets us add a future Sera recovery
+ * state without a blocking enum migration.
+ */
+export const SERA_SWAP_SUBMIT_STATES = [
+  "quote_ready",
+  "submitting",
+  "submitted",
+  "settlement_unknown",
+  "settled",
+  "failed",
+  "expired",
+  "canceled",
+] as const;
+
+export type SeraSwapSubmitState = (typeof SERA_SWAP_SUBMIT_STATES)[number];
 
 export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
 export const transactionStatusEnum = pgEnum("transaction_status", ["pending", "confirming", "confirmed", "failed", "canceled"]);
 export const apiConfigModeEnum = pgEnum("api_config_mode", ["mock", "test", "live"]);
 export const subWalletStatusEnum = pgEnum("sub_wallet_status", ["active", "archived"]);
-export const paymentIntentStatusEnum = pgEnum("payment_intent_status", ["created", "open", "paid", "expired", "canceled", "failed"]);
+export const paymentIntentStatusEnum = pgEnum("payment_intent_status", ["created", "open", "processing", "paid", "expired", "canceled", "failed"]);
 export const seraAuthModeEnum = pgEnum("sera_auth_mode", ["none", "api_key", "eip712"]);
 export const complianceCheckTypeEnum = pgEnum("compliance_check_type", ["merchant_wallet", "sub_wallet", "payer_wallet", "recipient_wallet"]);
 export const complianceStatusEnum = pgEnum("compliance_status", ["clear", "blocked", "unavailable", "skipped"]);
@@ -64,7 +89,7 @@ export const transactions = pgTable(
   {
     id: varchar("id", { length: 36 }).primaryKey(),
     merchantId: varchar("merchantId", { length: 36 }).notNull().references(() => merchants.id, { onDelete: "cascade" }),
-    txHash: varchar("txHash", { length: 66 }).unique(),
+    txHash: varchar("txHash", { length: 66 }),
     fromAddress: varchar("fromAddress", { length: 42 }),
     toAddress: varchar("toAddress", { length: 42 }).notNull(),
     coin: varchar("coin", { length: 20 }).notNull(),
@@ -76,6 +101,56 @@ export const transactions = pgTable(
     payAmount: numeric("payAmount", { precision: 36, scale: 18 }),
     memo: varchar("memo", { length: 200 }),
     notes: text("notes"),
+    // Stable browser/checkout ownership key. A payer may lose the wallet tab
+    // after a quote was created; retaining this key lets the next session
+    // recover that active Sera attempt instead of consuming a second quote.
+    checkoutAttemptKey: varchar("checkoutAttemptKey", { length: 66 }),
+    // Sera quote/order identity and settlement economics are first-class
+    // columns rather than notes-only JSON.  They remain nullable so direct
+    // transfers and every transaction created before this migration continue
+    // to work unchanged.
+    quoteUuid: varchar("quoteUuid", { length: 128 }),
+    routeUuid: numeric("routeUuid", { precision: 78, scale: 0 }),
+    intentHash: varchar("intentHash", { length: 66 }),
+    tradeId: varchar("tradeId", { length: 128 }),
+    seraAddress: varchar("seraAddress", { length: 42 }),
+    seraVaultAddress: varchar("seraVaultAddress", { length: 42 }),
+    seraSorAddress: varchar("seraSorAddress", { length: 42 }),
+    payTokenAddress: varchar("payTokenAddress", { length: 42 }),
+    receiveTokenAddress: varchar("receiveTokenAddress", { length: 42 }),
+    payTokenDecimals: integer("payTokenDecimals"),
+    receiveTokenDecimals: integer("receiveTokenDecimals"),
+    requestedPayAmountRaw: numeric("requestedPayAmountRaw", { precision: 78, scale: 0 }),
+    maximumPayAmountRaw: numeric("maximumPayAmountRaw", { precision: 78, scale: 0 }),
+    targetReceiveAmountRaw: numeric("targetReceiveAmountRaw", { precision: 78, scale: 0 }),
+    minimumReceiveAmountRaw: numeric("minimumReceiveAmountRaw", { precision: 78, scale: 0 }),
+    initialDepositAmountRaw: numeric("initialDepositAmountRaw", { precision: 78, scale: 0 }),
+    quoteExpiresAt: timestamp("quoteExpiresAt", { withTimezone: true }),
+    intentDeadline: timestamp("intentDeadline", { withTimezone: true }),
+    permitRequired: integer("permitRequired"),
+    permitDeadline: timestamp("permitDeadline", { withTimezone: true }),
+    submitState: varchar("submitState", { length: 32 }).$type<SeraSwapSubmitState>(),
+    submittedBlockNumber: numeric("submittedBlockNumber", { precision: 78, scale: 0 }),
+    seraStatus: varchar("seraStatus", { length: 64 }),
+    // Permanent positive evidence: once an exact finalized IntentMatched was
+    // observed, an empty later RPC scan can never classify this as unpaid.
+    intentMatchedAt: timestamp("intentMatchedAt", { withTimezone: true }),
+    intentMatchedTxHash: varchar("intentMatchedTxHash", { length: 66 }),
+    intentMatchedBlockNumber: numeric("intentMatchedBlockNumber", { precision: 78, scale: 0 }),
+    // Canonical latest-head observation shown to the payer before Ethereum
+    // finality. This never owns funds, pays a linked order, or fires webhooks.
+    provisionalSettlementAt: timestamp("provisionalSettlementAt", { withTimezone: true }),
+    provisionalSettlementTxHash: varchar("provisionalSettlementTxHash", { length: 66 }),
+    provisionalSettlementBlockNumber: numeric("provisionalSettlementBlockNumber", { precision: 78, scale: 0 }),
+    provisionalSettlementBlockHash: varchar("provisionalSettlementBlockHash", { length: 66 }),
+    provisionalSettlementConfirmations: integer("provisionalSettlementConfirmations"),
+    seraOutcomeSyncedAt: timestamp("seraOutcomeSyncedAt", { withTimezone: true }),
+    actualPayAmountRaw: numeric("actualPayAmountRaw", { precision: 78, scale: 0 }),
+    actualReceiveAmountRaw: numeric("actualReceiveAmountRaw", { precision: 78, scale: 0 }),
+    feeAmountRaw: numeric("feeAmountRaw", { precision: 78, scale: 0 }),
+    feeTokenAddress: varchar("feeTokenAddress", { length: 42 }),
+    settlementTxHash: varchar("settlementTxHash", { length: 66 }),
+    failureCode: varchar("failureCode", { length: 128 }),
     verified: integer("verified").default(0).notNull(),
     notifiedAt: timestamp("notifiedAt", { withTimezone: true }),
     webhookSentAt: timestamp("webhookSentAt", { withTimezone: true }),
@@ -87,7 +162,66 @@ export const transactions = pgTable(
     index("idx_tx_from_address").on(t.fromAddress),
     index("idx_tx_to_address_created").on(t.toAddress, t.createdAt),
     index("idx_tx_status_verified").on(t.status, t.verified),
+    uniqueIndex("uq_tx_direct_tx_hash")
+      .on(sql`lower(${t.txHash})`)
+      .where(sql`${t.intentHash} IS NULL`),
+    uniqueIndex("uq_tx_quote_uuid").on(t.quoteUuid),
+    uniqueIndex("uq_tx_route_uuid").on(t.routeUuid),
+    uniqueIndex("uq_tx_intent_hash").on(t.intentHash),
+    uniqueIndex("uq_tx_trade_id").on(t.tradeId),
+    uniqueIndex("uq_tx_active_checkout_attempt_key")
+      .on(sql`lower(btrim(${t.checkoutAttemptKey}))`)
+      .where(sql`${t.checkoutAttemptKey} IS NOT NULL AND ${t.status} IN ('pending', 'confirming')`),
+    index("idx_tx_submit_state_updated").on(t.submitState, t.updatedAt),
+    index("idx_tx_settlement_hash").on(t.settlementTxHash),
+    index("idx_tx_sera_vault_chain").on(t.chainId, t.seraVaultAddress),
+    check(
+      "ck_transactions_provisional_settlement_complete",
+      sql`(
+        (${t.provisionalSettlementAt} IS NULL
+          AND ${t.provisionalSettlementTxHash} IS NULL
+          AND ${t.provisionalSettlementBlockNumber} IS NULL
+          AND ${t.provisionalSettlementBlockHash} IS NULL
+          AND ${t.provisionalSettlementConfirmations} IS NULL)
+        OR
+        (${t.provisionalSettlementAt} IS NOT NULL
+          AND ${t.provisionalSettlementTxHash} IS NOT NULL
+          AND ${t.provisionalSettlementBlockNumber} IS NOT NULL
+          AND ${t.provisionalSettlementBlockHash} IS NOT NULL
+          AND ${t.provisionalSettlementConfirmations} BETWEEN 1 AND 2)
+      )`,
+    ),
   ]
+);
+
+/**
+ * Serializes terminal transaction-hash ownership across payment kinds.
+ *
+ * A Sera batch transaction can settle many independently signed Intents, so a
+ * single `sera` ownership row intentionally has no transaction id. A direct
+ * transfer is one-to-one and records its owning transaction. Owners are
+ * permanent, globally scoped replay tombstones: deletion or downgrade of a
+ * payment row cannot make its chain hash reusable. PostgreSQL triggers
+ * maintain this table; the application model is declared here so schema
+ * snapshots and future migrations cannot accidentally drop it.
+ */
+export const transactionHashOwnership = pgTable(
+  "transaction_hash_ownership",
+  {
+    txHash: varchar("txHash", { length: 66 }).primaryKey(),
+    ownerKind: varchar("ownerKind", { length: 16 }).$type<"direct" | "sera">().notNull(),
+    directTransactionId: varchar("directTransactionId", { length: 36 })
+      .unique(),
+    createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    check("ck_transaction_hash_ownership_hash", sql`${t.txHash} ~ '^0x[0-9a-f]{64}$'`),
+    check(
+      "ck_transaction_hash_ownership_kind",
+      sql`(${t.ownerKind} = 'direct' AND ${t.directTransactionId} IS NOT NULL)
+        OR (${t.ownerKind} = 'sera' AND ${t.directTransactionId} IS NULL)`,
+    ),
+  ],
 );
 
 export const menus = pgTable(
@@ -230,6 +364,9 @@ export const paymentIntents = pgTable(
     metadata: text("metadata"),
     checkoutUrl: varchar("checkoutUrl", { length: 1024 }).notNull(),
     status: paymentIntentStatusEnum("status").default("created").notNull(),
+    // Internal single-use submission owner. Quotes remain disposable; the
+    // first transaction that actually starts submission claims the intent.
+    transactionId: varchar("transactionId", { length: 36 }).references(() => transactions.id, { onDelete: "set null" }),
     expiresAt: timestamp("expiresAt", { withTimezone: true }),
     createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
@@ -237,6 +374,7 @@ export const paymentIntents = pgTable(
   (t) => [
     index("idx_payment_intents_merchant_created").on(t.merchantId, t.createdAt),
     index("idx_payment_intents_status").on(t.status),
+    index("idx_payment_intents_transaction").on(t.transactionId),
   ]
 );
 

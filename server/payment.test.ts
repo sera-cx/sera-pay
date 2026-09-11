@@ -354,12 +354,44 @@ describe("payment URL encoder", () => {
     expect(qrValue.toLowerCase()).toContain("ethereum:0x3fc98a885e99420d0ce43bcb81bf21a4e3f45e5f@1/transfer?");
   });
 
-  it("uses an exact ERC-20 wallet QR for converted direct-payment customer coins", async () => {
-    const { buildPaymentQrValue } = await import("../client/src/lib/payment");
-    const paymentUrl = "https://pay.sera.cx/pay/example";
-    const qrValue = buildPaymentQrValue({
-      receiverAddress: "0x1234567890abcdef1234567890abcdef12345678",
+  it("opens the signed hosted checkout when the merchant leaves the payment coin open", async () => {
+    const { buildPaymentQrValue, encodePaymentRequest } = await import("../client/src/lib/payment");
+    const { buildClientAppUrl } = await import("../client/src/lib/app-url");
+    const receiverAddress = "0x1234567890abcdef1234567890abcdef12345678";
+    const encoded = encodePaymentRequest({
+      receiverAddress,
+      receiveCoin: "USDC",
+      amount: "10",
+      chainId: 1,
+    });
+    const paymentUrl = buildClientAppUrl(`/pay/${encoded}.${"A".repeat(43)}`);
+
+    expect(buildPaymentQrValue({
+      receiverAddress,
+      receiveCoin: "USDC",
+      receiveAmount: "10",
+      chainId: 1,
+      paymentUrl,
+    })).toBe(paymentUrl);
+  });
+
+  it("opens the signed hosted checkout for a cross-currency payment", async () => {
+    const { buildPaymentQrValue, encodePaymentRequest } = await import("../client/src/lib/payment");
+    const { buildClientAppUrl } = await import("../client/src/lib/app-url");
+    const receiverAddress = "0x1234567890abcdef1234567890abcdef12345678";
+    const encoded = encodePaymentRequest({
+      receiverAddress,
       receiveCoin: "MYRT",
+      amount: "1",
+      payCoin: "USDC",
+      payAmount: "2.61",
+      chainId: 1,
+    });
+    const paymentUrl = buildClientAppUrl(`/pay/${encoded}.${"A".repeat(43)}`);
+    const qrValue = buildPaymentQrValue({
+      receiverAddress,
+      receiveCoin: "MYRT",
+      receiveAmount: "1",
       coin: "USDC",
       amount: "2.61",
       chainId: 1,
@@ -367,8 +399,36 @@ describe("payment URL encoder", () => {
       tokenDecimals: 6,
       paymentUrl,
     });
-    expect(qrValue.toLowerCase()).toContain("ethereum:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48@1/transfer?");
-    expect(qrValue).toContain("uint256=2610000");
+    expect(qrValue).toBe(paymentUrl);
+  });
+
+  it("refuses an unsigned or stale hosted conversion URL", async () => {
+    const { buildPaymentQrValue, encodePaymentRequest } = await import("../client/src/lib/payment");
+    const { buildClientAppUrl } = await import("../client/src/lib/app-url");
+    const receiverAddress = "0x1234567890abcdef1234567890abcdef12345678";
+    const encoded = encodePaymentRequest({
+      receiverAddress,
+      receiveCoin: "MYRT",
+      amount: "1",
+      payCoin: "USDC",
+      payAmount: "2.61",
+      chainId: 1,
+    });
+    const request = {
+      receiverAddress,
+      receiveCoin: "MYRT",
+      receiveAmount: "1",
+      coin: "USDC",
+      amount: "2.61",
+      chainId: 1,
+      paymentUrl: buildClientAppUrl(`/pay/${encoded}`),
+    };
+    expect(buildPaymentQrValue(request)).toBe("");
+    expect(buildPaymentQrValue({
+      ...request,
+      receiveAmount: "2",
+      paymentUrl: `${request.paymentUrl}.${"A".repeat(43)}`,
+    })).toBe("");
   });
 
   it.each(["USDC", "XSGD", "IDRX"])("keeps %s unchanged in copied checkout payloads", async (symbol) => {
@@ -501,7 +561,9 @@ describe("Scan & Pay watch rows", () => {
     expect(isLiveDirectQrWatch(found!)).toBe(true);
     expect(findDirectQrWatchRow(rows, { ...qrKey, paymentUrl: OTHER_LINK })?.id).toBe("other-link");
     expect(findDirectQrWatchRow(rows, { ...qrKey, amount: "3000" })).toBeNull();
-  }, 15_000);
+  // Importing the full payment router also loads the chain/provider stack.
+  // Keep this behavioral assertion tolerant of cold CI module transforms.
+  }, 60_000);
 
   it("returns a settled watch row as the QR's anchor but never as a live watch", async () => {
     const { findDirectQrWatchRow, isLiveDirectQrWatch } = await import("./payment-routes");

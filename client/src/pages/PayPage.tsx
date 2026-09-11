@@ -498,6 +498,54 @@ function LeaveCheckoutModal({ onConfirm, onCancel }: {
 type Phase = "loading" | "connect" | "select-coin" | "paying" | "success" | "failed" | "invalid";
 type PaymentLoginMethod = "wallet" | "google" | "email" | "twitter";
 
+type PersistedSeraSwapAttempt = {
+  version: 1;
+  key: string;
+  transactionId: string;
+  quoteUuid: string;
+  submitPayload?: {
+    txId: string;
+    quoteUuid: string;
+    signature: string;
+    permitSignature?: string;
+    permitDeadline?: unknown;
+  };
+};
+
+const SERA_SWAP_ATTEMPT_STORAGE_KEY = "serapay:active-sera-swap-attempt:v1";
+
+function readPersistedSeraSwapAttempt(): PersistedSeraSwapAttempt | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem(SERA_SWAP_ATTEMPT_STORAGE_KEY) || "null");
+    if (
+      value?.version !== 1
+      || typeof value.key !== "string"
+      || typeof value.transactionId !== "string"
+      || typeof value.quoteUuid !== "string"
+    ) return null;
+    if (value.submitPayload && (
+      value.submitPayload.txId !== value.transactionId
+      || value.submitPayload.quoteUuid !== value.quoteUuid
+      || typeof value.submitPayload.signature !== "string"
+    )) return null;
+    return value as PersistedSeraSwapAttempt;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedSeraSwapAttempt(attempt: PersistedSeraSwapAttempt | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (attempt) window.sessionStorage.setItem(SERA_SWAP_ATTEMPT_STORAGE_KEY, JSON.stringify(attempt));
+    else window.sessionStorage.removeItem(SERA_SWAP_ATTEMPT_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in privacy-restricted wallet browsers. The
+    // in-memory ref still preserves at-most-once retries for this page session.
+  }
+}
+
 export default function PayPage() {
   const { encoded } = useParams<{ encoded: string }>();
   const { ready, authenticated, login } = usePrivy();
@@ -515,6 +563,7 @@ export default function PayPage() {
   const [txHash, setTxHash] = useState("");
   const [txId, setTxId] = useState("");
   const [txError, setTxError] = useState("");
+  const [paymentReceived, setPaymentReceived] = useState(false);
   const [merchantName, setMerchantName] = useState("");
   const [merchantLogo, setMerchantLogo] = useState("");
   const [copied, setCopied] = useState(false);
@@ -534,6 +583,13 @@ export default function PayPage() {
   // What the merchant receives on a Sera swap, as /payment/swap/quote recorded
   // it (expectedReceiveAmount). Read by the receipt only.
   const swapReceiveAmountRef = useRef<string | null>(null);
+  const directAttemptRef = useRef<{ key: string; id: string } | null>(null);
+  const seraAttemptRef = useRef<PersistedSeraSwapAttempt | null>(null);
+  const seraAttemptHydratedRef = useRef(false);
+  if (!seraAttemptHydratedRef.current) {
+    seraAttemptRef.current = readPersistedSeraSwapAttempt();
+    seraAttemptHydratedRef.current = true;
+  }
 
   // Rate-changed confirmation
   const [showRateChanged, setShowRateChanged] = useState(false);
@@ -869,6 +925,8 @@ export default function PayPage() {
     const handleConfirmed = () => {
       if (closed) return;
       closed = true;
+      seraAttemptRef.current = null;
+      writePersistedSeraSwapAttempt(null);
       setPhase("success");
       if (pollInterval) clearInterval(pollInterval);
     };
@@ -879,6 +937,12 @@ export default function PayPage() {
       try {
         const data = JSON.parse(e.data);
         if (data.status === "confirmed") { es.close(); handleConfirmed(); }
+        if (data.status === "received") {
+          setPaymentReceived(true);
+          if (data.txHash) setTxHash(String(data.txHash));
+        } else if (data.status === "confirming" && data.received === false) {
+          setPaymentReceived(false);
+        }
       } catch {}
     };
     // Don't close on error — let browser auto-reconnect
@@ -888,16 +952,26 @@ export default function PayPage() {
     pollInterval = setInterval(async () => {
       if (closed) { clearInterval(pollInterval!); return; }
       try {
-        const res = await fetch(`/api/payment/status/${txId}`);
+        const res = await fetch(`/api/payment/status/${txId}`, { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
         if (data.status === "confirmed") { es.close(); handleConfirmed(); }
-        if (data.status === "failed") {
+        if (data.status === "received") {
+          setPaymentReceived(true);
+          if (data.txHash) setTxHash(String(data.txHash));
+        } else if (data.status === "confirming") {
+          setPaymentReceived(false);
+        }
+        if (data.status === "failed" || data.status === "canceled") {
           closed = true;
+          seraAttemptRef.current = null;
+          writePersistedSeraSwapAttempt(null);
           clearInterval(pollInterval!);
           setPhase("failed");
           setTxError(paymentFailureMessage({
-            message: data.failureReason || data.memo || "Payment verification failed. Please contact the merchant.",
+            message: data.failureReason || data.memo || (data.status === "canceled"
+              ? "This payment attempt expired before it was submitted. Please try again."
+              : "Payment verification failed. Please contact the merchant."),
             errorCode: data.errorCode,
           }));
         }
@@ -915,6 +989,7 @@ export default function PayPage() {
     if (!req || !selectedCoin) return;
     setPhase("paying");
     setTxError("");
+    setPaymentReceived(false);
     swapReceiveAmountRef.current = null;
     try {
       const wallet = wallets?.[0];
@@ -948,6 +1023,19 @@ export default function PayPage() {
         const attemptStartedAt = Date.now();
         const swapExpiration = Math.floor((attemptStartedAt + PAYMENT_ATTEMPT_MAX_MS) / 1000);
         let quoteRetries = 0;
+        const seraAttemptKey = [
+          encoded || "open",
+          activeWalletAddress,
+          cid,
+          selectedCoin.symbol,
+          req.receiveCoin,
+          sendAmount,
+          receiveAmountForQuote || "open",
+        ].join(":");
+        const rememberSeraAttempt = (attempt: PersistedSeraSwapAttempt | null) => {
+          seraAttemptRef.current = attempt;
+          writePersistedSeraSwapAttempt(attempt);
+        };
         /*
           The pending transaction row this attempt is priced against. It is
           kept across stale-quote retries: /payment/swap/quote refreshes a row
@@ -960,7 +1048,15 @@ export default function PayPage() {
           SUBMIT the refresh is refused below and a fresh row is opened; the
           reuse pays off when the stale answer left the row pending.)
         */
-        let quoteTransactionId = "";
+        let quoteTransactionId = seraAttemptRef.current?.key === seraAttemptKey
+          ? seraAttemptRef.current.transactionId
+          : "";
+        // The quote UUID is also the unlisted capability required to refresh
+        // this exact pending attempt. A public transaction ID alone is not
+        // enough to replace the payer's signed route.
+        let quoteCapabilityUuid = seraAttemptRef.current?.key === seraAttemptKey
+          ? seraAttemptRef.current.quoteUuid
+          : "";
         /*
           Set when the server answered quote_stale to a refresh of
           quoteTransactionId. It gives that answer only after looking the row
@@ -968,6 +1064,106 @@ export default function PayPage() {
           quote has to open a fresh row.
         */
         let quoteRefreshRefused = false;
+
+        // A POST /swap response can be lost after Sera accepted the signed
+        // Intent. Recover that exact attempt before creating or signing any
+        // new one. The server's submit claim is idempotent for this tx/quote;
+        // sessionStorage keeps the same authorization across a page reload.
+        const priorStoredAttempt = seraAttemptRef.current;
+        if (priorStoredAttempt?.submitPayload && priorStoredAttempt.key !== seraAttemptKey) {
+          let priorStatus: any = null;
+          try {
+            const statusRes = await fetch(`/api/payment/status/${encodeURIComponent(priorStoredAttempt.transactionId)}`, {
+              cache: "no-store",
+            });
+            if (statusRes.ok) priorStatus = await statusRes.json();
+          } catch {
+            // A missing status response cannot prove the earlier signed Intent
+            // is safe to replace with a payment for this different checkout.
+          }
+          if (["confirmed", "failed", "canceled"].includes(String(priorStatus?.status || ""))) {
+            // The previous checkout is terminal. Clear its recovery record,
+            // but never render that outcome as success for the current one.
+            rememberSeraAttempt(null);
+          } else {
+            throw new PaymentApiError(
+              "A previous Sera payment is still resolving in this tab. Return to that checkout or try this payment after it reaches a final status.",
+              409,
+              "previous_payment_pending",
+              { transactionId: priorStoredAttempt.transactionId },
+            );
+          }
+        }
+
+        const storedAttempt = seraAttemptRef.current;
+        if (storedAttempt?.submitPayload) {
+          setTxId(storedAttempt.transactionId);
+          let storedStatus: any = null;
+          try {
+            const statusRes = await fetch(`/api/payment/status/${encodeURIComponent(storedAttempt.transactionId)}`, {
+              cache: "no-store",
+            });
+            if (statusRes.ok) storedStatus = await statusRes.json();
+          } catch {
+            // Re-submitting the same immutable authorization is safe even if
+            // the status read is unavailable.
+          }
+          if (storedStatus?.status === "confirmed") {
+            rememberSeraAttempt(null);
+            if (storedStatus.txHash) setTxHash(String(storedStatus.txHash));
+            setPhase("success");
+            return;
+          }
+          if (storedStatus?.status === "confirming" || storedStatus?.status === "received") {
+            if (storedStatus.status === "received") {
+              setPaymentReceived(true);
+              if (storedStatus.txHash) setTxHash(String(storedStatus.txHash));
+            }
+            return;
+          }
+          if (storedStatus?.status === "failed" || storedStatus?.status === "canceled") {
+            rememberSeraAttempt(null);
+            throw new PaymentApiError(
+              storedStatus.failureReason || "The previous Sera payment attempt did not settle.",
+              409,
+              storedStatus.errorCode || storedStatus.status,
+              storedStatus,
+            );
+          }
+
+          try {
+            const recoveryRes = await fetch("/api/payment/swap/submit", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(storedAttempt.submitPayload),
+            });
+            const recovery = await readPaymentApiJson<any>(recoveryRes, "Unable to recover the existing Sera swap");
+            if (recovery.txHash) setTxHash(String(recovery.txHash));
+            if (recovery.status === "confirmed") {
+              rememberSeraAttempt(null);
+              setPhase("success");
+            } else if (recovery.status === "received") {
+              setPaymentReceived(true);
+            }
+            return;
+          } catch (recoveryError) {
+            if (isQuoteStaleError(recoveryError) && storedAttempt.key === seraAttemptKey) {
+              // QUOTE_STALE is the one response for which the server reopens
+              // this exact transaction for an in-place refresh.
+              quoteTransactionId = storedAttempt.transactionId;
+              quoteCapabilityUuid = storedAttempt.quoteUuid;
+              rememberSeraAttempt({ ...storedAttempt, submitPayload: undefined });
+            } else {
+              // Ambiguous errors deliberately retain the signed payload. A
+              // retry or reload will query/resubmit this same attempt again.
+              throw recoveryError;
+            }
+          }
+        } else if (storedAttempt && storedAttempt.key !== seraAttemptKey) {
+          // An unsigned quote cannot move funds and is safe to abandon when
+          // the payer changes checkout details.
+          rememberSeraAttempt(null);
+        }
 
         const createSwapQuote = async () => {
           const refreshTxId = quoteTransactionId;
@@ -986,6 +1182,7 @@ export default function PayPage() {
               orderId: (req as any).orderId,
               expiration: swapExpiration,
               txId: refreshTxId || undefined,
+              previousQuoteUuid: refreshTxId ? quoteCapabilityUuid : undefined,
               checkoutPayload: encoded || undefined,
             }),
           });
@@ -993,10 +1190,27 @@ export default function PayPage() {
           try {
             quoteData = await readPaymentApiJson<any>(quoteRes, "Unable to create Sera swap quote");
           } catch (error) {
+            if (error instanceof PaymentApiError && error.errorCode === "payment_attempt_in_progress") {
+              const existingTxId = typeof (error.detail as any)?.txId === "string"
+                ? String((error.detail as any).txId)
+                : "";
+              if (!existingTxId) throw error;
+              setTxId(existingTxId);
+              throw Object.assign(new Error("Existing Sera payment is still resolving"), {
+                resumeExistingSeraAttempt: true,
+              });
+            }
             if (refreshTxId && isQuoteStaleError(error)) quoteRefreshRefused = true;
             throw error;
           }
           quoteTransactionId = String(quoteData.txId || "");
+          quoteCapabilityUuid = String(quoteData.quoteUuid || "");
+          rememberSeraAttempt({
+            version: 1,
+            key: seraAttemptKey,
+            transactionId: quoteTransactionId,
+            quoteUuid: quoteCapabilityUuid,
+          });
           setTxId(quoteTransactionId);
           if (quoteData.payAmount) setPayAmount(String(quoteData.payAmount));
           if (quoteData.expectedReceiveAmount) swapReceiveAmountRef.current = String(quoteData.expectedReceiveAmount);
@@ -1090,24 +1304,50 @@ export default function PayPage() {
               params: [activeWalletAddress, JSON.stringify(quoteData.intentTypedData)],
             }) as string;
 
+            const submitPayload: NonNullable<PersistedSeraSwapAttempt["submitPayload"]> = {
+              txId: quoteData.txId,
+              quoteUuid: quoteData.quoteUuid,
+              signature,
+              ...(submitPermitSignature ? { permitSignature: submitPermitSignature } : {}),
+              ...(submitPermitDeadline !== undefined ? { permitDeadline: submitPermitDeadline } : {}),
+            };
+            // Persist before the request leaves the browser. If the response
+            // disappears after Sera accepts it, the next click/reload can
+            // only replay this exact authorization, never generate payment B.
+            rememberSeraAttempt({
+              version: 1,
+              key: seraAttemptKey,
+              transactionId: String(quoteData.txId),
+              quoteUuid: String(quoteData.quoteUuid),
+              submitPayload,
+            });
+
             const submitRes = await fetch("/api/payment/swap/submit", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                txId: quoteData.txId,
-                quoteUuid: quoteData.quoteUuid,
-                signature,
-                permitSignature: submitPermitSignature,
-                permitDeadline: submitPermitDeadline,
-              }),
+              body: JSON.stringify(submitPayload),
             });
             const submitData = await readPaymentApiJson<any>(submitRes, "Unable to submit Sera swap");
             if (submitData.txHash) setTxHash(submitData.txHash);
-            if (submitData.status === "confirmed") setPhase("success");
+            if (submitData.status === "confirmed") {
+              rememberSeraAttempt(null);
+              setPhase("success");
+            } else if (submitData.status === "received") {
+              setPaymentReceived(true);
+            }
             return;
           } catch (error: any) {
+            if (error?.resumeExistingSeraAttempt === true) return;
             const stillWithinAttemptWindow = Date.now() - attemptStartedAt < PAYMENT_ATTEMPT_MAX_MS;
             if (!isQuoteStaleError(error) || !stillWithinAttemptWindow) throw error;
+            const currentAttempt = seraAttemptRef.current;
+            if (
+              currentAttempt
+              && currentAttempt.transactionId === quoteTransactionId
+              && currentAttempt.quoteUuid === quoteCapabilityUuid
+            ) {
+              rememberSeraAttempt({ ...currentAttempt, submitPayload: undefined });
+            }
             // Stop watching the row while it is re-priced: the status poll
             // flips the page to "failed" on a row the server has failed, and
             // the submit route fails its row before answering a stale error.
@@ -1115,13 +1355,10 @@ export default function PayPage() {
             // refresh went through, to the new one when it did not.
             setTxId("");
             if (quoteRefreshRefused) {
-              // Not a fresh attempt the customer sees, just this retry
-              // reissued without a dead id, so it does not count against
-              // MAX_SWAP_QUOTE_RETRIES. It cannot loop: only a quote that
-              // carried an id can be refused, and the id is cleared here.
-              quoteRefreshRefused = false;
-              quoteTransactionId = "";
-              continue;
+              // Never replace an attempt merely because refresh lost a race.
+              // It may already be accepted and reconciling; a fresh row could
+              // pay the merchant twice.
+              throw new Error("The existing Sera payment attempt is still resolving. Please retry this same payment shortly.");
             }
             if (quoteRetries >= MAX_SWAP_QUOTE_RETRIES) throw error;
             quoteRetries += 1;
@@ -1137,6 +1374,10 @@ export default function PayPage() {
         throw new Error(`Sera did not return valid ${selectedCoin.symbol} token metadata for ${CHAIN_NAMES[cid] || "this network"}`);
       }
       const amountWei = parseUnits(sendAmount, selectedTokenDecimals);
+      const directAttemptKey = [encoded || "open", activeWalletAddress, cid, selectedCoin.symbol, sendAmount].join(":");
+      if (directAttemptRef.current?.key !== directAttemptKey) {
+        directAttemptRef.current = { key: directAttemptKey, id: crypto.randomUUID() };
+      }
 
       const createRes = await fetch("/api/payment/create", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1148,6 +1389,7 @@ export default function PayPage() {
           orderId: (req as any).orderId,
           paymentIntentId: (req as any).paymentIntentId,
           paymentUrl: window.location.href,
+          attemptId: directAttemptRef.current.id,
           checkoutPayload: encoded || undefined,
         }),
       });
@@ -1988,8 +2230,14 @@ export default function PayPage() {
         {phase === "paying" && (
           <div style={{ background: "#fff", borderRadius: 20, padding: "40px 24px", boxShadow: "0 1px 8px rgba(0,0,0,0.07)", textAlign: "center" }}>
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 20 }}><Spinner size={48} /></div>
-            <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1C1C1E", margin: "0 0 8px" }}>Processing Payment…</h3>
-            <p style={{ fontSize: 13, color: "rgba(60,60,67,0.5)", margin: 0 }}>Please confirm in your wallet and wait for on-chain confirmation.</p>
+            <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1C1C1E", margin: "0 0 8px" }}>
+              {paymentReceived ? "Payment Received" : "Processing Payment…"}
+            </h3>
+            <p style={{ fontSize: 13, color: "rgba(60,60,67,0.5)", margin: 0 }}>
+              {paymentReceived
+                ? "The swap is on-chain. Final network verification is continuing automatically."
+                : "Please confirm in your wallet and wait for on-chain confirmation."}
+            </p>
           </div>
         )}
       </div>

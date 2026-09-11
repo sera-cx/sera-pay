@@ -51,11 +51,11 @@ function normalizeDashboardQrMode(value: unknown): QrMode {
   return value === "advanced" ? "advanced" : "standard";
 }
 
-function DashboardCoinDropdown({ value, onChange, currencies }: { value: string; onChange: (value: string) => void; currencies: SeraCurrency[] }) {
+function DashboardCoinDropdown({ value, onChange, currencies, placeholder = "Select coin" }: { value: string; onChange: (value: string) => void; currencies: SeraCurrency[]; placeholder?: string }) {
   const [open, setOpen] = React.useState(false);
   const ref = React.useRef<HTMLDivElement | null>(null);
   const options = React.useMemo(() => currencies.map((coin) => ({ symbol: coin.symbol, label: coin.symbol })), [currencies]);
-  const selected = options.find((option) => option.symbol === value) || options[0] || { symbol: "", label: "Loading…" };
+  const selected = options.find((option) => option.symbol === value) || { symbol: "", label: currencies.length ? placeholder : "Loading…" };
 
   React.useEffect(() => {
     if (!open) return;
@@ -224,11 +224,16 @@ function DashboardPaymentModal({
   const qrFg = profile?.qrFgColor || "#000000";
   const qrBg = profile?.qrBgColor || "#ffffff";
   const receiveAmount = normalizeDecimalAmountText(amount);
-  const displayPayAmount = normalizeDecimalAmountText(payAmount || amount);
+  const displayPayAmount = normalizeDecimalAmountText(
+    payAmount || (payCoin && payCoin === receiveCoin ? amount : ""),
+  );
   const resolvedReceiveCoin = receiveCoin;
-  const resolvedPayCoin = payCoin || resolvedReceiveCoin;
+  const resolvedPayCoin = payCoin;
   const payToken = currencies.find((coin) => coin.symbol === resolvedPayCoin) ?? null;
-  const conversionReady = Boolean(resolvedReceiveCoin && resolvedPayCoin && (resolvedReceiveCoin === resolvedPayCoin || (displayPayAmount && !rateError)));
+  const isCrossCurrencyConversion = Boolean(
+    resolvedPayCoin && resolvedReceiveCoin && resolvedPayCoin !== resolvedReceiveCoin,
+  );
+  const conversionReady = Boolean(resolvedReceiveCoin && (!resolvedPayCoin || resolvedReceiveCoin === resolvedPayCoin || (displayPayAmount && !rateError)));
   const expiresAt = React.useMemo(() => {
     const duration = getDashboardExpiryMs(expiryOption);
     return duration > 0 ? expiryNow + duration : undefined;
@@ -242,8 +247,8 @@ function DashboardPaymentModal({
     receiverAddress,
     receiveCoin: resolvedReceiveCoin,
     amount: receiveAmount || undefined,
-    payCoin: resolvedPayCoin,
-    payAmount: displayPayAmount || undefined,
+    payCoin: resolvedPayCoin || undefined,
+    payAmount: resolvedPayCoin ? displayPayAmount || undefined : undefined,
     chainId,
     merchantName,
     merchantIcon: logo,
@@ -267,22 +272,28 @@ function DashboardPaymentModal({
       return;
     }
     const requestId = ++signRequestIdRef.current;
-    // The previous link stays on screen until the new one arrives: swapping it
-    // in place keeps the QR from blinking out on every edit. It is blanked only
-    // above, when the inputs no longer describe a payable request.
+    // A conversion QR is usable only after this exact request passes preflight;
+    // never leave the prior conversion link visible under newly edited values.
+    if (isCrossCurrencyConversion) {
+      lastSignedUrlRef.current = "";
+      setPaymentUrl("");
+    }
     const timer = window.setTimeout(() => {
       requestSignedPaymentUrl(paymentUrlRequest)
         .then((url) => {
           if (signRequestIdRef.current !== requestId) return;
           if (!url) throw new Error("Checkout signing returned no link");
           lastSignedUrlRef.current = url;
+          if (isCrossCurrencyConversion) setRateError("");
           setPaymentUrl(url);
         })
-        .catch(() => {
+        .catch((error) => {
           if (signRequestIdRef.current !== requestId) return;
-          // A failed re-sign keeps the last good link rather than hiding the
-          // QR, which would leave the modal looking empty for no visible
-          // reason. Silent by design: no copy for this state is approved.
+          if (isCrossCurrencyConversion) {
+            lastSignedUrlRef.current = "";
+            setPaymentUrl("");
+            setRateError(seraRateErrorMessage(error, (error as any)?.errorCode));
+          }
         });
     }, 400);
     return () => {
@@ -290,17 +301,18 @@ function DashboardPaymentModal({
       // Superseded or unmounted: a response for this id must not land.
       signRequestIdRef.current += 1;
     };
-  }, [paymentUrlRequest, conversionReady, receiverAddress]);
+  }, [paymentUrlRequest, conversionReady, isCrossCurrencyConversion, receiverAddress]);
   const paymentQrValue = React.useMemo(() => receiverAddress && paymentUrl ? buildPaymentQrValue({
     receiverAddress,
-    coin: resolvedPayCoin,
+    coin: resolvedPayCoin || undefined,
     receiveCoin: resolvedReceiveCoin,
-    amount: displayPayAmount || undefined,
+    receiveAmount: receiveAmount || undefined,
+    amount: resolvedPayCoin ? displayPayAmount || undefined : undefined,
     chainId,
     tokenAddress: payToken?.contractAddress,
     tokenDecimals: payToken?.decimals,
     paymentUrl,
-  }) : "", [chainId, displayPayAmount, payToken, paymentUrl, receiverAddress, resolvedPayCoin, resolvedReceiveCoin]);
+  }) : "", [chainId, displayPayAmount, payToken, paymentUrl, receiveAmount, receiverAddress, resolvedPayCoin, resolvedReceiveCoin]);
 
   React.useEffect(() => {
     let active = true;
@@ -319,7 +331,10 @@ function DashboardPaymentModal({
         }
         const preferred = configured || loaded.find((coin) => coin.symbol === "XSGD") || loaded[0];
         setReceiveCoin(preferred?.symbol || "");
-        setPayCoin(preferred?.symbol || "");
+        // Leave Customer Pays open. A receive-only QR must open PayPage so the
+        // payer can choose a supported token; defaulting this to `preferred`
+        // silently changed the request into a same-token direct transfer.
+        setPayCoin("");
       })
       .catch((error) => {
         if (!active) return;
@@ -332,7 +347,7 @@ function DashboardPaymentModal({
   }, [chainId, profile?.receiveCoin]);
 
   React.useEffect(() => {
-    if (!receiveAmount) {
+    if (!receiveAmount || !resolvedPayCoin) {
       setPayAmount("");
       setRateError("");
       return;
@@ -386,8 +401,8 @@ function DashboardPaymentModal({
     await downloadPaymentQrCard({
       qrValue: paymentQrValue,
       receiverAddress,
-      amount: displayPayAmount,
-      coin: resolvedPayCoin,
+      amount: resolvedPayCoin ? displayPayAmount : receiveAmount,
+      coin: resolvedPayCoin || resolvedReceiveCoin,
       merchantName,
       merchantLogo: logo || null,
       fgColor: qrFg,
@@ -416,12 +431,12 @@ function DashboardPaymentModal({
               <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">I receive</p>
               <div className="flex overflow-visible rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-[#00C853] focus-within:ring-4 focus-within:ring-[#00C853]/10">
                 <DashboardCoinDropdown value={receiveCoin} onChange={setReceiveCoin} currencies={currencies} />
-                <input value={amount} onChange={(e) => setAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
+                <input value={amount} onChange={(e) => { setAmount(limitDecimalPlaces(e.target.value)); if (isCrossCurrencyConversion) setRateError(""); }} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
               </div>
             </div>
 
             <div className="flex items-center justify-center">
-              <button type="button" onClick={() => { setReceiveCoin(payCoin); setPayCoin(receiveCoin); setAmount(displayPayAmount || amount); }} className="flex h-8 w-8 items-center justify-center rounded-full border border-[#00D1A0]/30 bg-white text-[#00A87A] shadow-sm">
+              <button type="button" disabled={!receiveCoin || !payCoin} onClick={() => { if (!receiveCoin || !payCoin) return; setReceiveCoin(payCoin); setPayCoin(receiveCoin); setAmount(displayPayAmount || amount); }} className="flex h-8 w-8 items-center justify-center rounded-full border border-[#00D1A0]/30 bg-white text-[#00A87A] shadow-sm">
                 {rateLoading ? <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#00D1A0]/20 border-t-[#00D1A0]" /> : <ArrowUpDown className="h-4 w-4" />}
               </button>
             </div>
@@ -429,8 +444,8 @@ function DashboardPaymentModal({
             <div>
               <p className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
               <div className="flex overflow-visible rounded-2xl border border-gray-200 bg-white shadow-sm focus-within:border-[#00C853] focus-within:ring-4 focus-within:ring-[#00C853]/10">
-                <DashboardCoinDropdown value={payCoin} onChange={setPayCoin} currencies={currencies} />
-                <input value={payAmount} onChange={(e) => setPayAmount(limitDecimalPlaces(e.target.value))} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
+                <DashboardCoinDropdown value={payCoin} onChange={setPayCoin} currencies={currencies} placeholder="Any supported" />
+                <input value={payAmount} onChange={(e) => { setPayAmount(limitDecimalPlaces(e.target.value)); if (isCrossCurrencyConversion) setRateError(""); }} inputMode="decimal" placeholder="0.00" className="min-h-14 min-w-0 flex-1 px-4 text-right text-xl font-semibold outline-none" />
               </div>
             </div>
 
@@ -506,13 +521,13 @@ function DashboardPaymentModal({
 
           {paymentUrl ? (
             <div className="mt-5 rounded-3xl border border-gray-100 bg-[#F8FAFB] p-4 text-center">
-              <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">Customer pays</p>
+              <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-gray-400">{resolvedPayCoin ? "Customer pays" : "I receive"}</p>
               <p className="mt-1 text-2xl font-extrabold text-gray-950">
-                {(displayPayAmount || amount) ? `${displayPayAmount || amount} ` : ""}<span className="text-[#00C896]">{resolvedPayCoin}</span>
+                {(resolvedPayCoin ? displayPayAmount : receiveAmount) ? `${resolvedPayCoin ? displayPayAmount : receiveAmount} ` : ""}<span className="text-[#00C896]">{resolvedPayCoin || resolvedReceiveCoin}</span>
               </p>
-              {/* Never substitute the http link here: a scanned web link is not
-                  a payment request, and rendering one would look identical to a
-                  working QR while quietly failing every wallet scanner. */}
+              {/* Receive-only and cross-currency QRs intentionally open
+                  PayPage; same-token requests remain direct EIP-681 wallet
+                  payments. */}
               {paymentQrValue ? (
                 <div id="dashboard-payment-qr" onClick={copyLink} className="mx-auto mt-2 w-fit cursor-copy rounded-2xl bg-white p-2">
                   <QRStyled value={paymentQrValue} size={210} fgColor={qrFg} bgColor={qrBg} style={qrStyle} logo={logo} mode={qrMode} />
@@ -520,7 +535,7 @@ function DashboardPaymentModal({
               ) : (
                 <div className="mx-auto mt-2 flex h-[210px] w-[210px] items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-white p-4">
                   <p className="text-[11px] font-semibold leading-relaxed text-gray-500">
-                    Payment QR unavailable — {resolvedPayCoin} details are still loading from Sera.
+                    Payment QR unavailable — {resolvedPayCoin || resolvedReceiveCoin} details are still loading from Sera.
                   </p>
                 </div>
               )}

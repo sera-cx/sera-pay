@@ -23,6 +23,15 @@ export const ENV = {
   seraAppBaseUrl: env("SERA_APP_BASE_URL") || "https://app.sera.cx",
   seraApiTestnetBaseUrl: env("SERA_API_TESTNET_BASE_URL"),
   seraApiKey: env("SERA_API_KEY"),
+  // Advisory quote owner used only by the merchant-side liquidity preflight.
+  // It never signs, submits, receives, or holds funds.
+  seraPreflightProbeAddress: env("SERA_PREFLIGHT_PROBE_ADDRESS"),
+  // Optional server-side quote safety policy. Empty values leave a limit off.
+  seraMaxGasCostUsd: env("SERA_MAX_GAS_COST_USD"),
+  seraMaxQuoteInputDeviationBps: env("SERA_MAX_QUOTE_INPUT_DEVIATION_BPS"),
+  // Positive settlement latency policy. Missing-event failures still require
+  // a finalized scan regardless of this setting.
+  seraProvisionalConfirmations: env("SERA_PROVISIONAL_CONFIRMATIONS"),
   // Master switch for Sepolia. Off unless explicitly enabled, so no request
   // parameter, stale database row, or old QR code can route real money to a
   // test network. Sera itself only supports Ethereum mainnet and Sepolia.
@@ -64,6 +73,15 @@ export function validateRuntimeEnv() {
   const errors: string[] = [];
   requireProductionSecret(errors, "SESSION_SECRET", "generate a stable random value for server session/cookie signing");
   requireProductionSecret(errors, "SERA_CONFIG_ENCRYPTION_KEY", "generate a stable random value for encrypting saved Sera API credentials");
+  if (!/^postgres(?:ql)?:\/\//i.test(ENV.databaseUrl.trim())) {
+    errors.push("DATABASE_URL must be a PostgreSQL connection URL (payment lifecycle durability and recovery).");
+  }
+  try {
+    const rpcUrl = new URL(ENV.rpcUrls[1]);
+    if (rpcUrl.protocol !== "https:" && rpcUrl.protocol !== "http:") throw new Error("unsupported protocol");
+  } catch {
+    errors.push("ETHEREUM_RPC_URL must be an HTTP(S) Ethereum mainnet RPC URL (prompt settlement scans).");
+  }
 
   if (errors.length > 0) {
     throw new Error([

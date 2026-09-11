@@ -50,7 +50,7 @@ export interface GatewayPaymentIntent {
   description: string | null;
   metadata: Record<string, unknown> | null;
   checkoutUrl: string;
-  status: "created" | "open" | "paid" | "expired" | "canceled" | "failed";
+  status: "created" | "open" | "processing" | "paid" | "expired" | "canceled" | "failed";
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;

@@ -14,6 +14,7 @@ import { menuRouter } from "../menu-routes";
 import { gatewayRouter } from "../gateway-routes";
 import { validateRuntimeEnv } from "./env";
 import { getContentSecurityPolicyDirectives, getCorsOrigin } from "./security";
+import { assertProductionDatabaseReady } from "../db";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -36,6 +37,7 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 
 async function startServer() {
   validateRuntimeEnv();
+  await assertProductionDatabaseReady();
 
   const app = express();
   const server = createServer(app);
@@ -86,6 +88,7 @@ async function startServer() {
     });
 
   app.use("/api/payment/create",   makeLimit(20, "Too many payment requests, please slow down."));
+  app.use("/api/payment/swap/preflight", makeLimit(20, "Too many swap preflight requests, please slow down."));
   app.use("/api/payment/swap/quote", makeLimit(20, "Too many swap quote requests, please slow down."));
   app.use("/api/payment/swap/submit", makeLimit(10, "Too many swap submissions, please slow down."));
   app.use("/api/payment/notify",   makeLimit(10, "Too many notification requests, please slow down."));

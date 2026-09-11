@@ -78,7 +78,17 @@ function toMicroAmount(value: string): number | null {
  */
 export function assertPaymentIntentBindable(
   intent: PaymentIntent | undefined | null,
-  { merchantId, receiveCoin }: { merchantId: string; receiveCoin: string }
+  {
+    merchantId,
+    receiveCoin,
+    receiverAddress,
+    chainId,
+  }: {
+    merchantId: string;
+    receiveCoin: string;
+    receiverAddress: string;
+    chainId: number;
+  }
 ): string {
   if (!intent) throw new PaymentBindingError("Payment intent not found", 404);
   if (intent.merchantId !== merchantId) throw new PaymentBindingError("Payment intent does not belong to this merchant", 403);
@@ -91,6 +101,12 @@ export function assertPaymentIntentBindable(
   }
   if (intent.coin.toUpperCase() !== receiveCoin.toUpperCase()) {
     throw new PaymentBindingError("Payment currency does not match the payment intent", 400);
+  }
+  if (intent.receiverAddress.toLowerCase() !== receiverAddress.toLowerCase()) {
+    throw new PaymentBindingError("Payment receiver does not match the payment intent", 400);
+  }
+  if (intent.chainId !== chainId) {
+    throw new PaymentBindingError("Payment network does not match the payment intent", 400);
   }
   return String(intent.amount);
 }

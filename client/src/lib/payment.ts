@@ -29,7 +29,7 @@ export function seraRateErrorMessage(error: unknown, errorCode?: string | null):
   if (code === "amount_below_min" || /AMOUNT_BELOW_MIN|minimum .* is required/i.test(message)) {
     return message || "Amount is below Sera's minimum for this currency.";
   }
-  if (code === "no_liquidity" || /no[_ ]liquidity|no executable liquidity/i.test(message)) {
+  if (code === "no_liquidity" || /no[_ ]liquidity|no executable (?:liquidity|route|output)/i.test(message)) {
     return SERA_NO_LIQUIDITY_MESSAGE;
   }
   if (
@@ -200,11 +200,93 @@ export function decodeCheckoutPayload(encoded: string): DecodedCheckout | null {
  * field, and returns the signed `/pay/:payload` segment.
  */
 export async function requestSignedPaymentUrl(request: PaymentRequest): Promise<string> {
+  const payCoin = String(request.payCoin || "").trim().toUpperCase();
+  const receiveCoin = String(request.receiveCoin || "").trim().toUpperCase();
+  if (payCoin && receiveCoin && payCoin !== receiveCoin) {
+    const receiveAmount = normalizeDecimalAmountText(String(request.amount || ""));
+    const estimatedPayAmount = normalizeDecimalAmountText(String(request.payAmount || ""));
+    if (!receiveAmount || !estimatedPayAmount) {
+      throw new Error("Both payment amounts are required before checking this Sera conversion.");
+    }
+    await requestSeraSwapPreflight({
+      receiverAddress: request.receiverAddress,
+      payCoin,
+      receiveCoin,
+      receiveAmount,
+      estimatedPayAmount,
+      chainId: request.chainId,
+    });
+  }
+
   const data = await fetchApi<{ encoded?: string; paymentUrl?: string }>("/payment/checkout/sign", {
     method: "POST",
     body: JSON.stringify({ request }),
   });
   return typeof data.paymentUrl === "string" ? data.paymentUrl : "";
+}
+
+export interface SeraSwapPreflightRequest {
+  receiverAddress: string;
+  payCoin: string;
+  receiveCoin: string;
+  receiveAmount: string;
+  estimatedPayAmount: string;
+  chainId?: number;
+}
+
+export interface SeraSwapPreflightResponse {
+  executable: true;
+  chainId: number;
+  toAddress: string;
+  payCoin: string;
+  receiveCoin: string;
+  requestedPayAmount: string;
+  quotedPayAmount?: string;
+  maximumPayAmount: string;
+  targetReceiveAmount: string;
+  minimumReceiveAmount: string;
+  requiresCustomerRequote: boolean;
+  direct?: boolean;
+}
+
+/**
+ * Confirms that Sera can execute this exact conversion before a merchant can
+ * sign or expose its checkout QR. The quote is deliberately disposable: the
+ * payer obtains and signs a fresh quote on PayPage.
+ */
+export async function requestSeraSwapPreflight(request: SeraSwapPreflightRequest): Promise<SeraSwapPreflightResponse> {
+  const expectedPayCoin = request.payCoin.trim().toUpperCase();
+  const expectedReceiveCoin = request.receiveCoin.trim().toUpperCase();
+  const expectedReceiveAmount = normalizeDecimalAmountText(request.receiveAmount);
+  const expectedPayAmount = normalizeDecimalAmountText(request.estimatedPayAmount);
+  const expectedChainId = request.chainId || LIVE_PAYMENT_CHAIN_ID;
+  const response = await fetchApi<SeraSwapPreflightResponse>("/payment/swap/preflight", {
+    method: "POST",
+    cache: "no-store",
+    body: JSON.stringify({
+      receiverAddress: request.receiverAddress,
+      payCoin: expectedPayCoin,
+      receiveCoin: expectedReceiveCoin,
+      receiveAmount: expectedReceiveAmount,
+      estimatedPayAmount: expectedPayAmount,
+      chainId: expectedChainId,
+    }),
+  });
+
+  const responsePayAmount = normalizeDecimalAmountText(String(response.requestedPayAmount || ""));
+  const responseReceiveAmount = normalizeDecimalAmountText(String(response.targetReceiveAmount || ""));
+  if (
+    response.executable !== true
+    || String(response.payCoin || "").toUpperCase() !== expectedPayCoin
+    || String(response.receiveCoin || "").toUpperCase() !== expectedReceiveCoin
+    || Number(response.chainId) !== expectedChainId
+    || String(response.toAddress || "").toLowerCase() !== request.receiverAddress.trim().toLowerCase()
+    || responsePayAmount !== expectedPayAmount
+    || responseReceiveAmount !== expectedReceiveAmount
+  ) {
+    throw new Error("Sera returned a preflight result for a different payment request.");
+  }
+  return response;
 }
 
 export function buildPaymentUrl(req: PaymentRequest): string {
@@ -268,7 +350,41 @@ export interface WalletPaymentUriRequest {
 
 export interface PaymentQrValueRequest extends WalletPaymentUriRequest {
   receiveCoin?: string | null;
+  /** Merchant's exact target output amount for a cross-currency checkout. */
+  receiveAmount?: string | null;
   paymentUrl: string;
+}
+
+function signedHostedPaymentUrlForRequest(request: PaymentQrValueRequest): string {
+  try {
+    const parsed = new URL(request.paymentUrl);
+    const expectedOrigin = new URL(buildClientAppUrl("/")).origin;
+    if (parsed.origin !== expectedOrigin) return "";
+    const match = parsed.pathname.match(/^\/(?:wallet\/)?pay\/([^/]+)$/);
+    const checkout = match ? decodeCheckoutPayload(match[1]) : null;
+    if (!checkout?.signed) return "";
+
+    const expectedPayCoin = String(request.coin || "").trim().toUpperCase();
+    const expectedReceiveCoin = String(request.receiveCoin || "").trim().toUpperCase();
+    const expectedPayAmount = normalizeDecimalAmountText(String(request.amount || ""));
+    const expectedReceiveAmount = normalizeDecimalAmountText(String(request.receiveAmount || ""));
+    const signedPayAmount = normalizeDecimalAmountText(String(checkout.request.payAmount || ""));
+    const signedReceiveAmount = normalizeDecimalAmountText(String(checkout.request.amount || ""));
+    const expectedChainId = request.chainId || LIVE_PAYMENT_CHAIN_ID;
+    const signedChainId = checkout.request.chainId || LIVE_PAYMENT_CHAIN_ID;
+
+    if (
+      checkout.request.receiverAddress.toLowerCase() !== request.receiverAddress.trim().toLowerCase()
+      || String(checkout.request.payCoin || "").toUpperCase() !== expectedPayCoin
+      || checkout.request.receiveCoin.toUpperCase() !== expectedReceiveCoin
+      || signedPayAmount !== expectedPayAmount
+      || signedReceiveAmount !== expectedReceiveAmount
+      || signedChainId !== expectedChainId
+    ) return "";
+    return request.paymentUrl;
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -320,19 +436,24 @@ export function buildWalletPaymentUri({
 }
 
 /**
- * QR codes default to a direct ERC-20 transfer for the selected customer coin.
- * Wallet-scanner amounts are still user-editable in many wallets, so the
- * backend must confirm the exact token, recipient, chain, and amount on-chain.
- *
- * Returns "" when a wallet URI cannot be built — never the http payment link.
- * Falling back to the web link silently turned a scan-and-pay code into a
- * "scan, open a browser, then pay" code: the payment still worked, so nobody
- * noticed, but it is not the product. A caller that gets "" must show that the
- * QR is unavailable rather than render a link the merchant believes is a
- * payment request. The http link remains correct for the Pay button and for
- * copy-link sharing — it is only wrong inside a QR.
+ * Same-token payments can use a direct EIP-681 request. A receive-only or
+ * cross-currency QR must instead open the signed hosted checkout: PayPage is
+ * where the payer selects a token and, when needed, obtains and signs a current
+ * Sera quote before its output is paid directly to the merchant. Encoding the
+ * input token as a direct transfer would bypass the swap completely. An
+ * invalid or stale signed URL is refused rather than silently displayed for a
+ * different request.
  */
 export function buildPaymentQrValue(request: PaymentQrValueRequest): string {
+  const payCoin = String(request.coin || "").trim().toUpperCase();
+  const receiveCoin = String(request.receiveCoin || "").trim().toUpperCase();
+  // A receive-only request deliberately leaves the payment coin open for the
+  // payer to choose on PayPage. It cannot be represented by EIP-681 without
+  // silently forcing a token the merchant did not select, so it follows the
+  // same signed-hosted-checkout path as a cross-currency conversion.
+  if (receiveCoin && (!payCoin || payCoin !== receiveCoin)) {
+    return signedHostedPaymentUrlForRequest(request);
+  }
   return buildWalletPaymentUri(request);
 }
 

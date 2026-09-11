@@ -98,7 +98,7 @@ export interface CheckoutSession {
   coin: string;
   chainId: number;
   checkoutUrl: string;
-  status: "created" | "open" | "paid" | "expired" | "canceled" | "failed";
+  status: "created" | "open" | "processing" | "paid" | "expired" | "canceled" | "failed";
   subWalletId?: string | null;
   customerEmail?: string | null;
   customerName?: string | null;

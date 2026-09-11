@@ -18,11 +18,36 @@ import {
   updateUserNameByWallet,
   upsertUser,
   createTransaction,
+  createDirectTransactionWithReservation,
   getTransactionById,
+  getActiveSeraSwapTransactionByCheckoutAttemptKey,
   getTransactionByHash,
   updateTransaction,
+  claimDirectTransactionNotification,
+  claimDirectTransactionCancellation,
+  claimDirectTransactionConfirmation,
+  claimDirectTransactionFailure,
+  releaseTentativeDirectTransactionHash,
+  updateSeraSwapLifecycle,
+  refreshSeraSwapQuote,
+  claimSeraSwapSubmission,
+  claimSeraSwapCancellation,
+  reopenSeraSwapAfterStaleRejection,
+  claimSeraSwapSettlementConfirmation,
+  markSeraIntentMatchedEvidence,
+  claimSeraSwapProvisionalSettlement,
+  clearSeraSwapProvisionalSettlement,
+  claimSeraSwapTerminalFailure,
+  claimSeraSwapPostNetworkUpdate,
+  prepareSeraSwapOutcomeSync,
+  completeSeraSwapOutcomeSync,
   getMerchantTransactions,
   getPendingTransactions,
+  getPendingSeraSwapTransactions,
+  getRecentPendingSeraSwapTransactions,
+  getUnsyncedSeraSwapOutcomes,
+  deferSeraSwapOutcomeSync,
+  getSeraVaultAddressesForChain,
   createWebhookLog,
   getMerchantWebhookLogs,
   getTransactionsByFromAddress,
@@ -34,6 +59,7 @@ import {
   hashMerchantApiKey,
   updatePaymentIntent,
   updateMenuOrderPayment,
+  updateDirectLinkedPaymentStatus,
 } from "./db";
 import { screenWalletAddress } from "./compliance";
 import { ENV } from "./_core/env";
@@ -42,9 +68,30 @@ import { isR2StorageConfigured, storagePut, storageRead } from "./storage";
 import { decryptSecret } from "./secret-vault";
 import { notePairResult } from "./pair-liquidity";
 import { hashSeraIntentStruct, SERA_INTENT_TYPES, type SeraIntentMessage } from "./sera-intent";
-import { PaymentBindingError, assertAmountMatchesReference, assertMenuOrderBindable, assertPaymentIntentBindable } from "./payment-binding";
+import { PaymentBindingError, assertAmountMatchesReference, assertMenuOrderBindable, assertPaymentIntentBindable, sameMicroAmount } from "./payment-binding";
 import { CheckoutPayloadError, isCheckoutSigningReady, signCheckoutPayload, verifyCheckoutPayload } from "./checkout-payload";
 import { issueDashboardSession, verifyDashboardSession } from "./dashboard-session";
+import { isDirectTransferCandidate, isSeraSwapTransactionRecord } from "./payment-transaction-kind";
+import { selectDirectTransferEvidence, type DecodedErc20TransferEvidence } from "./direct-transfer-evidence";
+import {
+  SeraQuoteValidationError,
+  serializeSeraQuoteError,
+  solveSeraFixedOutputQuote,
+  toSeraPreflightSummary,
+  validateSeraDeploymentConfig,
+  type SeraFixedOutputPolicy,
+  type SeraSwapQuoteRequest,
+} from "./sera-swap-quote";
+import { SeraSettlementValidationError, validateSeraSettledOrder } from "./sera-settlement";
+import { corroborateSeraIntentPayout } from "./sera-onchain-settlement";
+import { validateSeraSubmissionAnchor } from "./sera-submission-anchor";
+import { deriveSeraCheckoutAttemptKey } from "./sera-checkout-attempt";
+import {
+  classifySeraSettlementObservationStage,
+  isCanonicalSuccessfulSeraSettlement,
+  parseSeraProvisionalConfirmations,
+  seraProvisionalSettlementScanHead,
+} from "./sera-confirmation-policy";
 import {
   DEFAULT_SERA_API_BASE_URL,
   DEFAULT_SERA_API_TESTNET_BASE_URL,
@@ -63,6 +110,7 @@ const PENDING_TRANSACTION_CANCEL_AFTER_MS = 5 * 60 * 1000;
 const SERA_TESTNET_CHAIN_ID = sepolia.id;
 const SERA_MAINNET_CHAIN_ID = mainnet.id;
 const COIN_SYMBOL_RE = /^[A-Z0-9]{2,20}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Testnet is reachable only when SERA_ENABLE_TESTNET=true on the server. */
 function isTestnetChainEnabled(chainId?: number | null): boolean {
@@ -88,7 +136,7 @@ function transactionToJson(tx: Transaction) {
     paymentUrl: typeof meta?.paymentUrl === "string" ? meta.paymentUrl : null,
     orderId: typeof meta?.orderId === "string" ? meta.orderId : null,
     paymentIntentId: typeof meta?.paymentIntentId === "string" ? meta.paymentIntentId : null,
-    quoteUuid: typeof meta?.quoteUuid === "string" ? meta.quoteUuid : null,
+    quoteUuid: tx.quoteUuid ?? (typeof meta?.quoteUuid === "string" ? meta.quoteUuid : null),
     paymentSource: typeof meta?.source === "string"
       ? meta.source
       : typeof meta?.type === "string"
@@ -135,17 +183,54 @@ type SeraSwapQuote = {
   [key: string]: unknown;
 };
 
-type SeraConfigResponse = {
-  chain_id?: number;
-  sera_address?: string;
-  vault_address?: string;
-  sor_address?: string;
-  eip712_domain?: Record<string, unknown>;
-};
-
 type SeraSystemTimeResponse = {
   timestamp?: number;
 };
+
+// Deterministic throwaway identity used only before a payer is known. No
+// private key is held or needed: preflight quotes are always discarded.
+const DEFAULT_SERA_PREFLIGHT_PROBE_ADDRESS = "0x7a49ae7c534d3907fb78d96ba0f9863c1b12e51d";
+
+function getSeraPreflightProbeAddress(): `0x${string}` {
+  const address = (ENV.seraPreflightProbeAddress || DEFAULT_SERA_PREFLIGHT_PROBE_ADDRESS).trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(address) || /^0x0{40}$/.test(address)) {
+    throw new SeraQuoteValidationError(
+      "invalid_config",
+      "SERA_PREFLIGHT_PROBE_ADDRESS must be a non-zero EVM address",
+      { field: "SERA_PREFLIGHT_PROBE_ADDRESS" },
+    );
+  }
+  return address as `0x${string}`;
+}
+
+function getSeraFixedOutputPolicy(): SeraFixedOutputPolicy | undefined {
+  const policy: SeraFixedOutputPolicy = {};
+  const maxGasCostUsd = ENV.seraMaxGasCostUsd.trim();
+  if (maxGasCostUsd) {
+    if (!/^\d+(?:\.\d+)?$/.test(maxGasCostUsd)) {
+      throw new SeraQuoteValidationError(
+        "invalid_config",
+        "SERA_MAX_GAS_COST_USD must be a non-negative decimal",
+        { field: "SERA_MAX_GAS_COST_USD" },
+      );
+    }
+    policy.maxGasCostUsd = maxGasCostUsd;
+  }
+
+  const maxInputDeviation = ENV.seraMaxQuoteInputDeviationBps.trim();
+  if (maxInputDeviation) {
+    const bps = Number(maxInputDeviation);
+    if (!/^\d+$/.test(maxInputDeviation) || !Number.isSafeInteger(bps) || bps > 1_000_000) {
+      throw new SeraQuoteValidationError(
+        "invalid_config",
+        "SERA_MAX_QUOTE_INPUT_DEVIATION_BPS must be an integer from 0 to 1000000",
+        { field: "SERA_MAX_QUOTE_INPUT_DEVIATION_BPS" },
+      );
+    }
+    policy.maxInputIncreaseBps = bps;
+  }
+  return Object.keys(policy).length > 0 ? policy : undefined;
+}
 
 async function getSeraServerTimestamp(baseUrl: string, merchantId?: string | null): Promise<number> {
   const response = await callSeraApi<SeraSystemTimeResponse>({
@@ -159,6 +244,75 @@ async function getSeraServerTimestamp(baseUrl: string, merchantId?: string | nul
     throw new Error("Sera /system/time did not return a valid timestamp");
   }
   return timestamp;
+}
+
+const SERA_DEPLOYMENT_CACHE_TTL_MS = 5 * 60 * 1000;
+const seraDeploymentCache = new Map<number, {
+  deployment: ReturnType<typeof validateSeraDeploymentConfig>;
+  expiresAt: number;
+}>();
+const seraDeploymentInFlight = new Map<number, Promise<ReturnType<typeof validateSeraDeploymentConfig>>>();
+
+/**
+ * Generic ERC-20 scanners must know the live Sera Vault address. Otherwise a
+ * Vault payout can race swap reconciliation and be recorded as a second,
+ * unrelated direct payment that owns the settlement hash.
+ */
+async function getSeraDeploymentForChain(chainId: number, merchantId?: string | null) {
+  const cached = seraDeploymentCache.get(chainId);
+  if (cached && cached.expiresAt > Date.now()) return cached.deployment;
+  const existing = seraDeploymentInFlight.get(chainId);
+  if (existing) return existing;
+  const request = callSeraApi<unknown>({
+      baseUrl: getSeraApiBaseUrlForChain(chainId),
+      path: "/config",
+      authMode: "none",
+      merchantId,
+    })
+    .then((rawConfig) => {
+      const deployment = validateSeraDeploymentConfig(rawConfig, chainId);
+      seraDeploymentCache.set(chainId, { deployment, expiresAt: Date.now() + SERA_DEPLOYMENT_CACHE_TTL_MS });
+      return deployment;
+    })
+    .finally(() => {
+      if (seraDeploymentInFlight.get(chainId) === request) seraDeploymentInFlight.delete(chainId);
+    });
+  seraDeploymentInFlight.set(chainId, request);
+  return request;
+}
+
+class SeraVaultPayoutExcludedError extends Error {
+  constructor() {
+    super("Sera Vault payouts are reserved for swap settlement reconciliation");
+    this.name = "SeraVaultPayoutExcludedError";
+  }
+}
+
+async function getSeraVaultExclusionSet(chainId: number, merchantId?: string | null): Promise<ReadonlySet<string>> {
+  // The live config covers a deployment before its first quote. Durable
+  // quote-time addresses cover both sides of a rotation (including after a
+  // process restart), so a payout from any historical Sera Vault can never be
+  // claimed by the generic direct-transfer path.
+  const [deployment, historicalVaults] = await Promise.all([
+    getSeraDeploymentForChain(chainId, merchantId),
+    getSeraVaultAddressesForChain(chainId),
+  ]);
+  return new Set([
+    deployment.vaultAddress.toLowerCase(),
+    ...historicalVaults.map((address) => address.toLowerCase()),
+  ]);
+}
+
+async function assertDirectTransferSender(fromAddress: string | null | undefined, chainId: number) {
+  // A standard ERC-20 Transfer always exposes `from`. Fail closed if a
+  // non-standard log does not, rather than letting it bypass the Vault guard.
+  if (!fromAddress || !/^0x[0-9a-fA-F]{40}$/.test(fromAddress)) {
+    throw new Error("Direct transfer sender is unavailable");
+  }
+  const excludedVaults = await getSeraVaultExclusionSet(chainId);
+  if (excludedVaults.has(fromAddress.toLowerCase())) {
+    throw new SeraVaultPayoutExcludedError();
+  }
 }
 
 // In-memory SSE clients: txId → Set<Response>
@@ -912,7 +1066,20 @@ paymentRouter.patch("/merchant/transactions/:id/notes", requireApiKey as any, as
     const tx = await getTransactionById(id);
     if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
     if (tx.merchantId !== req.merchant.id) { res.status(403).json({ error: "Forbidden" }); return; }
-    await updateTransaction(id, { notes: notes ?? tx.notes, memo: memo ?? tx.memo });
+    // Sera notes contain the durable quote, Intent, deployment, and linked
+    // order references used for recovery. Keep merchant annotations in `memo`;
+    // replacing the internal JSON could make a submitted payment impossible
+    // to reconcile after a restart.
+    if (isSeraSwapTransaction(tx) && notes !== undefined && notes !== tx.notes) {
+      res.status(409).json({
+        error: "Sera swap recovery metadata cannot be edited. Use memo for merchant notes.",
+      });
+      return;
+    }
+    const patch: { notes?: string | null; memo?: string | null } = {};
+    if (!isSeraSwapTransaction(tx) && notes !== undefined) patch.notes = notes;
+    if (memo !== undefined) patch.memo = memo;
+    if (Object.keys(patch).length > 0) await updateTransaction(id, patch);
     res.json({ ok: true });
   } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
@@ -928,7 +1095,11 @@ paymentRouter.patch("/merchant/transactions/:id/cancel", requireApiKey as any, a
       res.status(409).json({ error: "Only pending or confirming transactions can be canceled" });
       return;
     }
-    await cancelTransactionRecord(tx, "Canceled by merchant.", "transaction_canceled");
+    const canceled = await cancelTransactionRecord(tx, "Canceled by merchant.", "transaction_canceled");
+    if (!canceled) {
+      res.status(409).json({ error: "A submitted Sera swap cannot be canceled; settlement reconciliation is still in progress." });
+      return;
+    }
     res.json({ ok: true, status: "canceled" });
   } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
@@ -1030,6 +1201,21 @@ async function resolveSeraTokenBySymbol(baseUrl: string, symbol: string): Promis
   const token = registry.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase());
   if (!token) throw new Error(`Unsupported Sera token: ${symbol}`);
   return token;
+}
+
+async function resolveSeraSwapToken(baseUrl: string, symbol: string): Promise<SeraToken> {
+  try {
+    return await resolveSeraTokenBySymbol(baseUrl, symbol);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Unsupported Sera token:")) {
+      throw new SeraQuoteValidationError(
+        "unsupported_token",
+        `${symbol.toUpperCase()} is not available in Sera's token registry`,
+        { field: "coin", detail: { symbol: symbol.toUpperCase() } },
+      );
+    }
+    throw error;
+  }
 }
 
 async function resolveSeraTokenForChain(chainId: number, symbol: string): Promise<SeraToken> {
@@ -1162,18 +1348,31 @@ function notesWithFailureReason(notes: string | null | undefined, reason: string
 
 async function cancelTransactionRecord(tx: Transaction, reason: string, event: "transaction_auto_canceled" | "transaction_canceled") {
   if (tx.status !== "pending" && tx.status !== "confirming") return false;
-  const meta = transactionNotesMeta(tx.notes);
-  await updateTransaction(tx.id, {
-    status: "canceled",
-    memo: tx.memo || reason.slice(0, 200),
-    notes: notesWithCancellationReason(tx.notes, reason),
-  });
-  if (meta.orderId) {
-    await updateMenuOrderPayment(meta.orderId, tx.merchantId, { status: "canceled", paymentId: tx.id, transactionId: tx.id }).catch(() => undefined);
+  // Once a single-use quote may have reached Sera, cancellation is only a UI
+  // label and cannot stop its atomic on-chain settlement. Keep reconciling it.
+  if (isSeraSwapTransaction(tx) && tx.submitState && tx.submitState !== "quote_ready") return false;
+  if (isSeraSwapTransaction(tx)) {
+    if (!tx.quoteUuid || !tx.intentHash || tx.submitState !== "quote_ready") return false;
+    const cancellation = await claimSeraSwapCancellation({
+      transactionId: tx.id,
+      quoteUuid: tx.quoteUuid,
+      intentHash: tx.intentHash,
+      memo: tx.memo || reason.slice(0, 200),
+      notes: notesWithCancellationReason(tx.notes, reason),
+    });
+    if (cancellation.outcome !== "claimed") return false;
+    tx = cancellation.transaction;
+  } else {
+    const cancellation = await claimDirectTransactionCancellation({
+      transactionId: tx.id,
+      memo: tx.memo || reason.slice(0, 200),
+      notes: notesWithCancellationReason(tx.notes, reason),
+    });
+    if (cancellation.outcome !== "claimed") return false;
+    tx = cancellation.transaction;
   }
-  if (meta.paymentIntentId) {
-    await updatePaymentIntent(meta.paymentIntentId, { status: "canceled" }).catch(() => undefined);
-  }
+  // Both Sera and direct branches atomically changed any still-owned linked
+  // resource before returning `claimed`; only that winner emits effects.
   notifySseClients(tx.id, { status: "canceled", reason });
   notifyMerchantSse(tx.merchantId, {
     event,
@@ -1187,18 +1386,48 @@ async function cancelTransactionRecord(tx: Transaction, reason: string, event: "
 }
 
 async function failTransactionRecord(tx: Transaction, reason: string) {
-  if (tx.status !== "pending" && tx.status !== "confirming") return false;
-  const meta = transactionNotesMeta(tx.notes);
-  await updateTransaction(tx.id, {
-    status: "failed",
+  if (isSeraSwapTransaction(tx) || tx.status !== "confirming" || !tx.txHash) return false;
+  const failureNotes = notesWithFailureReason(tx.notes, reason);
+  const claim = await claimDirectTransactionFailure({
+    transactionId: tx.id,
+    txHash: tx.txHash,
     memo: tx.memo || reason.slice(0, 200),
-    notes: notesWithFailureReason(tx.notes, reason),
+    notes: failureNotes,
   });
-  if (meta.orderId) {
-    await updateMenuOrderPayment(meta.orderId, tx.merchantId, { status: "failed", paymentId: tx.id, transactionId: tx.id }).catch(() => undefined);
-  }
-  if (meta.paymentIntentId) {
-    await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
+  if (claim.outcome !== "claimed") return false;
+  await emitTransactionFailureSideEffects(claim.transaction, reason);
+  return true;
+}
+
+async function releaseRejectedDirectSubmission(
+  tx: Transaction,
+  txHash: `0x${string}`,
+  reason: string,
+  errorCode: string,
+) {
+  const release = await releaseTentativeDirectTransactionHash({
+    transactionId: tx.id,
+    txHash,
+  });
+  if (release.outcome !== "released") return false;
+  notifySseClients(tx.id, { status: "pending", errorCode, reason });
+  return true;
+}
+
+/**
+ * Emits the linked-order and realtime effects for a failure whose state change
+ * has already been won. Terminal Sera failure uses a database CAS, so keeping
+ * these effects separate prevents two reconcilers from announcing the same
+ * failure or racing a successful on-chain settlement.
+ */
+async function emitTransactionFailureSideEffects(tx: Transaction, reason: string) {
+  const meta = transactionNotesMeta(tx.notes);
+  if (meta.orderId || meta.paymentIntentId) {
+    await updateDirectLinkedPaymentStatus({
+      transactionId: tx.id,
+      merchantId: tx.merchantId,
+      status: "failed",
+    }).catch(() => undefined);
   }
   notifySseClients(tx.id, { status: "failed", reason });
   notifyMerchantSse(tx.merchantId, {
@@ -1209,7 +1438,6 @@ async function failTransactionRecord(tx: Transaction, reason: string) {
     coin: tx.coin,
     reason,
   });
-  return true;
 }
 
 async function cancelStaleMerchantTransactions(merchantId: string, transactions?: Transaction[]) {
@@ -1238,27 +1466,49 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
 }
 
 function seraPaymentErrorResponse(error: unknown, fallback: string) {
+  const quoteError = serializeSeraQuoteError(error);
+  if (quoteError) return quoteError;
   if (error instanceof SeraApiError) {
-    const code = error.errorCode;
-    const isQuoteStale = error.status === 409
-      || error.status === 410
-      || code === "QUOTE_STALE"
-      || code === "quote_stale";
+    const providerCode = String(error.errorCode || "").toUpperCase();
+    const isQuoteStale = providerCode === "QUOTE_STALE";
     const isUnavailable = error.status >= 500;
-    const message = code === "no_liquidity" || code === "NO_LIQUIDITY"
+    const stableCode = providerCode === "NO_LIQUIDITY" || providerCode === "PAIR_INACTIVE"
+      ? "no_liquidity"
+      : providerCode === "AMOUNT_BELOW_MIN"
+        ? "amount_below_min"
+        : isQuoteStale || error.status === 410
+          ? "quote_stale"
+          : providerCode === "ALLOWANCE_INSUFFICIENT"
+            ? "allowance_insufficient"
+            : providerCode === "INTENT_DEADLINE_EXPIRED"
+              ? "intent_deadline_expired"
+              : providerCode === "SLIPPAGE_EXCEEDED"
+                ? "slippage_exceeded"
+                : providerCode === "STP_BLOCKED"
+                  ? "stp_blocked"
+                  : error.status === 429
+                    ? "sera_rate_limited"
+                    : isUnavailable
+                      ? "sera_unavailable"
+                      : providerCode
+                        ? providerCode.toLowerCase()
+                        : "invalid_quote";
+    const message = stableCode === "no_liquidity"
       ? "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."
-      : isQuoteStale
+      : stableCode === "quote_stale"
         ? "This quote closed before it could be submitted. Please try again."
-      : isUnavailable
-        ? "Sera is temporarily unavailable. Please try again shortly."
-        : code === "AMOUNT_BELOW_MIN"
-          ? "This payment amount is below Sera's minimum for this currency pair."
-          : fallback;
+        : stableCode === "sera_unavailable"
+          ? "Sera is temporarily unavailable. Please try again shortly."
+          : stableCode === "sera_rate_limited"
+            ? "Sera is receiving too many requests. Please try again shortly."
+            : stableCode === "amount_below_min"
+              ? "This payment amount is below Sera's minimum for this currency pair."
+              : fallback;
     return {
-      status: error.status >= 400 && error.status < 500 ? error.status : 502,
+      status: error.status >= 400 && error.status < 500 ? error.status : 503,
       body: {
         error: message,
-        errorCode: isQuoteStale ? "quote_stale" : code ?? (isUnavailable ? "sera_connection_error" : null),
+        errorCode: stableCode,
         seraStatus: error.status,
       },
     };
@@ -1267,7 +1517,7 @@ function seraPaymentErrorResponse(error: unknown, fallback: string) {
     status: 502,
     body: {
       error: "Unable to reach Sera right now. Please try again shortly.",
-      errorCode: "sera_connection_error",
+      errorCode: "sera_unavailable",
     },
   };
 }
@@ -1279,6 +1529,13 @@ function logSeraOperationFailure(scope: string, error: unknown) {
     return;
   }
   console.error(`[${scope}] failed`, { type: error instanceof Error ? error.name : "unknown_error" });
+}
+
+function errorHasDatabaseConstraint(error: unknown, constraint: string, depth = 0): boolean {
+  if (!error || typeof error !== "object" || depth > 5) return false;
+  const value = error as Record<string, unknown>;
+  return value.constraint === constraint
+    || errorHasDatabaseConstraint(value.cause, constraint, depth + 1);
 }
 
 async function cancelAllStalePendingTransactions() {
@@ -1345,16 +1602,67 @@ async function sweepPendingMerchantDirectActivity() {
   }
 }
 
-setInterval(() => {
-  void (async () => {
+let paymentMaintenanceInFlight: Promise<void> | null = null;
+let seraOutcomeRecoveryTickInFlight: Promise<void> | null = null;
+let seraSettlementReconciliationTickInFlight: Promise<void> | null = null;
+
+function schedulePaymentMaintenance() {
+  if (paymentMaintenanceInFlight) return;
+  const run = (async () => {
     // Detect arrivals *before* expiring anything: a payment that landed moments
     // before the staleness cutoff must be confirmed, not cancelled out from
     // under the customer who just sent real funds.
     await sweepPendingMerchantDirectActivity();
     await cancelAllStalePendingTransactions();
     await reverifyConfirmingTransactions();
-  })();
-}, 60_000);
+  })().finally(() => {
+    if (paymentMaintenanceInFlight === run) paymentMaintenanceInFlight = null;
+  });
+  paymentMaintenanceInFlight = run;
+}
+
+function scheduleSeraOutcomeRecovery() {
+  if (seraOutcomeRecoveryTickInFlight) return;
+  const run = recoverUnsyncedSeraSwapOutcomes().finally(() => {
+    if (seraOutcomeRecoveryTickInFlight === run) seraOutcomeRecoveryTickInFlight = null;
+  });
+  seraOutcomeRecoveryTickInFlight = run;
+}
+
+function scheduleSeraSettlementReconciliation() {
+  if (seraSettlementReconciliationTickInFlight) return;
+  const run = (async () => {
+    // The hot queue is newest-first and bounded, keeping fresh checkouts under
+    // the latency target without blasting every historical recovery row at the
+    // RPC. The existing 60-second oldest-first Sera queue still guarantees
+    // eventual recovery and prevents old submissions from starving.
+    const candidates = await getRecentPendingSeraSwapTransactions(100);
+    const concurrency = 4;
+    for (let index = 0; index < candidates.length; index += concurrency) {
+      await Promise.allSettled(candidates.slice(index, index + concurrency).map(async (transaction) => {
+        await reconcileSeraSwapOnChain(transaction, parseSeraTransactionNotes(transaction.notes)).catch((error) => {
+          logSeraOperationFailure("payments/swap-fast-reconcile", error);
+        });
+      }));
+    }
+  })().catch((error) => {
+    logSeraOperationFailure("payments/swap-fast-reconcile", error);
+  }).finally(() => {
+    if (seraSettlementReconciliationTickInFlight === run) {
+      seraSettlementReconciliationTickInFlight = null;
+    }
+  });
+  seraSettlementReconciliationTickInFlight = run;
+}
+
+const paymentMaintenanceInterval = setInterval(schedulePaymentMaintenance, 60_000);
+const seraOutcomeRecoveryInterval = setInterval(scheduleSeraOutcomeRecovery, 15_000);
+const seraSettlementReconciliationInterval = process.env.NODE_ENV === "test"
+  ? null
+  : setInterval(scheduleSeraSettlementReconciliation, 5_000);
+paymentMaintenanceInterval.unref();
+seraOutcomeRecoveryInterval.unref();
+seraSettlementReconciliationInterval?.unref();
 
 /**
  * Re-checks every "confirming" row on the server's own clock.
@@ -1367,52 +1675,262 @@ setInterval(() => {
  */
 async function reverifyConfirmingTransactions() {
   try {
-    const pending = await getPendingTransactions();
+    const [pending, pendingSeraSwaps] = await Promise.all([
+      getPendingTransactions(),
+      getPendingSeraSwapTransactions(),
+    ]);
     // A week covers any realistic gap between a payment landing and a deploy
     // that can finally verify it — real stuck rows deserve capture, not
     // abandonment. Older rows are structural leftovers (dead test data, an
     // unindexable hash); the per-tx backoff already keeps their retries and
     // log lines rare.
+    // Sera rows deliberately bypass this legacy direct-transfer cutoff: once
+    // payer funds may have moved, age alone can never abandon reconciliation.
     const reverifyCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    for (const tx of pending) {
-      if (tx.status !== "confirming") continue;
-      if (new Date(tx.createdAt).getTime() < reverifyCutoff) continue;
-      if (isSeraSwapTransaction(tx)) {
-        await reconcileSeraSwapTransaction(tx).catch((error) => logSeraOperationFailure("payments/reverify-swap", error));
-      } else if (tx.txHash && /^0x[0-9a-fA-F]{64}$/.test(tx.txHash)) {
-        // Fire-and-forget with a per-tx in-flight guard, so a slow receipt
-        // wait never stacks a second watcher for the same payment.
-        scheduleTransactionVerification(tx.id, tx.txHash as `0x${string}`);
-      }
+    // The generic queue is newest-first and capped for direct-payment sweep
+    // latency. Merge its direct rows with an oldest-first Sera recovery queue
+    // so a submitted swap cannot be starved by newer traffic.
+    const byId = new Map([...pending, ...pendingSeraSwaps].map((tx) => [tx.id, tx]));
+    const candidates = Array.from(byId.values()).filter((tx) => tx.status === "confirming");
+    const concurrency = 4;
+    for (let index = 0; index < candidates.length; index += concurrency) {
+      await Promise.allSettled(candidates.slice(index, index + concurrency).map(async (tx) => {
+        if (isSeraSwapTransaction(tx)) {
+          await reconcileSeraSwapTransaction(tx).catch((error) => {
+            logSeraOperationFailure("payments/reverify-swap", error);
+          });
+        } else if (
+          new Date(tx.createdAt).getTime() >= reverifyCutoff
+          && tx.txHash
+          && /^0x[0-9a-fA-F]{64}$/.test(tx.txHash)
+        ) {
+          // Fire-and-forget with a per-tx in-flight guard, so a slow receipt
+          // wait never stacks a second watcher for the same payment.
+          scheduleTransactionVerification(tx.id, tx.txHash as `0x${string}`);
+        }
+      }));
     }
   } catch (error) {
     logSeraOperationFailure("payments/reverify", error);
   }
 }
 
+const seraOutcomeEffectsInFlight = new Map<string, Promise<Transaction | undefined>>();
+
+function seraOutcomeDisplayAmount(
+  rawAmount: string | null | undefined,
+  decimals: number | null | undefined,
+  fallback: string | number,
+): string {
+  if (rawAmount != null && parseStoredTokenDecimals(decimals) != null) {
+    try {
+      return fromRawTokenAmount(rawAmount, decimals!);
+    } catch {
+      // Legacy rows can contain malformed optional accounting fields. The
+      // merchant's protected transaction amount remains the safe fallback.
+    }
+  }
+  return String(fallback);
+}
+
+async function performSeraSwapOutcomeEffects(
+  transactionId: string,
+  knownMerchant?: Merchant,
+): Promise<Transaction | undefined> {
+  // Failure may be superseded exactly once by an authoritative on-chain
+  // success. Loop so the success notification is the final observable event
+  // even when it wins while a stale failure worker is finishing.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const prepared = await prepareSeraSwapOutcomeSync(transactionId);
+    if (prepared.outcome === "not_found") return undefined;
+    if (prepared.outcome === "already_synced" || prepared.outcome === "invalid_state") {
+      return prepared.transaction;
+    }
+    if (prepared.outcome === "binding_conflict") {
+      console.error("[payment/swap/outcome] Refused conflicting linked-payment binding", {
+        transactionId,
+        resource: prepared.resource,
+        resourceId: prepared.resourceId,
+      });
+      // Keep this row unsynced for operator repair, but rotate it behind other
+      // due outcomes so 100 poisoned rows cannot starve every newer webhook.
+      await deferSeraSwapOutcomeSync(transactionId);
+      return prepared.transaction;
+    }
+    if (prepared.outcome !== "prepared") return prepared.transaction;
+
+    const transaction = prepared.transaction;
+    const terminalOutcome = prepared.terminalOutcome;
+    const latest = await getTransactionById(transaction.id);
+    if (!latest) return undefined;
+
+    // If the terminal fingerprint changed after preparation, do not emit the
+    // stale event. Completion will report state_changed and the loop will
+    // prepare the authoritative outcome instead.
+    const stillCurrent = terminalOutcome.kind === "confirmed"
+      ? latest.status === "confirmed"
+        && latest.verified === 1
+        && latest.submitState === "settled"
+        && latest.txHash?.toLowerCase() === terminalOutcome.txHash
+        && latest.settlementTxHash?.toLowerCase() === terminalOutcome.txHash
+      : latest.status === "failed"
+        && latest.verified === 0
+        && latest.submitState === "failed"
+        && latest.failureCode === terminalOutcome.failureCode
+        && latest.txHash == null
+        && latest.settlementTxHash == null;
+
+    let webhookRequested = false;
+    let webhookDelivered = false;
+    if (stillCurrent) {
+      const merchant = knownMerchant?.id === latest.merchantId
+        ? knownMerchant
+        : await getMerchantById(latest.merchantId);
+      if (!merchant) throw new Error("Merchant for terminal Sera outcome was not found");
+
+      if (terminalOutcome.kind === "confirmed") {
+        const amount = seraOutcomeDisplayAmount(
+          latest.actualReceiveAmountRaw,
+          latest.receiveTokenDecimals,
+          latest.amount,
+        );
+        const payAmount = seraOutcomeDisplayAmount(
+          latest.actualPayAmountRaw,
+          latest.payTokenDecimals,
+          latest.payAmount ?? amount,
+        );
+        notifySseClients(latest.id, {
+          status: "confirmed",
+          txHash: terminalOutcome.txHash,
+          verified: true,
+        });
+        webhookRequested = Boolean(merchant.webhookUrl);
+        webhookDelivered = await notifyRecordedDirectTransfer({
+          merchant,
+          txId: latest.id,
+          txHash: terminalOutcome.txHash as `0x${string}`,
+          coin: latest.coin,
+          amount,
+          payCoin: latest.payCoin || latest.coin,
+          payAmount,
+          fromAddress: latest.fromAddress,
+          toAddress: latest.toAddress,
+          verified: true,
+          source: "sera_swap",
+        });
+      } else {
+        const reason = transactionFailureReason(latest.notes) || "Sera swap settlement failed.";
+        notifySseClients(latest.id, { status: "failed", reason });
+        notifyMerchantSse(merchant.id, {
+          event: "payment_failed",
+          transactionId: latest.id,
+          status: "failed",
+          amount: latest.amount,
+          coin: latest.coin,
+          reason,
+          source: "sera_swap",
+        });
+      }
+    }
+
+    const completed = await completeSeraSwapOutcomeSync({
+      transactionId: transaction.id,
+      terminalOutcome,
+      webhookRequested,
+      webhookDelivered,
+    });
+    if (completed.outcome !== "state_changed") return completed.transaction;
+  }
+
+  return getTransactionById(transactionId);
+}
+
+async function deliverSeraSwapOutcomeEffects(
+  tx: Transaction,
+  merchant?: Merchant,
+): Promise<Transaction | undefined> {
+  const existing = seraOutcomeEffectsInFlight.get(tx.id);
+  if (existing) return existing;
+  const delivery = performSeraSwapOutcomeEffects(tx.id, merchant);
+  seraOutcomeEffectsInFlight.set(tx.id, delivery);
+  try {
+    return await delivery;
+  } finally {
+    if (seraOutcomeEffectsInFlight.get(tx.id) === delivery) {
+      seraOutcomeEffectsInFlight.delete(tx.id);
+    }
+  }
+}
+
+async function recoverUnsyncedSeraSwapOutcomes() {
+  try {
+    const outcomes = await getUnsyncedSeraSwapOutcomes();
+    const concurrency = 4;
+    for (let index = 0; index < outcomes.length; index += concurrency) {
+      await Promise.allSettled(outcomes.slice(index, index + concurrency).map((transaction) => (
+        deliverSeraSwapOutcomeEffects(transaction)
+      )));
+    }
+  } catch (error) {
+    logSeraOperationFailure("payments/swap-outcome-recovery", error);
+  }
+}
+
 type SeraTrackedOrder = {
+  trade_id?: string;
+  owner_address?: string;
   status?: string;
+  order_type?: string;
+  from_token?: string;
+  to_token?: string;
   error?: string | null;
   error_code?: string | null;
   settlement_summary?: {
     latest_tx_hash?: string | null;
     latest_failed_fill_failure_reason?: string | null;
   } | null;
+  settlement_economics?: unknown;
+  [key: string]: unknown;
 };
+
+function trackedSeraOrderMatchesPayment(
+  order: SeraTrackedOrder,
+  tx: Transaction,
+  notes: Record<string, unknown>,
+  tradeId: string,
+): boolean {
+  const inputToken = tx.payTokenAddress ?? (typeof notes.payToken === "string" ? notes.payToken : null);
+  const outputToken = tx.receiveTokenAddress ?? (typeof notes.receiveToken === "string" ? notes.receiveToken : null);
+  return Boolean(
+    inputToken
+    && outputToken
+    && tx.fromAddress
+    && order.trade_id === tradeId
+    && String(order.owner_address || "").toLowerCase() === tx.fromAddress.toLowerCase()
+    && String(order.order_type || "").toLowerCase() === "swap"
+    && String(order.from_token || "").toLowerCase() === inputToken.toLowerCase()
+    && String(order.to_token || "").toLowerCase() === outputToken.toLowerCase()
+  );
+}
 
 async function reconcileSeraSwapTransaction(tx: Transaction): Promise<Transaction> {
   if (tx.status !== "confirming") return tx;
-  let notes: Record<string, unknown>;
-  try {
-    notes = tx.notes ? JSON.parse(tx.notes) as Record<string, unknown> : {};
-  } catch {
-    return tx;
-  }
-  const tradeId = typeof notes.tradeId === "string" ? notes.tradeId : null;
-  if (notes.type !== "sera_swap") return tx;
+  if (!isSeraSwapTransaction(tx)) return tx;
+  if (!tx.quoteUuid || !tx.intentHash) return tx;
+  const notes = parseSeraTransactionNotes(tx.notes);
+  const tradeId = tx.tradeId ?? (typeof notes.tradeId === "string" ? notes.tradeId : null);
   // A submit whose answer was lost in transit (see /payment/swap/submit) has
   // no trade id to ask Sera about; the chain is the only witness left.
   if (!tradeId) return reconcileSeraSwapOnChain(tx, notes);
+  const applyOrderEvidence = (patch: Parameters<typeof claimSeraSwapPostNetworkUpdate>[0]["patch"]) => (
+    claimSeraSwapPostNetworkUpdate({
+      transactionId: tx.id,
+      intentHash: tx.intentHash!,
+      quoteUuid: tx.quoteUuid!,
+      expectedTradeId: tradeId,
+      patch,
+    })
+  );
 
   const config = await getApiKeyConfigRecord(tx.merchantId).catch(() => undefined);
   const credential = decryptSecret(config?.seraApiKeyEncrypted) || ENV.seraApiKey || "";
@@ -1433,87 +1951,134 @@ async function reconcileSeraSwapTransaction(tx: Transaction): Promise<Transactio
   }
 
   const seraStatus = String(order.status || "pending").toLowerCase();
-  const txHash = order.settlement_summary?.latest_tx_hash;
   const nextNotes = JSON.stringify({ ...notes, seraStatus, seraOrder: order });
 
-  // Sera is explicit that error_code is the field to branch on and `error` is
-  // display-only. TRANSIENT_SETTLEMENT_FAILURE is documented as retryable
-  // infrastructure noise, so treating it as terminal would abandon a swap that
-  // is still going to settle - and the payer has already parted with funds.
+  // A response for a different owner/token/order must never decide this
+  // payment's state. Keep the public on-chain proof as the recovery path.
+  if (!trackedSeraOrderMatchesPayment(order, tx, notes, tradeId)) {
+    const mismatchNotes = JSON.stringify({
+      ...notes,
+      seraStatus,
+      seraOrderValidationError: "ORDER_IDENTITY_MISMATCH",
+    });
+    const update = await applyOrderEvidence({
+      notes: mismatchNotes,
+      failureCode: "settlement_unknown",
+      seraStatus,
+    });
+    if (update.outcome !== "claimed") return update.outcome === "not_found" ? tx : update.transaction;
+    const refreshed = update.transaction;
+    return reconcileSeraSwapOnChain(refreshed, parseSeraTransactionNotes(mismatchNotes));
+  }
+
+  // Sera's order state is useful operational evidence, but it cannot prove
+  // that no atomic settlement landed on-chain. Even a provider-side
+  // failed/cancelled result therefore remains advisory until a gap-free scan
+  // of finalized blocks reaches the signed Intent deadline.
   const seraErrorCode = String(order.error_code || "").toUpperCase();
   const retryableFailure = seraErrorCode === "TRANSIENT_SETTLEMENT_FAILURE";
-  if ((seraStatus === "failed" || seraStatus === "cancelled") && !retryableFailure) {
+  if (seraStatus === "failed" || seraStatus === "cancelled" || seraStatus === "canceled") {
     const reason = order.error || order.settlement_summary?.latest_failed_fill_failure_reason || order.error_code || `Sera swap ${seraStatus}`;
-    await updateTransaction(tx.id, { notes: nextNotes });
-    await failTransactionRecord({ ...tx, notes: nextNotes }, reason);
-    return await getTransactionById(tx.id) ?? tx;
+    const advisoryNotes = JSON.stringify({
+      ...notes,
+      seraStatus,
+      seraOrder: order,
+      seraOrderTerminalAdvisory: {
+        status: seraStatus,
+        errorCode: seraErrorCode || null,
+        reason,
+        retryable: retryableFailure,
+        observedAt: new Date().toISOString(),
+      },
+    });
+    const update = await applyOrderEvidence({
+      notes: advisoryNotes,
+      tradeId,
+      submitState: "settlement_unknown",
+      seraStatus,
+      failureCode: "settlement_unknown",
+    });
+    if (update.outcome !== "claimed") return update.outcome === "not_found" ? tx : update.transaction;
+    const refreshed = update.transaction;
+    return reconcileSeraSwapOnChain(refreshed, parseSeraTransactionNotes(advisoryNotes));
   }
 
   if (seraStatus !== "settled") {
-    await updateTransaction(tx.id, { notes: nextNotes, ...(txHash && /^0x[0-9a-fA-F]{64}$/.test(txHash) ? { txHash } : {}) });
-    const refreshed = await getTransactionById(tx.id) ?? { ...tx, notes: nextNotes };
+    const update = await applyOrderEvidence({
+      notes: nextNotes,
+      tradeId,
+      submitState: tx.submitState === "settlement_unknown" ? "settlement_unknown" : "submitted",
+      seraStatus,
+      failureCode: tx.submitState === "settlement_unknown" ? "settlement_unknown" : null,
+    });
+    if (update.outcome !== "claimed") return update.outcome === "not_found" ? tx : update.transaction;
+    const refreshed = update.transaction;
     return reconcileSeraSwapOnChain(refreshed, { ...notes, seraStatus, seraOrder: order });
   }
 
-  const verifiedHash = txHash && /^0x[0-9a-fA-F]{64}$/.test(txHash) ? txHash : tx.txHash;
-  await updateTransaction(tx.id, {
-    status: "confirmed",
-    verified: 1,
-    ...(verifiedHash ? { txHash: verifiedHash } : {}),
-    notes: nextNotes,
-    notifiedAt: new Date(),
-    webhookSentAt: new Date(),
-  });
-  const meta = transactionNotesMeta(tx.notes);
-  if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
-  if (meta.orderId) await updateMenuOrderPayment(meta.orderId, tx.merchantId, { status: "paid", paymentId: tx.id, transactionId: tx.id }).catch(() => undefined);
-  notifySseClients(tx.id, { status: "confirmed", txHash: verifiedHash, verified: true, tradeId });
-  notifyMerchantSse(tx.merchantId, {
-    event: "payment_received",
-    transactionId: tx.id,
-    txHash: verifiedHash,
-    amount: tx.amount,
-    coin: tx.coin,
-    payAmount: tx.payAmount,
-    payCoin: tx.payCoin,
-    from: tx.fromAddress,
-    verified: true,
-    source: "sera_swap",
-  });
-
-  const merchant = await getMerchantById(tx.merchantId);
-  if (merchant?.webhookUrl) {
-    sendWebhook(
-      merchant.webhookUrl,
-      merchant.webhookSecret,
-      {
-        event: "payment.confirmed",
-        txId: tx.id,
-        txHash: verifiedHash,
-        coin: tx.coin,
-        amount: tx.amount,
-        payCoin: tx.payCoin,
-        payAmount: tx.payAmount,
-        fromAddress: tx.fromAddress,
-        toAddress: tx.toAddress,
-        verified: true,
-        source: "sera_swap",
-        tradeId,
-      },
-      { merchantId: merchant.id, txId: tx.id, txHash: verifiedHash },
-    ).catch((error) => logSeraOperationFailure("payment-notification", error));
+  if (!tx.fromAddress || !tx.payTokenAddress || !tx.receiveTokenAddress || !tx.targetReceiveAmountRaw) {
+    return reconcileSeraSwapOnChain(tx, notes);
   }
-  return await getTransactionById(tx.id) ?? tx;
+
+  let settlement: ReturnType<typeof validateSeraSettledOrder>;
+  try {
+    settlement = validateSeraSettledOrder(order, {
+      tradeId,
+      payerAddress: tx.fromAddress,
+      inputTokenAddress: tx.payTokenAddress,
+      outputTokenAddress: tx.receiveTokenAddress,
+      targetOutputAmountRaw: tx.targetReceiveAmountRaw,
+    });
+  } catch (error) {
+    const validationCode = error instanceof SeraSettlementValidationError ? error.code : "MALFORMED_ORDER";
+    const invalidNotes = JSON.stringify({
+      ...notes,
+      seraStatus,
+      seraOrder: order,
+      seraOrderValidationError: validationCode,
+    });
+    const update = await applyOrderEvidence({
+      notes: invalidNotes,
+      seraStatus,
+      failureCode: "settlement_unknown",
+    });
+    if (update.outcome !== "claimed") return update.outcome === "not_found" ? tx : update.transaction;
+    const refreshed = update.transaction;
+    return reconcileSeraSwapOnChain(refreshed, parseSeraTransactionNotes(invalidNotes));
+  }
+
+  // The schema has one fee token column. Prefer the input-token fee (the
+  // normal pay_more gas case); preserve the complete multi-token list in notes.
+  const storedFee = settlement.fees.find((fee) => fee.tokenAddress === settlement.inputTokenAddress)
+    ?? (settlement.fees.length === 1 ? settlement.fees[0] : null);
+  const economicsNotes = JSON.stringify({
+    ...notes,
+    seraStatus,
+    seraOrder: order,
+    seraSettlementEconomics: settlement,
+  });
+  const update = await applyOrderEvidence({
+    tradeId,
+    seraStatus,
+    actualPayAmountRaw: settlement.actualPayRaw,
+    actualReceiveAmountRaw: settlement.actualReceiveRaw,
+    feeAmountRaw: storedFee?.amountRaw ?? null,
+    feeTokenAddress: storedFee?.tokenAddress ?? null,
+    // settlement.txHash is API evidence only and remains in notes until the
+    // finalized-chain proof claims it. Reserving settlementTxHash for a
+    // verified result keeps an incorrect provider response recoverable.
+    failureCode: null,
+    notes: economicsNotes,
+  });
+  if (update.outcome !== "claimed") return update.outcome === "not_found" ? tx : update.transaction;
+  const refreshed = update.transaction;
+  // GET /orders has no recipient field. Require the same-transaction
+  // IntentMatched + Vault→merchant output transfer before marking paid.
+  return reconcileSeraSwapOnChain(refreshed, parseSeraTransactionNotes(economicsNotes));
 }
 
 function isSeraSwapTransaction(tx: Transaction): boolean {
-  if (!tx.notes) return false;
-  try {
-    const parsed = JSON.parse(tx.notes) as { type?: unknown };
-    return parsed.type === "sera_swap";
-  } catch {
-    return false;
-  }
+  return isSeraSwapTransactionRecord(tx);
 }
 
 /**
@@ -1526,33 +2091,47 @@ function isSeraSwapTransaction(tx: Transaction): boolean {
 async function resolvePayableReferenceAmount({
   merchant,
   receiveCoin,
+  receiverAddress,
+  chainId,
   paymentIntentId,
   orderId,
 }: {
   merchant: Merchant;
   receiveCoin: string;
+  receiverAddress: string;
+  chainId: number;
   paymentIntentId: string | null;
   orderId: string | null;
 }): Promise<{ amount: string; label: string } | null> {
   if (!paymentIntentId && !orderId) return null;
   const references: Array<{ amount: string; label: string }> = [];
+  let paymentIntent: Awaited<ReturnType<typeof getPaymentIntentById>>;
+  let menuOrder: Awaited<ReturnType<typeof getMenuOrderById>>;
   if (paymentIntentId) {
-    const intent = await getPaymentIntentById(paymentIntentId);
+    paymentIntent = await getPaymentIntentById(paymentIntentId);
     references.push({
-      amount: assertPaymentIntentBindable(intent, { merchantId: merchant.id, receiveCoin }),
+      amount: assertPaymentIntentBindable(paymentIntent, {
+        merchantId: merchant.id,
+        receiveCoin,
+        receiverAddress,
+        chainId,
+      }),
       label: "payment intent",
     });
   }
   if (orderId) {
-    const order = await getMenuOrderById(orderId);
+    menuOrder = await getMenuOrderById(orderId);
     references.push({
-      amount: assertMenuOrderBindable(order, {
+      amount: assertMenuOrderBindable(menuOrder, {
         merchantId: merchant.id,
         receiveCoin,
         merchantReceiveCoin: merchant.receiveCoin,
       }),
       label: "menu order",
     });
+  }
+  if (paymentIntentId && orderId && menuOrder?.paymentIntentId !== paymentIntentId) {
+    throw new PaymentBindingError("Payment intent is not linked to this menu order", 409);
   }
   // When both are named, the larger amount is the one that has to be covered.
   return references.sort((a, b) => Number(b.amount) - Number(a.amount))[0] ?? null;
@@ -1695,6 +2274,11 @@ paymentRouter.post("/payment/checkout/sign", requireApiKey as any, async (req: a
 paymentRouter.post("/payment/create", async (req, res) => {
   try {
     const checkoutRequest = bindCheckoutRequest(req.body.checkoutPayload);
+    const attemptId = typeof req.body.attemptId === "string" ? req.body.attemptId.trim() : "";
+    if (attemptId && !UUID_RE.test(attemptId)) {
+      res.status(400).json({ error: "Invalid payment attempt ID", errorCode: "invalid_request" });
+      return;
+    }
     const merchantAddress = String(checkoutRequest?.receiverAddress ?? req.body.merchantAddress ?? "");
     const coin = String(checkoutRequest?.receiveCoin ?? req.body.coin ?? "");
     // The signed payload's receiveCoin is authoritative for a direct transfer
@@ -1720,12 +2304,15 @@ paymentRouter.post("/payment/create", async (req, res) => {
     }
     const amount = checkoutRequest?.amount ?? req.body.amount;
     const chainId = checkoutRequest ? checkoutRequest.chainId : req.body.chainId;
-    const orderId = typeof (checkoutRequest?.orderId ?? req.body.orderId) === "string"
-      ? String(checkoutRequest?.orderId ?? req.body.orderId)
-      : null;
-    const paymentIntentId = typeof (checkoutRequest?.paymentIntentId ?? req.body.paymentIntentId) === "string"
-      ? String(checkoutRequest?.paymentIntentId ?? req.body.paymentIntentId)
-      : null;
+    if (!checkoutRequest && (req.body.orderId || req.body.paymentIntentId)) {
+      throw new CheckoutPayloadError("Order and payment-intent references require a signed checkout payload.");
+    }
+    // A signed checkout is a closed capability: references absent from its
+    // payload cannot be injected through mutable request-body fields.
+    const orderReference = checkoutRequest ? checkoutRequest.orderId : req.body.orderId;
+    const paymentIntentReference = checkoutRequest ? checkoutRequest.paymentIntentId : req.body.paymentIntentId;
+    const orderId = typeof orderReference === "string" ? orderReference : null;
+    const paymentIntentId = typeof paymentIntentReference === "string" ? paymentIntentReference : null;
     const paymentUrl = typeof req.body.paymentUrl === "string" && req.body.paymentUrl.length <= 4096 ? req.body.paymentUrl : null;
     if (!merchantAddress || !/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     const coinSymbol = String(coin || "").trim().toUpperCase();
@@ -1752,19 +2339,40 @@ paymentRouter.post("/payment/create", async (req, res) => {
       res.status(404).json({ error: "Merchant not found" }); return;
     }
     const { merchant, toAddress } = resolved;
-    const payableReference = await resolvePayableReferenceAmount({
+    const resolvedChainId = Number(chainId || SERA_MAINNET_CHAIN_ID);
+    const id = attemptId || uuidv4();
+    const previousAttempt = attemptId ? await getTransactionById(attemptId) : undefined;
+    if (previousAttempt) {
+      const previousReferences = transactionNotesMeta(previousAttempt.notes);
+      const sameAttempt = previousAttempt.merchantId === merchant.id
+        && previousAttempt.toAddress.toLowerCase() === toAddress.toLowerCase()
+        && previousAttempt.coin.toUpperCase() === coinSymbol
+        && Number(previousAttempt.chainId) === resolvedChainId
+        && sameMicroAmount(String(previousAttempt.amount), normalizedAmount)
+        && previousAttempt.status === "pending"
+        && previousAttempt.verified === 0
+        && previousAttempt.txHash == null
+        && !isSeraSwapTransaction(previousAttempt)
+        && previousReferences.orderId === orderId
+        && previousReferences.paymentIntentId === paymentIntentId;
+      if (!sameAttempt) {
+        res.status(409).json({ error: "This payment attempt can no longer be reused.", errorCode: "payment_attempt_stale" });
+        return;
+      }
+    }
+    const payableReference = previousAttempt ? null : await resolvePayableReferenceAmount({
       merchant,
       receiveCoin: coinSymbol,
+      receiverAddress: toAddress,
+      chainId: resolvedChainId,
       paymentIntentId,
       orderId,
     });
-    const id = uuidv4();
     const toAddressCompliance = await screenWalletAddress(toAddress, "recipient_wallet", merchant.id);
     if (toAddressCompliance.blocked) {
       res.status(403).json({ error: "Recipient address failed compliance screening", compliance: toAddressCompliance });
       return;
     }
-    const resolvedChainId = Number(chainId || SERA_MAINNET_CHAIN_ID);
     let paymentToken: SeraToken;
     try {
       paymentToken = await resolveSeraTokenForChain(resolvedChainId, coinSymbol);
@@ -1776,28 +2384,35 @@ paymentRouter.post("/payment/create", async (req, res) => {
     if (payableReference) {
       assertAmountMatchesReference(normalizedAmount, payableReference.amount, { exact: true, label: payableReference.label });
     }
-    await createTransaction({
-      id,
-      merchantId: merchant.id,
-      toAddress,
-      coin: coinSymbol,
-      amount: normalizedAmount,
-      chainId: resolvedChainId,
-      status: "pending",
-      verified: 0,
-      notes: orderId || paymentIntentId || paymentUrl
-        ? JSON.stringify({
-            ...(orderId ? { orderId, source: "public_menu" } : {}),
-            ...(paymentIntentId ? { paymentIntentId } : {}),
-            ...(paymentUrl ? { paymentUrl } : {}),
-          })
-        : null,
-    });
-    if (orderId) {
-      await updateMenuOrderPayment(orderId, merchant.id, { paymentId: id, transactionId: id, status: "payment_pending" }).catch(() => undefined);
-    }
-    if (paymentIntentId) {
-      await updatePaymentIntent(paymentIntentId, { status: "open" }).catch(() => undefined);
+    if (!previousAttempt) {
+      const created = await createDirectTransactionWithReservation({
+        transaction: {
+        id,
+        merchantId: merchant.id,
+        toAddress,
+        coin: coinSymbol,
+        amount: normalizedAmount,
+        chainId: resolvedChainId,
+        status: "pending",
+        verified: 0,
+        notes: orderId || paymentIntentId || paymentUrl
+          ? JSON.stringify({
+              ...(orderId ? { orderId, source: "public_menu" } : {}),
+              ...(paymentIntentId ? { paymentIntentId } : {}),
+              ...(paymentUrl ? { paymentUrl } : {}),
+            })
+          : null,
+        },
+        orderId,
+        paymentIntentId,
+      });
+      if (created.outcome === "binding_conflict") {
+        res.status(409).json({
+          error: "Another payment has already claimed this checkout.",
+          errorCode: "payment_already_submitted",
+        });
+        return;
+      }
     }
     res.json({
       txId: id,
@@ -1815,10 +2430,179 @@ paymentRouter.post("/payment/create", async (req, res) => {
   }
 });
 
+/**
+ * POST /api/payment/swap/preflight
+ *
+ * Merchant-authenticated, disposable liquidity check used immediately before
+ * generating a cross-currency QR. It persists no payment and deliberately
+ * returns no quote UUID, Permit payload, or signable Intent.
+ */
+paymentRouter.post("/payment/swap/preflight", requireApiKey as any, async (req: any, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const receiverAddress = String(req.body.receiverAddress ?? req.body.merchantAddress ?? "").trim().toLowerCase();
+    const payCoin = String(req.body.payCoin ?? "").trim().toUpperCase();
+    const receiveCoin = String(req.body.receiveCoin ?? "").trim().toUpperCase();
+    let receiveAmount: string;
+    let estimatedPayAmount: string;
+    try {
+      receiveAmount = normalizeDecimalAmount(req.body.receiveAmount);
+      estimatedPayAmount = normalizeDecimalAmount(req.body.estimatedPayAmount ?? req.body.payAmount);
+    } catch (error) {
+      throw new SeraQuoteValidationError(
+        "invalid_request",
+        error instanceof Error ? error.message : "Invalid payment amount",
+        { field: "amount" },
+      );
+    }
+    const chainId = Number(req.body.chainId ?? SERA_MAINNET_CHAIN_ID);
+
+    if (!/^0x[0-9a-f]{40}$/.test(receiverAddress)) {
+      res.status(400).json({ error: "Invalid receiverAddress", errorCode: "invalid_request" });
+      return;
+    }
+    if (!COIN_SYMBOL_RE.test(payCoin) || !COIN_SYMBOL_RE.test(receiveCoin)) {
+      res.status(400).json({ error: "Invalid coin", errorCode: "invalid_request" });
+      return;
+    }
+    if (chainId !== SERA_MAINNET_CHAIN_ID && !isTestnetChainEnabled(chainId)) {
+      res.status(400).json({ error: `Sera payments are not supported on chain ${chainId}`, errorCode: "unsupported_chain" });
+      return;
+    }
+
+    let resolved: Awaited<ReturnType<typeof resolvePaymentMerchant>>;
+    try {
+      resolved = await resolvePaymentMerchant(receiverAddress);
+    } catch {
+      res.status(404).json({ error: "Merchant receiver not found", errorCode: "invalid_request" });
+      return;
+    }
+    if (resolved.merchant.id !== req.merchant.id) {
+      res.status(403).json({ error: "Receiver address does not belong to this merchant", errorCode: "invalid_request" });
+      return;
+    }
+    const recipientCompliance = await screenWalletAddress(resolved.toAddress, "recipient_wallet", req.merchant.id);
+    if (recipientCompliance.blocked) {
+      res.status(403).json({ error: "Recipient address failed compliance screening", errorCode: "invalid_request", compliance: recipientCompliance });
+      return;
+    }
+
+    const baseUrl = getSeraApiBaseUrlForChain(chainId);
+    const [fromToken, toToken] = await Promise.all([
+      resolveSeraSwapToken(baseUrl, payCoin),
+      resolveSeraSwapToken(baseUrl, receiveCoin),
+    ]);
+    let requestedInputRaw: string;
+    let targetOutputRaw: string;
+    try {
+      requestedInputRaw = toRawTokenAmount(estimatedPayAmount, fromToken.decimals);
+      targetOutputRaw = toRawTokenAmount(receiveAmount, toToken.decimals);
+    } catch (error) {
+      throw new SeraQuoteValidationError(
+        "invalid_request",
+        error instanceof Error ? error.message : "Payment amount exceeds token precision",
+        { field: "amount" },
+      );
+    }
+
+    if (payCoin === receiveCoin) {
+      if (fromToken.address.toLowerCase() !== toToken.address.toLowerCase()) {
+        throw new SeraQuoteValidationError("invalid_config", "Sera returned inconsistent token metadata for a direct payment");
+      }
+      if (requestedInputRaw !== targetOutputRaw) {
+        throw new SeraQuoteValidationError(
+          "invalid_request",
+          "A direct payment must pay exactly the requested receive amount",
+          { field: "estimatedPayAmount" },
+        );
+      }
+      res.json({
+        executable: true,
+        advisory: false,
+        requiresCustomerRequote: false,
+        direct: true,
+        source: "direct-payment",
+        chainId,
+        toAddress: resolved.toAddress,
+        payCoin,
+        receiveCoin,
+        requestedPayAmount: estimatedPayAmount,
+        maximumPayAmount: receiveAmount,
+        targetReceiveAmount: receiveAmount,
+        minimumReceiveAmount: receiveAmount,
+        checkedAt: Math.floor(Date.now() / 1000),
+      });
+      return;
+    }
+
+    const [rawConfig, seraNowSec] = await Promise.all([
+      callSeraApi<unknown>({ baseUrl, path: "/config", authMode: "none", merchantId: req.merchant.id }),
+      getSeraServerTimestamp(baseUrl, req.merchant.id),
+    ]);
+    const probeOwner = getSeraPreflightProbeAddress();
+    if (probeOwner === resolved.toAddress.toLowerCase()) {
+      throw new SeraQuoteValidationError(
+        "invalid_config",
+        "The Sera preflight probe address must differ from the merchant recipient",
+        { field: "SERA_PREFLIGHT_PROBE_ADDRESS" },
+      );
+    }
+    const initialRequest: SeraSwapQuoteRequest = {
+      from_token: fromToken.address.toLowerCase() as `0x${string}`,
+      to_token: toToken.address.toLowerCase() as `0x${string}`,
+      from_amount: requestedInputRaw,
+      owner_address: probeOwner,
+      recipient: resolved.toAddress.toLowerCase() as `0x${string}`,
+      expiration: seraNowSec + 300,
+      gas_mode: "pay_more",
+    };
+    const result = await solveSeraFixedOutputQuote({
+      initialRequest,
+      targetOutputRaw,
+      minimumInputRaw: fromToken.min_trade_amount_raw || "0",
+      minimumInputSymbol: fromToken.symbol,
+      config: rawConfig,
+      expectedChainId: chainId,
+      serverTime: seraNowSec,
+      policy: getSeraFixedOutputPolicy(),
+      requestQuote: (request) => callSeraApi<unknown>({
+        baseUrl,
+        path: "/swap/quote",
+        method: "POST",
+        body: request,
+        authMode: "none",
+        merchantId: req.merchant.id,
+      }),
+    });
+    const summary = toSeraPreflightSummary(result, seraNowSec);
+    res.json({
+      ...summary,
+      chainId,
+      toAddress: resolved.toAddress,
+      payCoin,
+      receiveCoin,
+      requestedPayAmount: estimatedPayAmount,
+      quotedPayAmount: fromRawTokenAmount(result.finalRequest.from_amount, fromToken.decimals),
+      maximumPayAmount: fromRawTokenAmount(result.quote.routeParams.maxInputAmount, fromToken.decimals),
+      targetReceiveAmount: receiveAmount,
+      minimumReceiveAmount: fromRawTokenAmount(result.quote.routeParams.minOutputAmount, toToken.decimals),
+    });
+  } catch (error) {
+    logSeraOperationFailure("payment/swap/preflight", error);
+    const response = seraPaymentErrorResponse(error, "Unable to verify this Sera conversion right now");
+    res.status(response.status).json(response.body);
+  }
+});
+
 /** POST /api/payment/swap/quote - Sera quote for customer coin -> merchant receive coin */
 paymentRouter.post("/payment/swap/quote", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  let checkoutAttemptKeyForConflict: string | null = null;
   try {
-    const checkoutRequest = bindCheckoutRequest(req.body.checkoutPayload);
+    const signedCheckoutPayload = typeof req.body.checkoutPayload === "string"
+      ? req.body.checkoutPayload.trim()
+      : "";
+    const checkoutRequest = bindCheckoutRequest(signedCheckoutPayload || undefined);
     const merchantAddress = String(checkoutRequest?.receiverAddress ?? req.body.merchantAddress ?? "").trim();
     const payerAddress = String(req.body.payerAddress ?? "").trim().toLowerCase();
     const payCoin = String(req.body.payCoin ?? "").trim().toUpperCase();
@@ -1841,13 +2625,20 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     }
     const requestedChainId = Number(checkoutRequest ? checkoutRequest.chainId : (req.body.chainId ?? 1));
     const chainId = Number.isInteger(requestedChainId) && requestedChainId > 0 ? requestedChainId : 1;
-    const paymentIntentId = typeof (checkoutRequest?.paymentIntentId ?? req.body.paymentIntentId) === "string"
-      ? String(checkoutRequest?.paymentIntentId ?? req.body.paymentIntentId)
-      : null;
-    const orderId = typeof (checkoutRequest?.orderId ?? req.body.orderId) === "string"
-      ? String(checkoutRequest?.orderId ?? req.body.orderId)
-      : null;
+    if (!checkoutRequest && (req.body.orderId || req.body.paymentIntentId)) {
+      throw new CheckoutPayloadError("Order and payment-intent references require a signed checkout payload.");
+    }
+    // Do not let an unsigned body attach a second obligation to an otherwise
+    // valid signed checkout link.
+    const paymentIntentReference = checkoutRequest ? checkoutRequest.paymentIntentId : req.body.paymentIntentId;
+    const orderReference = checkoutRequest ? checkoutRequest.orderId : req.body.orderId;
+    const paymentIntentId = typeof paymentIntentReference === "string" ? paymentIntentReference : null;
+    const orderId = typeof orderReference === "string" ? orderReference : null;
     const requestedExpiration = Number(req.body.expiration);
+    const requestedTxId = typeof req.body.txId === "string" ? req.body.txId.trim() : "";
+    const previousQuoteUuid = typeof req.body.previousQuoteUuid === "string"
+      ? req.body.previousQuoteUuid.trim()
+      : "";
 
     if (!/^0x[0-9a-fA-F]{40}$/.test(merchantAddress)) { res.status(400).json({ error: "Invalid merchantAddress" }); return; }
     if (!/^0x[0-9a-fA-F]{40}$/.test(payerAddress)) { res.status(400).json({ error: "Invalid payerAddress" }); return; }
@@ -1866,114 +2657,108 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       res.status(403).json({ error: "Recipient address failed compliance screening", compliance: recipientCompliance });
       return;
     }
+    const checkoutAttemptKey = checkoutRequest && signedCheckoutPayload
+      ? deriveSeraCheckoutAttemptKey(signedCheckoutPayload, payerAddress)
+      : null;
+    checkoutAttemptKeyForConflict = checkoutAttemptKey;
+    if (checkoutAttemptKey) {
+      const activeAttempt = await getActiveSeraSwapTransactionByCheckoutAttemptKey(checkoutAttemptKey);
+      if (activeAttempt && (
+        activeAttempt.status === "confirming"
+        || !(
+          requestedTxId === activeAttempt.id
+          && previousQuoteUuid
+          && activeAttempt.quoteUuid === previousQuoteUuid
+        )
+      )) {
+        // A signed checkout snapshot + payer may own only one unresolved swap.
+        // This survives wallet-tab/session loss; the new page watches payment A
+        // instead of creating and signing payment B.
+        res.status(409).json({
+          error: "This wallet already has a Sera payment for this checkout in progress.",
+          errorCode: "payment_attempt_in_progress",
+          detail: { txId: activeAttempt.id, status: activeAttempt.status },
+        });
+        return;
+      }
+    }
+
     const payableReference = await resolvePayableReferenceAmount({
       merchant,
       receiveCoin,
+      receiverAddress: toAddress,
+      chainId,
       paymentIntentId,
       orderId,
     });
 
+    if (chainId !== SERA_MAINNET_CHAIN_ID && !isTestnetChainEnabled(chainId)) {
+      throw new SeraQuoteValidationError(
+        "unsupported_chain",
+        `Sera payments are not supported on chain ${chainId}`,
+        { field: "chainId" },
+      );
+    }
     const baseUrl = getSeraApiBaseUrlForChain(chainId);
-    const [fromToken, toToken, config, seraNowSec] = await Promise.all([
-      resolveSeraTokenBySymbol(baseUrl, payCoin),
-      resolveSeraTokenBySymbol(baseUrl, receiveCoin),
-      callSeraApi<SeraConfigResponse>({ baseUrl, path: "/config", authMode: "none" }),
+    const [fromToken, toToken, rawConfig, seraNowSec] = await Promise.all([
+      resolveSeraSwapToken(baseUrl, payCoin),
+      resolveSeraSwapToken(baseUrl, receiveCoin),
+      callSeraApi<unknown>({ baseUrl, path: "/config", authMode: "none", merchantId: merchant.id }),
       getSeraServerTimestamp(baseUrl, merchant.id),
     ]);
-    if (!config.eip712_domain) throw new Error("Sera /config did not return eip712_domain");
-    if (config.chain_id !== chainId) {
-      throw new Error(`Sera /config returned chain ${config.chain_id ?? "unknown"}, expected ${chainId}`);
-    }
+    const deployment = validateSeraDeploymentConfig(rawConfig, chainId);
     // Sera explicitly requires deadlines to be based on GET /system/time.
     // This avoids rejecting otherwise valid payments when a phone clock drifts.
     const expiration = Number.isInteger(requestedExpiration) && requestedExpiration > seraNowSec + 15
       ? Math.min(requestedExpiration, seraNowSec + 300)
       : seraNowSec + 300;
 
-    const fromAmountRaw = toRawTokenAmount(payAmount, fromToken.decimals);
-
-    // Pre-flight Sera's per-token minimum so the payer gets a specific number
-    // instead of a bare AMOUNT_BELOW_MIN after a round trip. This constrains
-    // SWAPS only — a direct ERC-20 transfer never touches Sera's contracts and
-    // has no minimum, so this check lives on the swap path alone.
-    const minimumRaw = BigInt(String(fromToken.min_trade_amount_raw || "0"));
-    if (minimumRaw > 0n && BigInt(fromAmountRaw) < minimumRaw) {
-      res.status(400).json({
-        error: `Minimum ${fromToken.min_trade_amount} ${fromToken.symbol} is required to convert with Sera.`,
-        errorCode: "amount_below_min",
-        detail: {
-          coin: fromToken.symbol,
-          minimum: fromToken.min_trade_amount,
-          requested: payAmount,
-        },
-      });
-      return;
+    let fromAmountRaw: string;
+    let targetOutputRaw: string | undefined;
+    try {
+      fromAmountRaw = toRawTokenAmount(payAmount, fromToken.decimals);
+      targetOutputRaw = requestedReceiveAmount
+        ? toRawTokenAmount(requestedReceiveAmount, toToken.decimals)
+        : undefined;
+    } catch (error) {
+      throw new SeraQuoteValidationError(
+        "invalid_request",
+        error instanceof Error ? error.message : "Payment amount exceeds token precision",
+        { field: "amount" },
+      );
     }
-
-    const quoteRequest = {
-      from_token: fromToken.address,
-      to_token: toToken.address,
+    const initialRequest: SeraSwapQuoteRequest = {
+      from_token: fromToken.address.toLowerCase() as `0x${string}`,
+      to_token: toToken.address.toLowerCase() as `0x${string}`,
       from_amount: fromAmountRaw,
-      owner_address: payerAddress,
-      recipient: toAddress,
+      owner_address: payerAddress as `0x${string}`,
+      recipient: toAddress as `0x${string}`,
       expiration,
-      // A payment must preserve what the merchant receives. Sera adds the
-      // execution cost to the customer's maximum input instead of subtracting
-      // it from the merchant's output.
+      // The merchant's protected output is preserved; gas is added to the
+      // payer's maximum input instead of being subtracted from the payout.
       gas_mode: "pay_more",
     };
-    const requestQuote = async () => unwrapSeraQuote(await callSeraApi<unknown>({
+    const quoteResult = await solveSeraFixedOutputQuote({
+      initialRequest,
+      targetOutputRaw,
+      minimumInputRaw: fromToken.min_trade_amount_raw || "0",
+      minimumInputSymbol: fromToken.symbol,
+      config: rawConfig,
+      expectedChainId: chainId,
+      serverTime: seraNowSec,
+      policy: getSeraFixedOutputPolicy(),
+      requestQuote: (request) => callSeraApi<unknown>({
         baseUrl,
         path: "/swap/quote",
         method: "POST",
-        body: quoteRequest,
+        body: request,
         authMode: "none",
         merchantId: merchant.id,
-      }));
-    let quote = await requestQuote();
-    let routeParams = getRouteParams(quote);
-    // Sera answers HTTP 200 with minOutputAmount "0" when no executable route
-    // exists at this size. Those quotes are informational only and POST /swap
-    // rejects them, so refuse here rather than persisting a transaction the
-    // payer can never settle. This has to sit OUTSIDE the requestedReceiveAmount
-    // branch below: receiveAmount is optional on this route, and a zero-output
-    // quote is equally unusable with or without it.
-    const assertExecutableRoute = () => {
-      if (BigInt(String(routeParams.minOutputAmount)) <= 0n) {
-        throw new SeraApiError(
-          409,
-          `Sera has no executable route for ${fromToken.symbol}/${toToken.symbol} at this amount`,
-          undefined,
-          "no_liquidity",
-        );
-      }
-    };
-    assertExecutableRoute();
-    if (requestedReceiveAmount) {
-      const requestedOutputRaw = BigInt(toRawTokenAmount(requestedReceiveAmount, toToken.decimals));
-      const quotedOutputRaw = BigInt(String(routeParams.minOutputAmount));
-      if (quotedOutputRaw < requestedOutputRaw) {
-        const currentInputRaw = BigInt(quoteRequest.from_amount);
-        // Round up proportionally, then add a small buffer for quote refresh
-        // movement so the merchant amount is not underpaid by token rounding.
-        const adjustedInputRaw = ((currentInputRaw * requestedOutputRaw + quotedOutputRaw - 1n) / quotedOutputRaw * 1001n + 999n) / 1000n;
-        quoteRequest.from_amount = adjustedInputRaw.toString();
-        quote = await requestQuote();
-        routeParams = getRouteParams(quote);
-        assertExecutableRoute();
-        if (BigInt(String(routeParams.minOutputAmount)) < requestedOutputRaw) {
-          throw new Error("Sera quote cannot currently cover the merchant receive amount");
-        }
-      }
-    }
-    // quote.uuid is the quote record id POST /swap resolves; routeParams.uuid is
-    // the composite uint256 bound into the signed intent. They are different
-    // values, so falling back from one to the other submits an id Sera cannot
-    // resolve — and does it silently, at settlement time. Fail here instead.
-    const quoteUuid = typeof quote.uuid === "string" || typeof quote.uuid === "number"
-      ? String(quote.uuid)
-      : "";
-    if (!quoteUuid) throw new Error("Sera quote did not return a quote id");
+      }),
+    });
+    const quote = quoteResult.quote;
+    const routeParams = quote.routeParams;
+    const quoteUuid = quote.uuid;
     // SeraSOR's IntentMatched event emits the EIP-712 struct hash (before the
     // domain separator), so persist exactly that value for public on-chain
     // settlement reconciliation.
@@ -1983,18 +2768,13 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       assertAmountMatchesReference(expectedReceiveAmount, payableReference.amount, { exact: false, label: payableReference.label });
     }
     const maximumPayAmount = fromRawTokenAmount(routeParams.maxInputAmount, fromToken.decimals);
-    const approval = getPermitApproval(quote.permit, routeParams.maxInputAmount);
-    if (approval && (!config.sor_address || approval.spender.toLowerCase() !== config.sor_address.toLowerCase())) {
-      throw new Error("Sera quote approval target does not match the live SOR contract");
-    }
-    // Same guarantee for the ordinary EIP-2612 path, which the check above
-    // never reached: whoever the payer is about to approve for maxInputAmount
-    // must be the SOR contract Sera itself reports.
-    const permitSpender = getPermitSpender(quote.permit);
-    if (permitSpender && (!config.sor_address || permitSpender.toLowerCase() !== config.sor_address.toLowerCase())) {
-      throw new Error("Sera quote permit spender does not match the live SOR contract");
-    }
-    const requestedTxId = typeof req.body.txId === "string" ? req.body.txId.trim() : "";
+    const authorization = quote.permit;
+    const permitDeadlineSeconds = authorization?.typedData?.message.deadline ?? null;
+    const quoteExpiresAt = new Date(quote.expiresAt * 1000);
+    const intentDeadline = new Date(Number(routeParams.deadline) * 1000);
+    const permitDeadlineDate = permitDeadlineSeconds === null
+      ? null
+      : new Date(Number(permitDeadlineSeconds) * 1000);
     const txId = requestedTxId || uuidv4();
     const transactionNotes = JSON.stringify({
       type: "sera_swap_quote",
@@ -2004,13 +2784,68 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       orderId,
       payToken: fromToken.address,
       receiveToken: toToken.address,
+      payTokenDecimals: fromToken.decimals,
+      receiveTokenDecimals: toToken.decimals,
       chainId,
-      expiresAt: quote.expires_at ?? null,
+      expiresAt: quote.expiresAt,
       requestedPayAmount: payAmount,
+      requestedReceiveAmount,
+      quotedFeeBreakdown: quote.feeBreakdown,
+      permitTypedData: authorization?.typedData ?? null,
+      // Settlement proof must stay bound to the deployment that produced the
+      // signed Intent. A later Sera config rotation must not make an in-flight
+      // payment invisible to reconciliation.
+      seraDeployment: {
+        seraAddress: deployment.seraAddress,
+        vaultAddress: deployment.vaultAddress,
+        sorAddress: deployment.sorAddress,
+      },
     });
+
+    const lifecycle = {
+      checkoutAttemptKey,
+      amount: expectedReceiveAmount,
+      payAmount: maximumPayAmount,
+      quoteUuid,
+      routeUuid: routeParams.uuid,
+      intentHash,
+      tradeId: null,
+      payTokenAddress: routeParams.inputToken,
+      receiveTokenAddress: routeParams.outputToken,
+      seraAddress: deployment.seraAddress,
+      seraVaultAddress: deployment.vaultAddress,
+      seraSorAddress: deployment.sorAddress,
+      payTokenDecimals: fromToken.decimals,
+      receiveTokenDecimals: toToken.decimals,
+      requestedPayAmountRaw: quoteResult.initialRequest.from_amount,
+      maximumPayAmountRaw: routeParams.maxInputAmount,
+      targetReceiveAmountRaw: quoteResult.targetOutputRaw,
+      minimumReceiveAmountRaw: routeParams.minOutputAmount,
+      initialDepositAmountRaw: routeParams.initialDepositAmount,
+      quoteExpiresAt,
+      intentDeadline,
+      permitRequired: authorization?.authorizationKind === "permit" ? 1 : 0,
+      permitDeadline: permitDeadlineDate,
+      submitState: "quote_ready" as const,
+      submittedBlockNumber: null,
+      seraStatus: "quoted",
+      actualPayAmountRaw: null,
+      actualReceiveAmountRaw: null,
+      feeAmountRaw: null,
+      feeTokenAddress: null,
+      settlementTxHash: null,
+      failureCode: null,
+      seraOutcomeSyncedAt: null,
+      notes: transactionNotes,
+    };
 
     if (requestedTxId) {
       const existing = await getTransactionById(requestedTxId);
+      const existingNotes = existing ? parseSeraTransactionNotes(existing.notes) : {};
+      const existingReference = existing ? transactionNotesMeta(existing.notes) : null;
+      const sameTarget = requestedReceiveAmount === null
+        ? existingNotes.requestedReceiveAmount === null
+        : existing?.targetReceiveAmountRaw === quoteResult.targetOutputRaw;
       const samePayment = existing
         && existing.status === "pending"
         && existing.merchantId === merchant.id
@@ -2018,16 +2853,24 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
         && existing.toAddress.toLowerCase() === toAddress.toLowerCase()
         && existing.coin === receiveCoin
         && existing.payCoin === payCoin
-        && existing.chainId === (config.chain_id ?? chainId);
-      if (!samePayment) {
+        && existing.chainId === deployment.chainId
+        && (existing.checkoutAttemptKey == null || existing.checkoutAttemptKey === checkoutAttemptKey)
+        && (existing.submitState === "quote_ready" || existing.submitState === null)
+        && existingReference?.paymentIntentId === paymentIntentId
+        && existingReference?.orderId === orderId
+        && (sameTarget || (
+          existing.targetReceiveAmountRaw === null
+          && sameMicroAmount(String(existing.amount), expectedReceiveAmount)
+        ));
+      if (!samePayment || !previousQuoteUuid || existing?.quoteUuid !== previousQuoteUuid) {
         res.status(409).json({ error: "The previous Sera quote can no longer be refreshed.", errorCode: "quote_stale" });
         return;
       }
-      await updateTransaction(txId, {
-        amount: expectedReceiveAmount,
-        payAmount: maximumPayAmount,
-        notes: transactionNotes,
-      });
+      const refreshed = await refreshSeraSwapQuote(txId, previousQuoteUuid, lifecycle);
+      if (!refreshed) {
+        res.status(409).json({ error: "The previous Sera quote changed while it was being refreshed.", errorCode: "quote_stale" });
+        return;
+      }
     } else {
       await createTransaction({
         id: txId,
@@ -2035,21 +2878,16 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
         fromAddress: payerAddress,
         toAddress,
         coin: receiveCoin,
-        amount: expectedReceiveAmount,
-        chainId: config.chain_id ?? chainId,
+        chainId: deployment.chainId,
         status: "pending",
         verified: 0,
         payCoin,
-        payAmount: maximumPayAmount,
-        notes: transactionNotes,
+        ...lifecycle,
       });
-      if (orderId) {
-        await updateMenuOrderPayment(orderId, merchant.id, { paymentId: txId, paymentIntentId, transactionId: txId, status: "payment_pending" }).catch(() => undefined);
-      }
     }
     res.json({
       txId,
-      chainId: config.chain_id ?? chainId,
+      chainId: deployment.chainId,
       toAddress,
       payCoin,
       receiveCoin,
@@ -2057,25 +2895,60 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
       requestedPayAmount: payAmount,
       expectedReceiveAmount,
       quoteUuid,
-      quote,
+      quote: {
+        uuid: quote.uuid,
+        route_params: routeParams,
+        fee_breakdown: {
+          gas_cost_usd: quote.feeBreakdown.gasCostUsd,
+          gas_cost_from_token: quote.feeBreakdown.gasCostFromToken,
+        },
+        expires_at: quote.expiresAt,
+        permit: authorization ? {
+          permit_supported: authorization.permitSupported,
+          permit_required: authorization.permitRequired,
+          token: authorization.token,
+          spender: authorization.spender,
+          owner: authorization.owner,
+          value_raw: authorization.valueRaw,
+          current_allowance_raw: authorization.currentAllowanceRaw,
+          nonce: authorization.nonce,
+          suggested_deadline: authorization.suggestedDeadline,
+          domain: authorization.domain,
+          eip712: authorization.typedData,
+        } : null,
+      },
       intentTypedData: {
-        domain: config.eip712_domain,
+        domain: deployment.eip712Domain,
         types: SERA_INTENT_TYPES,
         primaryType: "Intent",
         message: routeParams,
       },
-      permitTypedData: getPermitTypedData(quote.permit),
-      permitDeadline: getPermitDeadline(quote.permit),
-      approvalRequired: Boolean(approval),
-      approvalSpender: approval?.spender ?? null,
-      approvalAmountRaw: approval?.amountRaw ?? null,
+      permitTypedData: authorization?.typedData ?? null,
+      permitDeadline: permitDeadlineSeconds,
+      approvalRequired: authorization?.authorizationKind === "approval",
+      approvalSpender: authorization?.authorizationKind === "approval" ? authorization.spender : null,
+      approvalAmountRaw: authorization?.authorizationKind === "approval" ? authorization.valueRaw : null,
+      feeBreakdown: quote.feeBreakdown,
+      quoteExpiresAt: quote.expiresAt,
       request: {
-        ...quoteRequest,
+        ...quoteResult.finalRequest,
         from_symbol: payCoin,
         to_symbol: receiveCoin,
       },
     });
   } catch (e: any) {
+    if (checkoutAttemptKeyForConflict && errorHasDatabaseConstraint(e, "uq_tx_active_checkout_attempt_key")) {
+      const activeAttempt = await getActiveSeraSwapTransactionByCheckoutAttemptKey(checkoutAttemptKeyForConflict)
+        .catch(() => undefined);
+      if (activeAttempt) {
+        res.status(409).json({
+          error: "This wallet already has a Sera payment for this checkout in progress.",
+          errorCode: "payment_attempt_in_progress",
+          detail: { txId: activeAttempt.id, status: activeAttempt.status },
+        });
+        return;
+      }
+    }
     if (e instanceof PaymentBindingError) { res.status(e.status).json({ error: e.message }); return; }
     if (e instanceof CheckoutPayloadError) { res.status(e.status).json({ error: e.message }); return; }
     logSeraOperationFailure("payment/swap/quote", e);
@@ -2105,17 +2978,111 @@ const SERA_NEVER_CONNECTED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AG
  * to connect at all. Node's fetch wraps the socket error in a
  * TypeError("fetch failed") whose cause carries the code, hence the walk.
  */
-function isSeraAnswerMissing(error: unknown): boolean {
+function isSeraProvenNeverConnected(error: unknown): boolean {
   if (error instanceof SeraApiError) return false;
   for (let current: any = error, depth = 0; current && typeof current === "object" && depth < 5; current = current.cause, depth += 1) {
     const code = typeof current.code === "string" ? current.code.toUpperCase() : "";
-    if (SERA_NEVER_CONNECTED_CODES.has(code) || /^ERR_TLS_|CERT|SSL/.test(code)) return false;
+    if (SERA_NEVER_CONNECTED_CODES.has(code) || /^ERR_TLS_|CERT|SSL/.test(code)) return true;
   }
-  return true;
+  return false;
+}
+
+function parseSeraTransactionNotes(notes: string | null | undefined): Record<string, unknown> {
+  if (!notes) return {};
+  try {
+    const parsed = JSON.parse(notes);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function timestampToUnixSeconds(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const milliseconds = new Date(value).getTime();
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0 || milliseconds % 1000 !== 0) return null;
+  return String(milliseconds / 1000);
+}
+
+/** Reconstructs the exact Intent fields that were durably bound at quote time. */
+function storedSeraIntent(tx: Transaction): SeraIntentMessage | null {
+  const deadline = timestampToUnixSeconds(tx.intentDeadline);
+  if (
+    !tx.fromAddress
+    || !tx.payTokenAddress
+    || !tx.receiveTokenAddress
+    || !tx.maximumPayAmountRaw
+    || !tx.minimumReceiveAmountRaw
+    || tx.initialDepositAmountRaw === null
+    || !tx.routeUuid
+    || !deadline
+  ) return null;
+  return {
+    taker: tx.fromAddress,
+    inputToken: tx.payTokenAddress,
+    outputToken: tx.receiveTokenAddress,
+    maxInputAmount: tx.maximumPayAmountRaw,
+    minOutputAmount: tx.minimumReceiveAmountRaw,
+    recipient: tx.toAddress,
+    initialDepositAmount: tx.initialDepositAmountRaw,
+    uuid: tx.routeUuid,
+    deadline,
+  };
+}
+
+function validSeraSignature(value: string): boolean {
+  return value.length <= 16_386 && /^0x(?:[0-9a-fA-F]{2})+$/.test(value);
+}
+
+async function respondToPreviouslyClaimedSeraSwap(tx: Transaction, res: Response) {
+  if (tx.status === "confirmed" || tx.submitState === "settled") {
+    // A previous process may have committed the terminal database state and
+    // crashed before synchronizing the linked order or delivering its webhook.
+    // The durable outcome marker makes this safe to resume on every read.
+    void deliverSeraSwapOutcomeEffects(tx).catch((error) => {
+      logSeraOperationFailure("payment/swap/outcome-recovery", error);
+    });
+    res.json({
+      success: true,
+      status: "confirmed",
+      tradeId: tx.tradeId ?? null,
+      txHash: tx.settlementTxHash ?? tx.txHash ?? null,
+      idempotent: true,
+    });
+    return;
+  }
+  if (tx.status === "failed" || tx.status === "canceled") {
+    if (tx.status === "failed" && isSeraSwapTransaction(tx)) {
+      void deliverSeraSwapOutcomeEffects(tx).catch((error) => {
+        logSeraOperationFailure("payment/swap/outcome-recovery", error);
+      });
+    }
+    res.status(409).json({
+      success: false,
+      status: tx.status,
+      error: tx.status === "canceled" ? "Transaction was canceled" : "Sera swap failed",
+      errorCode: tx.failureCode ?? (tx.status === "canceled" ? "canceled" : "settlement_failed"),
+    });
+    return;
+  }
+  void reconcileSeraSwapTransaction(tx).catch((error) => logSeraOperationFailure("payment/swap/reconcile-idempotent", error));
+  const provisional = storedSeraProvisionalSettlement(tx);
+  res.json({
+    success: true,
+    status: provisional ? "received" : "confirming",
+    received: Boolean(provisional),
+    finality: provisional ? "provisional" : null,
+    tradeId: tx.tradeId ?? null,
+    txHash: provisional?.txHash ?? tx.settlementTxHash ?? tx.txHash ?? null,
+    idempotent: true,
+  });
 }
 
 /** POST /api/payment/swap/submit - submit signed Sera swap intent */
 paymentRouter.post("/payment/swap/submit", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   let txForFailure: Transaction | undefined;
   // Where the order stands with Sera when an error reaches the catch below.
   // "unknown" from the instant POST /swap leaves this process until Sera
@@ -2132,22 +3099,122 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     const permitSignature = typeof req.body.permitSignature === "string" ? req.body.permitSignature.trim() : "";
     const permitDeadline = req.body.permitDeadline ?? null;
 
-    if (!txId) { res.status(400).json({ error: "Missing txId" }); return; }
-    if (!quoteUuid) { res.status(400).json({ error: "Missing quoteUuid" }); return; }
-    if (!/^0x[0-9a-fA-F]+$/.test(signature)) { res.status(400).json({ error: "Invalid Sera intent signature" }); return; }
-    if (permitSignature && !/^0x[0-9a-fA-F]+$/.test(permitSignature)) {
-      res.status(400).json({ error: "Invalid permit signature" });
+    if (!txId) { res.status(400).json({ error: "Missing txId", errorCode: "invalid_request" }); return; }
+    if (!quoteUuid) { res.status(400).json({ error: "Missing quoteUuid", errorCode: "invalid_request" }); return; }
+    if (!validSeraSignature(signature)) {
+      res.status(400).json({ error: "Invalid Sera intent signature", errorCode: "invalid_request" });
+      return;
+    }
+    if (permitSignature && !validSeraSignature(permitSignature)) {
+      res.status(400).json({ error: "Invalid permit signature", errorCode: "invalid_request" });
       return;
     }
 
-    let tx = await getTransactionById(txId);
+    const tx = await getTransactionById(txId);
     if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
-    const staleCanceled = await cancelStaleMerchantTransactions(tx.merchantId, [tx]);
-    if (staleCanceled > 0) tx = await getTransactionById(txId);
-    if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
-    if (tx.status === "canceled") { res.status(409).json({ error: "Transaction was canceled" }); return; }
-    if (tx.status === "confirmed") { res.json({ success: true, status: "confirmed" }); return; }
-    txForFailure = tx;
+    if (!isSeraSwapTransaction(tx) || !tx.quoteUuid || !tx.intentHash) {
+      res.status(409).json({ error: "Transaction is not a bound Sera swap quote", errorCode: "invalid_quote" });
+      return;
+    }
+    if (tx.quoteUuid !== quoteUuid) {
+      res.status(409).json({ error: "quoteUuid does not match this transaction", errorCode: "invalid_quote" });
+      return;
+    }
+    if (tx.status === "confirmed" || tx.submitState === "settled") {
+      await respondToPreviouslyClaimedSeraSwap(tx, res);
+      return;
+    }
+    if (tx.status === "failed" || tx.status === "canceled") {
+      await respondToPreviouslyClaimedSeraSwap(tx, res);
+      return;
+    }
+
+    const route = storedSeraIntent(tx);
+    if (
+      !route
+      || !tx.seraAddress
+      || !/^0x[0-9a-fA-F]{40}$/.test(tx.seraAddress)
+      || hashSeraIntentStruct(route).toLowerCase() !== tx.intentHash.toLowerCase()
+    ) {
+      res.status(409).json({ error: "Stored Sera route binding is invalid", errorCode: "invalid_quote" });
+      return;
+    }
+
+    const storedPermitDeadline = timestampToUnixSeconds(tx.permitDeadline);
+    if (tx.permitRequired === 1) {
+      if (!permitSignature || permitDeadline === null || permitDeadline === undefined || permitDeadline === "") {
+        res.status(400).json({ error: "This quote requires its bound Permit signature and deadline", errorCode: "allowance_insufficient" });
+        return;
+      }
+      let submittedPermitDeadline: string;
+      try {
+        submittedPermitDeadline = BigInt(String(permitDeadline)).toString();
+      } catch {
+        res.status(400).json({ error: "Invalid permit deadline", errorCode: "invalid_request" });
+        return;
+      }
+      if (!storedPermitDeadline || submittedPermitDeadline !== storedPermitDeadline) {
+        res.status(409).json({ error: "Permit deadline does not match this quote", errorCode: "invalid_quote" });
+        return;
+      }
+    } else if (permitSignature || (permitDeadline !== null && permitDeadline !== undefined && permitDeadline !== "")) {
+      res.status(400).json({ error: "This quote does not accept Permit authorization", errorCode: "invalid_request" });
+      return;
+    }
+
+    const settlementClient = CHAIN_CLIENTS[tx.chainId];
+    if (!settlementClient) {
+      res.status(409).json({ error: "Unsupported settlement chain", errorCode: "invalid_quote" });
+      return;
+    }
+    const storedNotes = parseSeraTransactionNotes(tx.notes);
+    const permitTypedData = storedNotes.permitTypedData;
+    if (
+      tx.permitRequired === 1
+      && (!permitTypedData || typeof permitTypedData !== "object" || Array.isArray(permitTypedData))
+    ) {
+      res.status(409).json({ error: "Stored Permit binding is invalid", errorCode: "invalid_quote" });
+      return;
+    }
+
+    // Verify control of the exact persisted taker before consuming the
+    // single-use quote or claiming its order. PublicClient verification also
+    // supports ERC-1271 smart-account signatures; Sera's later validation is
+    // defense in depth, not the first authorization check.
+    let intentSignatureValid = false;
+    let permitSignatureValid = tx.permitRequired !== 1;
+    try {
+      intentSignatureValid = await settlementClient.verifyTypedData({
+        address: tx.fromAddress,
+        domain: {
+          name: "Sera",
+          version: "1",
+          chainId: tx.chainId,
+          verifyingContract: tx.seraAddress,
+        },
+        types: SERA_INTENT_TYPES,
+        primaryType: "Intent",
+        message: route,
+        signature,
+      });
+      if (tx.permitRequired === 1) {
+        permitSignatureValid = await settlementClient.verifyTypedData({
+          ...(permitTypedData as Record<string, unknown>),
+          address: tx.fromAddress,
+          signature: permitSignature,
+        });
+      }
+    } catch {
+      res.status(503).json({
+        error: "Wallet signature verification is temporarily unavailable. Please retry before this quote expires.",
+        errorCode: "sera_unavailable",
+      });
+      return;
+    }
+    if (!intentSignatureValid || !permitSignatureValid) {
+      res.status(403).json({ error: "Wallet signature does not authorize this Sera quote", errorCode: "invalid_signature" });
+      return;
+    }
 
     const body: Record<string, unknown> = {
       uuid: quoteUuid,
@@ -2155,18 +3222,95 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     };
     if (permitSignature) {
       body.permit_signature = permitSignature;
-      if (permitDeadline !== null && permitDeadline !== undefined && permitDeadline !== "") {
-        body.permit_deadline = permitDeadline;
-      }
+      // Send the canonical value bound to this quote, not an equivalent client
+      // spelling such as leading-zero decimal text.
+      body.permit_deadline = storedPermitDeadline;
     }
 
-    await updateTransaction(txId, { status: "confirming", notifiedAt: new Date() });
+    // A finalized block is the durable lower-bound recovery anchor if POST
+    // /swap succeeds but its response is lost. Unlike a latest-head number it
+    // cannot move ahead of the eventual canonical chain in a reorg and make a
+    // valid settlement invisible to the negative-proof scan. Read it before
+    // claiming the single-use quote: a failure here is safely retryable because
+    // nothing has been submitted.
+    try {
+      const block = await withDirectScanTimeout(settlementClient.getBlock({ blockTag: "finalized" }), 8_000) as {
+        number?: bigint | null;
+        timestamp?: bigint | null;
+      };
+      const anchor = validateSeraSubmissionAnchor({
+        blockNumber: block.number,
+        blockTimestamp: block.timestamp,
+        intentDeadline: route.deadline,
+      });
+      if (!anchor.valid) {
+        if (anchor.reason === "intent_expired") {
+          // Nothing has been claimed or sent yet. Let the client refresh this
+          // exact pending row instead of persisting/replaying an authorization
+          // whose Intent deadline can never be accepted.
+          res.status(409).json({
+            error: "This Sera quote has expired. Please request a fresh quote.",
+            errorCode: "quote_stale",
+          });
+          return;
+        }
+        throw new Error(`Finalized submission anchor is ${anchor.reason}`);
+      }
+      submittedBlockNumber = anchor.blockNumber;
+    } catch {
+      res.status(503).json({
+        error: "The settlement chain is temporarily unavailable. Please retry before this quote expires.",
+        errorCode: "sera_unavailable",
+      });
+      return;
+    }
+    const claim = await claimSeraSwapSubmission({
+      transactionId: txId,
+      quoteUuid,
+      intentHash: tx.intentHash,
+      submittedBlockNumber,
+    });
+    if (claim.outcome === "not_found") {
+      res.status(404).json({ error: "Transaction not found" });
+      return;
+    }
+    if (claim.outcome === "binding_mismatch") {
+      res.status(409).json({ error: "Sera quote binding changed before submission", errorCode: "invalid_quote" });
+      return;
+    }
+    if (claim.outcome === "binding_conflict") {
+      res.status(409).json({
+        error: "Another payment has already claimed this checkout.",
+        errorCode: "payment_already_submitted",
+      });
+      return;
+    }
+    if (claim.outcome === "already_claimed") {
+      await respondToPreviouslyClaimedSeraSwap(claim.transaction, res);
+      return;
+    }
+    if (claim.outcome === "invalid_state") {
+      const stale = Boolean(
+        (claim.transaction.quoteExpiresAt && new Date(claim.transaction.quoteExpiresAt).getTime() <= Date.now())
+        || (claim.transaction.intentDeadline && new Date(claim.transaction.intentDeadline).getTime() <= Date.now()),
+      );
+      res.status(409).json({
+        error: stale ? "This Sera quote has expired. Please request a fresh quote." : "This Sera swap is not in a submittable state.",
+        errorCode: stale ? "quote_stale" : "invalid_quote",
+      });
+      return;
+    }
+    txForFailure = claim.transaction;
+    const preSubmitNotes = JSON.stringify({
+      ...parseSeraTransactionNotes(claim.transaction.notes),
+      type: "sera_swap",
+      submittedBlockNumber,
+      seraStatus: "submitting",
+    });
+    await updateSeraSwapLifecycle(txId, { notes: preSubmitNotes, seraStatus: "submitting" });
     notifySseClients(txId, { status: "confirming" });
 
     const baseUrl = getSeraApiBaseUrlForChain(tx.chainId);
-    submittedBlockNumber = await CHAIN_CLIENTS[tx.chainId]?.getBlockNumber()
-      .then((blockNumber: bigint) => blockNumber.toString())
-      .catch(() => null) ?? null;
     seraOutcome = "unknown";
     const result = await callSeraApi<Record<string, unknown>>({
       baseUrl,
@@ -2178,18 +3322,20 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       timeoutMs: SERA_SWAP_SUBMIT_TIMEOUT_MS,
     });
 
-    const tradeId = typeof result.trade_id === "string" ? result.trade_id : null;
+    const tradeId = typeof result.trade_id === "string" && result.trade_id.trim() ? result.trade_id.trim() : null;
     const seraStatus = typeof result.status === "string" ? result.status.toLowerCase() : "pending";
-    const success = result.success === true && Boolean(tradeId);
-    seraOutcome = success ? "accepted" : "rejected";
+    const explicitlyRejected = result.success === false;
+    if (!explicitlyRejected && (result.success !== true || !tradeId)) {
+      // A 2xx response that does not satisfy Sera's documented success shape
+      // cannot prove rejection. Preserve the at-most-once claim and recover
+      // by Intent hash instead of telling the payer to submit another swap.
+      throw new Error("Sera returned an indeterminate swap submission response");
+    }
+    seraOutcome = explicitlyRejected ? "rejected" : "accepted";
     seraTradeId = tradeId;
     const txHash = extractTransactionHash(result);
-    let existingNotes: Record<string, unknown> = {};
-    try {
-      existingNotes = tx.notes ? JSON.parse(tx.notes) as Record<string, unknown> : {};
-    } catch {}
     const notes = JSON.stringify({
-      ...existingNotes,
+      ...parseSeraTransactionNotes(preSubmitNotes),
       type: "sera_swap",
       tradeId,
       seraStatus,
@@ -2197,106 +3343,111 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       seraSubmitResponse: result,
     });
 
-    if (!success) {
-      // Sera answered and declined (or returned no trade id). Route it through
-      // failTransactionRecord like every other terminal failure so the
-      // merchant SSE fires and the payment intent, not only the menu order,
-      // leaves "open" — this branch used to tell the payer alone.
-      // Sera's own words when it gives any, and nothing of ours when it does
-      // not: an empty reason leaves failureReason unset, so the checkout falls
-      // back to its existing approved "Payment verification failed" line.
+    if (explicitlyRejected) {
       const reason = [result.error, result.message, result.error_code]
         .find((value): value is string => typeof value === "string" && value.trim().length > 0)
-        ?? "";
-      await updateTransaction(txId, { notes });
-      await failTransactionRecord({ ...tx, notes }, reason);
-      res.status(502).json({ success: false, status: "failed", sera: result });
-      return;
-    }
-
-    if (seraStatus !== "settled") {
-      await updateTransaction(txId, {
-        status: "confirming",
-        verified: 0,
-        ...(txHash ? { txHash } : {}),
-        notes,
-        notifiedAt: new Date(),
-      });
-      const orderId = orderIdFromTransactionNotes(tx.notes);
-      if (orderId) {
-        await updateMenuOrderPayment(orderId, tx.merchantId, { status: "payment_submitted", paymentId: txId, transactionId: txId }).catch(() => undefined);
-      }
-      notifySseClients(txId, { status: "confirming", txHash, tradeId });
-      void getTransactionById(txId)
-        .then((fresh) => fresh ? reconcileSeraSwapTransaction(fresh) : undefined)
-        .catch((error) => logSeraOperationFailure("payment/swap/reconcile", error));
-      res.json({ success: true, status: "confirming", tradeId, txHash, sera: result });
-      return;
-    }
-
-    await updateTransaction(txId, {
-      status: "confirmed",
-      verified: 1,
-      ...(txHash ? { txHash } : {}),
-      notes,
-      notifiedAt: new Date(),
-      webhookSentAt: new Date(),
-    });
-
-    notifySseClients(txId, { status: "confirmed", txHash, verified: true });
-    notifyMerchantSse(tx.merchantId, {
-      event: "payment_received",
-      transactionId: txId,
-      txHash,
-      amount: tx.amount,
-      coin: tx.coin,
-      payAmount: tx.payAmount,
-      payCoin: tx.payCoin,
-      from: tx.fromAddress,
-      verified: true,
-      source: "sera_swap",
-    });
-
-    const paymentIntentId = (() => {
-      try {
-        const parsed = tx.notes ? JSON.parse(tx.notes) as { paymentIntentId?: string | null } : null;
-        return parsed?.paymentIntentId ?? null;
-      } catch { return null; }
-    })();
-    if (paymentIntentId) {
-      await updatePaymentIntent(paymentIntentId, { status: "paid" }).catch(() => undefined);
-    }
-    const orderId = orderIdFromTransactionNotes(tx.notes);
-    if (orderId) {
-      await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    }
-
-    const merchant = await getMerchantById(tx.merchantId);
-    if (merchant?.webhookUrl) {
-      sendWebhook(
-        merchant.webhookUrl,
-        merchant.webhookSecret,
-        {
-          event: "payment.confirmed",
-          txId,
-          txHash,
-          coin: tx.coin,
-          amount: tx.amount,
-          payCoin: tx.payCoin,
-          payAmount: tx.payAmount,
-          fromAddress: tx.fromAddress,
-          toAddress: tx.toAddress,
-          verified: true,
-          source: "sera_swap",
+        ?? "Sera declined the swap";
+      const code = typeof result.error_code === "string"
+        ? result.error_code.toLowerCase()
+        : "settlement_failed";
+      // POST /swap was reached. Treat even an explicit provider rejection as
+      // advisory until the finalized chain range proves this Intent did not
+      // match: allowing a fresh attempt immediately could double-pay if the
+      // response raced an accepted/on-chain order.
+      const rejected = await claimSeraSwapPostNetworkUpdate({
+        transactionId: txId,
+        intentHash: tx.intentHash,
+        quoteUuid,
+        patch: {
+          status: "confirming",
+          notes: notesWithFailureReason(notes, reason),
+          submitState: "settlement_unknown",
+          seraStatus: "settlement_unknown",
+          failureCode: `provider_rejected:${code}`.slice(0, 100),
         },
-        { merchantId: merchant.id, txId, txHash }
-      ).catch((error) => logSeraOperationFailure("payment-notification", error));
+      });
+      if (rejected.outcome !== "claimed") {
+        if (rejected.outcome !== "not_found") await respondToPreviouslyClaimedSeraSwap(rejected.transaction, res);
+        else res.status(404).json({ error: "Transaction not found" });
+        return;
+      }
+      notifySseClients(txId, { status: "confirming" });
+      void reconcileSeraSwapTransaction(rejected.transaction)
+        .catch((error) => logSeraOperationFailure("payment/swap/reconcile-rejected", error));
+      res.json({
+        success: true,
+        status: "confirming",
+        tradeId,
+        txHash,
+        providerRejected: true,
+        sera: result,
+      });
+      return;
     }
 
-    res.json({ success: true, status: "confirmed", txHash, sera: result });
+    const accepted = await claimSeraSwapPostNetworkUpdate({
+      transactionId: txId,
+      intentHash: tx.intentHash,
+      quoteUuid,
+      patch: {
+      status: "confirming",
+      tradeId,
+      submitState: "submitted",
+      seraStatus,
+      notes,
+      },
+    });
+    if (accepted.outcome !== "claimed") {
+      if (accepted.outcome !== "not_found") await respondToPreviouslyClaimedSeraSwap(accepted.transaction, res);
+      else res.status(404).json({ error: "Transaction not found" });
+      return;
+    }
+    txForFailure = accepted.transaction;
+    notifySseClients(txId, { status: "confirming", txHash, tradeId });
+    void getTransactionById(txId)
+      .then((fresh) => fresh ? reconcileSeraSwapTransaction(fresh) : undefined)
+      .catch((error) => logSeraOperationFailure("payment/swap/reconcile", error));
+    // Even when POST /swap says "settled", its documented response does not
+    // include the order identity, merchant credit, or recipient proof. Only
+    // reconciliation may turn this row into a confirmed payment.
+    res.json({ success: true, status: "confirming", tradeId, txHash, sera: result });
   } catch (e: any) {
     logSeraOperationFailure("payment/swap/submit", e);
-    if (txForFailure && (seraOutcome === "accepted" || (seraOutcome === "unknown" && isSeraAnswerMissing(e)))) {
+    const response = seraPaymentErrorResponse(e, "Unable to submit Sera swap");
+    const providerCode = e instanceof SeraApiError ? String(e.errorCode || "").toUpperCase() : "";
+    if (
+      txForFailure
+      && e instanceof SeraApiError
+      && e.status === 409
+      && providerCode === "QUOTE_STALE"
+    ) {
+      // This documented response proves this UUID was rejected before Sera
+      // accepted an order, so the same transaction may be re-quoted safely.
+      const stale = await reopenSeraSwapAfterStaleRejection({
+        transactionId: txForFailure.id,
+        intentHash: txForFailure.intentHash!,
+        quoteUuid: txForFailure.quoteUuid!,
+        notes: JSON.stringify({
+          ...parseSeraTransactionNotes(txForFailure.notes),
+          seraStatus: "quote_stale",
+          seraSubmitError: e.message,
+        }),
+      }).catch((updateError) => {
+        logSeraOperationFailure("payment/swap/status-update", updateError);
+        return null;
+      });
+      if (stale && stale.outcome !== "claimed" && stale.outcome !== "not_found" && stale.transaction.status !== "pending") {
+        await respondToPreviouslyClaimedSeraSwap(stale.transaction, res);
+        return;
+      }
+      res.status(response.status).json(response.body);
+      return;
+    }
+    if (txForFailure && (
+      seraOutcome === "accepted"
+      || seraOutcome === "rejected"
+      || (seraOutcome === "unknown" && !isSeraProvenNeverConnected(e))
+    )) {
       // Either Sera accepted the order and our own bookkeeping threw, or the
       // order left this process and Sera never answered — an abort after the
       // budget above, a reset socket, a dropped response. In both cases Sera
@@ -2314,12 +3465,10 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
         res.json({ success: current.status === "confirmed", status: current.status, txHash: current.txHash ?? null });
         return;
       }
-      let existingNotes: Record<string, unknown> = {};
-      try {
-        const raw = (current ?? txForFailure).notes;
-        existingNotes = raw ? JSON.parse(raw) as Record<string, unknown> : {};
-      } catch {}
-      const tradeId = seraTradeId ?? (typeof existingNotes.tradeId === "string" ? existingNotes.tradeId : null);
+      const existingNotes = parseSeraTransactionNotes((current ?? txForFailure).notes);
+      const tradeId = seraTradeId
+        ?? current?.tradeId
+        ?? (typeof existingNotes.tradeId === "string" ? existingNotes.tradeId : null);
       const notes = JSON.stringify({
         ...existingNotes,
         type: "sera_swap",
@@ -2327,17 +3476,53 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
         submittedBlockNumber: existingNotes.submittedBlockNumber ?? submittedBlockNumber,
         seraSubmitError: e instanceof Error ? e.message : "Sera did not answer the swap submission",
       });
-      await updateTransaction(txForFailure.id, { status: "confirming", notes }).catch((updateError) => {
+      const unknown = await claimSeraSwapPostNetworkUpdate({
+        transactionId: txForFailure.id,
+        intentHash: txForFailure.intentHash!,
+        quoteUuid: txForFailure.quoteUuid!,
+        patch: {
+          status: "confirming",
+          submitState: "settlement_unknown",
+          seraStatus: "settlement_unknown",
+          ...(tradeId ? { tradeId } : {}),
+          failureCode: "settlement_unknown",
+          notes,
+        },
+      }).catch((updateError) => {
         logSeraOperationFailure("payment/swap/status-update", updateError);
+        return null;
       });
-      res.json({ success: true, status: "confirming", tradeId, txHash: current?.txHash ?? null });
+      if (unknown && unknown.outcome !== "claimed") {
+        if (unknown.outcome !== "not_found") await respondToPreviouslyClaimedSeraSwap(unknown.transaction, res);
+        else res.status(404).json({ error: "Transaction not found" });
+        return;
+      }
+      const refreshed = unknown?.transaction ?? await getTransactionById(txForFailure.id).catch(() => undefined);
+      if (refreshed) void reconcileSeraSwapTransaction(refreshed).catch((error) => logSeraOperationFailure("payment/swap/reconcile-unknown", error));
+      res.json({ success: true, status: "confirming", tradeId, txHash: refreshed?.settlementTxHash ?? refreshed?.txHash ?? null });
       return;
     }
-    const response = seraPaymentErrorResponse(e, "Unable to submit Sera swap");
     if (txForFailure) {
-      await failTransactionRecord(txForFailure, response.body.error).catch((failError) => {
+      const failed = await claimSeraSwapPostNetworkUpdate({
+        transactionId: txForFailure.id,
+        intentHash: txForFailure.intentHash!,
+        quoteUuid: txForFailure.quoteUuid!,
+        patch: {
+          status: "failed",
+          submitState: "failed",
+          seraStatus: "failed",
+          failureCode: response.body.errorCode,
+          notes: notesWithFailureReason(txForFailure.notes, response.body.error),
+        },
+      }).catch((failError) => {
         logSeraOperationFailure("payment/swap/status-update", failError);
+        return null;
       });
+      if (failed?.outcome === "claimed") await deliverSeraSwapOutcomeEffects(failed.transaction);
+      else if (failed && failed.outcome !== "not_found") {
+        await respondToPreviouslyClaimedSeraSwap(failed.transaction, res);
+        return;
+      }
     }
     res.status(response.status).json(response.body);
   }
@@ -2346,35 +3531,47 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
 /** POST /api/payment/notify — customer submits tx hash after sending */
 paymentRouter.post("/payment/notify", async (req, res) => {
   try {
-    const { txId, txHash, fromAddress } = req.body;
+    const { txId, fromAddress } = req.body;
+    const txHash = typeof req.body.txHash === "string" ? req.body.txHash.toLowerCase() : "";
     if (!txId || typeof txId !== "string") { res.status(400).json({ error: "Missing txId" }); return; }
     if (!txHash || !/^0x[0-9a-fA-F]{64}$/.test(txHash)) { res.status(400).json({ error: "Invalid txHash" }); return; }
     let tx = await getTransactionById(txId);
     if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
+    if (isSeraSwapTransaction(tx)) {
+      res.status(409).json({
+        error: "Sera swap payments must be submitted through the signed swap endpoint.",
+        errorCode: "invalid_request",
+      });
+      return;
+    }
     const staleCanceled = await cancelStaleMerchantTransactions(tx.merchantId, [tx]);
     if (staleCanceled > 0) tx = await getTransactionById(txId);
     if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
     if (tx.status === "canceled") { res.status(409).json({ error: "Transaction was canceled" }); return; }
-    if (tx.txHash && tx.txHash !== txHash) { res.status(409).json({ error: "Transaction already has a different txHash" }); return; }
+    if (tx.txHash && tx.txHash.toLowerCase() !== txHash) { res.status(409).json({ error: "Transaction already has a different txHash" }); return; }
     if (fromAddress) {
       if (!/^0x[0-9a-fA-F]{40}$/.test(fromAddress)) { res.status(400).json({ error: "Invalid fromAddress" }); return; }
-      const compliance = await screenWalletAddress(fromAddress, "payer_wallet", tx.merchantId);
-      if (compliance.blocked) {
-        await updateTransaction(txId, { status: "failed", notes: "Blocked by compliance screening" });
-        res.status(403).json({ error: "Payer address failed compliance screening", compliance });
-        return;
-      }
     }
-    try {
-      await updateTransaction(txId, { txHash, fromAddress: fromAddress?.toLowerCase() || null, status: "confirming", notifiedAt: new Date() });
-      const orderId = orderIdFromTransactionNotes(tx.notes);
-      if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "payment_submitted", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    } catch (dbErr: any) {
-      // Duplicate txHash across different payment records.
-      if (dbErr?.cause?.code === "23505" || dbErr?.code === "23505") {
-        res.status(409).json({ error: "This transaction hash is already associated with another payment" }); return;
-      }
-      throw dbErr;
+    // `fromAddress` in the request is advisory only. The authoritative payer
+    // is decoded and screened from the matching ERC-20 receipt log. Claiming
+    // the hash and linked order is one database transaction so an old direct
+    // request cannot overwrite a Sera payment that already owns that order.
+    const notification = await claimDirectTransactionNotification({ transactionId: txId, txHash });
+    if (notification.outcome === "not_found") {
+      res.status(404).json({ error: "Transaction not found" });
+      return;
+    }
+    if (notification.outcome === "hash_conflict") {
+      res.status(409).json({ error: "This transaction hash is already associated with another payment" });
+      return;
+    }
+    if (notification.outcome === "binding_conflict") {
+      res.status(409).json({ error: "This order is already assigned to another payment" });
+      return;
+    }
+    if (notification.outcome === "invalid_state") {
+      res.status(409).json({ error: "This direct payment is no longer awaiting a transaction hash" });
+      return;
     }
     notifySseClients(txId, { status: "confirming", txHash });
     // Fire-and-forget verification. The in-flight guard prevents duplicate
@@ -2386,6 +3583,7 @@ paymentRouter.post("/payment/notify", async (req, res) => {
 
 /** GET /api/payment/status/:txId — poll payment status */
 paymentRouter.get("/payment/status/:txId", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   try {
     let tx = await getTransactionById(req.params.txId);
     if (!tx) { res.status(404).json({ error: "Not found" }); return; }
@@ -2394,16 +3592,28 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
       if (tx.status === "confirming" && tx.txHash && !isSeraSwapTransaction(tx)) {
         scheduleTransactionVerification(tx.id, tx.txHash as `0x${string}`);
       }
+    } else if (isSeraSwapTransaction(tx) && (tx.status === "confirmed" || tx.status === "failed")) {
+      void deliverSeraSwapOutcomeEffects(tx).catch((error) => {
+        logSeraOperationFailure("payment/swap/outcome-status-recovery", error);
+      });
     }
     const canceled = await cancelStaleMerchantTransactions(tx.merchantId, [tx]);
     if (canceled > 0) tx = await getTransactionById(req.params.txId);
     if (!tx) { res.status(404).json({ error: "Not found" }); return; }
     const merchant = await getMerchantById(tx.merchantId);
+    const provisional = tx.status === "confirming" ? storedSeraProvisionalSettlement(tx) : null;
     res.json({
       txId: tx.id,
-      status: tx.status,
+      status: provisional ? "received" : tx.status,
+      received: Boolean(provisional),
+      finality: provisional
+        ? "provisional"
+        : isSeraSwapTransaction(tx) && tx.status === "confirmed" && tx.verified === 1
+          ? "finalized"
+          : null,
+      provisionalConfirmations: provisional?.confirmations ?? null,
       verified: tx.verified === 1,
-      txHash: tx.txHash,
+      txHash: provisional?.txHash ?? tx.txHash,
       coin: tx.coin,
       amount: tx.amount,
       toAddress: tx.toAddress,
@@ -2473,6 +3683,20 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
       token = await resolveSeraTokenForChain(chainId, coin);
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : "Unsupported coin on this network" });
+      return;
+    }
+    let seraVaultAddresses: ReadonlySet<string>;
+    try {
+      seraVaultAddresses = await getSeraVaultExclusionSet(chainId);
+    } catch (error) {
+      logSeraOperationFailure("payment/direct/vault-config", error);
+      // Fail closed: without the live Vault address this scanner cannot safely
+      // distinguish a direct payment from a Sera settlement payout.
+      res.json({
+        status: "pending",
+        fromBlock: requestedFromBlock?.toString() ?? null,
+        warning: "Payment scanner configuration is temporarily unavailable",
+      });
       return;
     }
     const storedPaymentUrl = storedDirectQrPaymentUrl(paymentUrl);
@@ -2555,7 +3779,15 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
       if (remaining <= 0) break;
       let found: Awaited<ReturnType<typeof findDirectTransfer>>;
       try {
-        found = await withDirectScanTimeout(findDirectTransfer({ toAddress, coin, amount, chainId, fromBlock: cursor, toBlock }), remaining);
+        found = await withDirectScanTimeout(findDirectTransfer({
+          toAddress,
+          coin,
+          amount,
+          chainId,
+          fromBlock: cursor,
+          toBlock,
+          excludedFromAddresses: seraVaultAddresses,
+        }), remaining);
       } catch {
         res.json({ status: "pending", fromBlock: cursor.toString(), latestBlock: latestBlock.toString(), warning: "Scanner RPC is temporarily slow" });
         return;
@@ -2700,6 +3932,7 @@ const CHAIN_CLIENTS: Record<number, any> = {
 const SERA_CHAIN_SCAN_INTERVAL_MS = 8_000;
 const SERA_CHAIN_SCAN_CHUNK_SIZE = 49n;
 const SERA_CHAIN_SCAN_MAX_BLOCKS = SERA_CHAIN_SCAN_CHUNK_SIZE * 10n;
+const SERA_PROVISIONAL_CONFIRMATIONS = parseSeraProvisionalConfirmations(ENV.seraProvisionalConfirmations);
 const seraChainScanState = new Map<string, { lastFinishedAt: number; promise: Promise<Transaction> | null }>();
 
 function parseStoredBlockNumber(value: unknown): bigint | null {
@@ -2712,92 +3945,458 @@ function parseStoredBlockNumber(value: unknown): bigint | null {
   }
 }
 
+type SeraSettlementDeployment = {
+  seraAddress: `0x${string}`;
+  vaultAddress: `0x${string}`;
+  sorAddress: `0x${string}`;
+};
+
+function parseStoredSeraSettlementDeployment(value: unknown): SeraSettlementDeployment | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const addresses = [record.seraAddress, record.vaultAddress, record.sorAddress]
+    .map((address) => typeof address === "string" ? address.trim().toLowerCase() : "");
+  if (addresses.some((address) => !/^0x[0-9a-f]{40}$/.test(address))) return null;
+  if (new Set(addresses).size !== addresses.length) return null;
+  return {
+    seraAddress: addresses[0] as `0x${string}`,
+    vaultAddress: addresses[1] as `0x${string}`,
+    sorAddress: addresses[2] as `0x${string}`,
+  };
+}
+
+function parseStoredTokenDecimals(value: unknown): number | null {
+  const decimals = typeof value === "number" ? value : Number.NaN;
+  return Number.isInteger(decimals) && decimals >= 0 && decimals <= 255 ? decimals : null;
+}
+
+function reportedSeraSettlementHash(notes: Record<string, unknown>): `0x${string}` | null {
+  const economics = notes.seraSettlementEconomics;
+  if (!economics || typeof economics !== "object" || Array.isArray(economics)) return null;
+  const hash = (economics as Record<string, unknown>).txHash;
+  return typeof hash === "string" && /^0x[0-9a-fA-F]{64}$/.test(hash)
+    ? hash.toLowerCase() as `0x${string}`
+    : null;
+}
+
+function blockTimestampToDate(value: unknown): Date | null {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") return null;
+  try {
+    const seconds = BigInt(value);
+    if (seconds < 0n || seconds > 8_640_000_000_000n) return null;
+    const date = new Date(Number(seconds) * 1000);
+    return Number.isFinite(date.getTime()) ? date : null;
+  } catch {
+    return null;
+  }
+}
+
+type StoredSeraProvisionalSettlement = {
+  txHash: `0x${string}`;
+  blockNumber: bigint;
+  blockHash: `0x${string}`;
+  confirmations: 1 | 2;
+  observedAt: Date;
+};
+
+function storedSeraProvisionalSettlement(tx: Transaction): StoredSeraProvisionalSettlement | null {
+  const txHash = tx.provisionalSettlementTxHash?.trim().toLowerCase() ?? "";
+  const blockHash = tx.provisionalSettlementBlockHash?.trim().toLowerCase() ?? "";
+  const blockNumber = parseStoredBlockNumber(tx.provisionalSettlementBlockNumber);
+  const confirmations = Number(tx.provisionalSettlementConfirmations);
+  const observedAt = tx.provisionalSettlementAt ? new Date(tx.provisionalSettlementAt) : null;
+  if (
+    !/^0x[0-9a-f]{64}$/.test(txHash)
+    || !/^0x[0-9a-f]{64}$/.test(blockHash)
+    || blockNumber === null
+    || (confirmations !== 1 && confirmations !== 2)
+    || !observedAt
+    || !Number.isFinite(observedAt.getTime())
+  ) return null;
+  return {
+    txHash: txHash as `0x${string}`,
+    blockNumber,
+    blockHash: blockHash as `0x${string}`,
+    confirmations,
+    observedAt,
+  };
+}
+
+const SERA_NO_SETTLEMENT_REASON = "No Sera settlement was found in finalized blocks before the signed swap deadline.";
+
+async function claimExpiredSeraSwapAfterFinalizedScan({
+  tx,
+  notes,
+  intentHash,
+  scanFromBlock,
+  scanThroughBlock,
+  scanThroughTimestamp,
+}: {
+  tx: Transaction;
+  notes: Record<string, unknown>;
+  intentHash: `0x${string}`;
+  scanFromBlock: bigint;
+  scanThroughBlock: bigint;
+  scanThroughTimestamp: Date;
+}): Promise<Transaction> {
+  const deadlineMs = tx.intentDeadline ? new Date(tx.intentDeadline).getTime() : Number.NaN;
+  const nowMs = Date.now();
+  if (
+    !Number.isFinite(deadlineMs)
+    || deadlineMs > nowMs
+    || deadlineMs > scanThroughTimestamp.getTime()
+    || scanThroughTimestamp.getTime() > nowMs
+  ) {
+    return tx;
+  }
+
+  const failureNotes = notesWithFailureReason(JSON.stringify({
+    ...notes,
+    seraFinalizedScan: {
+      fromBlock: scanFromBlock.toString(),
+      throughBlock: scanThroughBlock.toString(),
+      throughTimestamp: scanThroughTimestamp.toISOString(),
+      result: "no_valid_settlement",
+    },
+  }), SERA_NO_SETTLEMENT_REASON);
+  const claim = await claimSeraSwapTerminalFailure({
+    transactionId: tx.id,
+    intentHash,
+    ...(tx.quoteUuid ? { expectedQuoteUuid: tx.quoteUuid } : {}),
+    ...(tx.tradeId ? { expectedTradeId: tx.tradeId } : {}),
+    finalizedScanFromBlock: scanFromBlock.toString(),
+    finalizedScanThroughBlock: scanThroughBlock.toString(),
+    finalizedScanThroughTimestamp: scanThroughTimestamp,
+    patch: {
+      notes: failureNotes,
+      seraStatus: "failed",
+    },
+  });
+  if (claim.outcome === "claimed") {
+    await deliverSeraSwapOutcomeEffects(claim.transaction);
+    return claim.transaction;
+  }
+  return claim.outcome === "not_found" ? tx : claim.transaction;
+}
+
 async function performSeraSwapOnChainReconciliation(tx: Transaction, notes: Record<string, unknown>): Promise<Transaction> {
-  const intentHash = typeof notes.intentHash === "string" && /^0x[0-9a-fA-F]{64}$/.test(notes.intentHash)
-    ? notes.intentHash as `0x${string}`
+  const boundIntent = storedSeraIntent(tx);
+  const storedIntentHash = tx.intentHash;
+  const intentHash = boundIntent
+    && storedIntentHash
+    && /^0x[0-9a-fA-F]{64}$/.test(storedIntentHash)
+    && hashSeraIntentStruct(boundIntent).toLowerCase() === storedIntentHash.toLowerCase()
+    ? storedIntentHash.toLowerCase() as `0x${string}`
     : null;
   const client = CHAIN_CLIENTS[Number(tx.chainId)];
-  if (!intentHash || !client) return tx;
+  if (!intentHash || !client || !boundIntent) return tx;
 
-  const baseUrl = getSeraApiBaseUrlForChain(tx.chainId);
-  const [config, token] = await Promise.all([
-    callSeraApi<SeraConfigResponse>({ baseUrl, path: "/config", authMode: "none", merchantId: tx.merchantId }),
-    resolveSeraTokenForChain(tx.chainId, tx.coin),
+  const submittedBlock = parseStoredBlockNumber(tx.submittedBlockNumber);
+  const receiveTokenAddress = tx.receiveTokenAddress?.trim().toLowerCase();
+  if (
+    submittedBlock === null
+    || !tx.targetReceiveAmountRaw
+    || !receiveTokenAddress
+    || !/^0x[0-9a-f]{40}$/.test(receiveTokenAddress)
+  ) return tx;
+
+  // New quotes persist their exact contract deployment and token precision so
+  // config/registry rotations cannot orphan an already-signed Intent. Older
+  // rows fall back to the currently validated Sera deployment and registry.
+  const storedDeployment = parseStoredSeraSettlementDeployment({
+    seraAddress: tx.seraAddress,
+    vaultAddress: tx.seraVaultAddress,
+    sorAddress: tx.seraSorAddress,
+  }) ?? parseStoredSeraSettlementDeployment(notes.seraDeployment);
+  const deployment = storedDeployment ?? await getSeraDeploymentForChain(Number(tx.chainId), tx.merchantId);
+  let tokenDecimals = parseStoredTokenDecimals(tx.receiveTokenDecimals)
+    ?? parseStoredTokenDecimals(notes.receiveTokenDecimals);
+  if (tokenDecimals === null) {
+    const token = await resolveSeraTokenForChain(tx.chainId, tx.coin);
+    if (token.address.toLowerCase() !== receiveTokenAddress) return tx;
+    tokenDecimals = token.decimals;
+  }
+
+  // A positive settlement can be acknowledged at the configured confirmation
+  // depth after re-checking its successful receipt and canonical block hash.
+  // Absence is fundamentally different: only a finalized head can prove that
+  // an expired Intent never matched. Fetch both independently so an RPC that
+  // temporarily cannot serve `finalized` does not delay a real positive match.
+  const [latestBlockResult, finalizedBlockResult] = await Promise.allSettled([
+    withDirectScanTimeout(client.getBlockNumber(), 8_000),
+    withDirectScanTimeout(client.getBlock({ blockTag: "finalized" }), 8_000),
   ]);
-  if (Number(config.chain_id) !== Number(tx.chainId)) return tx;
-  if (!config.sor_address || !/^0x[0-9a-fA-F]{40}$/.test(config.sor_address)) return tx;
-  if (!config.vault_address || !/^0x[0-9a-fA-F]{40}$/.test(config.vault_address)) return tx;
+  const latestBlockNumber = latestBlockResult.status === "fulfilled"
+    ? parseStoredBlockNumber(latestBlockResult.value)
+    : null;
+  const finalizedBlock = finalizedBlockResult.status === "fulfilled"
+    ? finalizedBlockResult.value as { number?: bigint | null; timestamp?: bigint | null }
+    : null;
+  const finalizedBlockNumber = parseStoredBlockNumber(finalizedBlock?.number);
+  const finalizedBlockTimestamp = blockTimestampToDate(finalizedBlock?.timestamp);
+  const provisionalScanHead = latestBlockNumber === null
+    ? null
+    : seraProvisionalSettlementScanHead(latestBlockNumber, SERA_PROVISIONAL_CONFIRMATIONS);
+  const availableScanHeads = [provisionalScanHead, finalizedBlockNumber]
+    .filter((blockNumber): blockNumber is bigint => blockNumber !== null);
+  if (availableScanHeads.length === 0) return tx;
+  const availableScanHead = availableScanHeads.reduce((highest, blockNumber) => (
+    blockNumber > highest ? blockNumber : highest
+  ));
 
-  const latestBlock = BigInt(String(await withDirectScanTimeout(client.getBlockNumber(), 8_000)));
-  const submittedBlock = parseStoredBlockNumber(notes.submittedBlockNumber);
-  const lastScannedBlock = parseStoredBlockNumber(notes.seraLastScannedBlock);
-  let fromBlock = lastScannedBlock !== null
-    ? lastScannedBlock + 1n
-    : submittedBlock !== null
-      ? (submittedBlock > 2n ? submittedBlock - 2n : 0n)
-      : (latestBlock > SERA_CHAIN_SCAN_CHUNK_SIZE ? latestBlock - SERA_CHAIN_SCAN_CHUNK_SIZE : 0n);
-  if (fromBlock > latestBlock) return tx;
-
-  const scanToBlock = fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n < latestBlock
+  // Re-scan from the durable pre-submit anchor on every attempt. Intent expiry
+  // is capped at five minutes while this bound spans ~100 minutes on Ethereum,
+  // so one gap-free range always covers every block in which this Intent could
+  // validly settle. This avoids trusting a cursor written by another process.
+  const fromBlock = submittedBlock > 2n ? submittedBlock - 2n : 0n;
+  if (fromBlock > availableScanHead) return tx;
+  const scanToBlock = fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n < availableScanHead
     ? fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n
-    : latestBlock;
-  const expectedRawAmount = BigInt(toRawTokenAmount(String(tx.amount), token.decimals));
+    : availableScanHead;
+  const expectedRawAmount = BigInt(tx.targetReceiveAmountRaw);
+  let sawBoundIntentMatched = tx.intentMatchedAt != null;
+  const durableMatchedTxHash = tx.intentMatchedTxHash?.trim().toLowerCase() ?? "";
+  const durableMatchedBlockNumber = parseStoredBlockNumber(tx.intentMatchedBlockNumber);
+  let durableProvisional = storedSeraProvisionalSettlement(tx);
+  if (durableProvisional) sawBoundIntentMatched = true;
+
+  if (durableProvisional) {
+    try {
+      const canonicalBlock = await withDirectScanTimeout(client.getBlock({
+        blockNumber: durableProvisional.blockNumber,
+      }), 8_000) as { hash?: unknown };
+      const canonicalBlockHash = typeof canonicalBlock.hash === "string"
+        ? canonicalBlock.hash.trim().toLowerCase()
+        : "";
+      if (/^0x[0-9a-f]{64}$/.test(canonicalBlockHash) && canonicalBlockHash !== durableProvisional.blockHash) {
+        const cleared = await clearSeraSwapProvisionalSettlement({
+          transactionId: tx.id,
+          quoteUuid: tx.quoteUuid!,
+          intentHash,
+          txHash: durableProvisional.txHash,
+          blockNumber: durableProvisional.blockNumber.toString(),
+          blockHash: durableProvisional.blockHash,
+        });
+        if (cleared.outcome === "cleared") {
+          tx = cleared.transaction;
+          notes = parseSeraTransactionNotes(tx.notes);
+          durableProvisional = null;
+          sawBoundIntentMatched = tx.intentMatchedAt != null;
+          notifySseClients(tx.id, { status: "confirming", received: false });
+        } else if (cleared.outcome !== "already_clear" && cleared.outcome !== "evidence_mismatch") {
+          return cleared.outcome === "not_found" ? tx : cleared.transaction;
+        }
+      }
+    } catch {
+      // A timeout or missing RPC response does not prove a reorg. Keep the
+      // observation until a canonical block at the same height explicitly
+      // returns a different hash.
+    }
+  }
 
   for (let chunkFrom = fromBlock; chunkFrom <= scanToBlock; chunkFrom += SERA_CHAIN_SCAN_CHUNK_SIZE) {
     const chunkTo = chunkFrom + SERA_CHAIN_SCAN_CHUNK_SIZE - 1n < scanToBlock
       ? chunkFrom + SERA_CHAIN_SCAN_CHUNK_SIZE - 1n
       : scanToBlock;
-    const matchedLogs = await withDirectScanTimeout(client.getLogs({
-      address: config.sor_address.toLowerCase() as `0x${string}`,
+    const queriedMatchedLogs = await withDirectScanTimeout(client.getLogs({
+      address: deployment.sorAddress,
       event: SERA_INTENT_MATCHED_EVENT,
-      args: { intentHash },
+      args: {
+        intentHash,
+        ...(tx.fromAddress ? { taker: tx.fromAddress.toLowerCase() as `0x${string}` } : {}),
+      },
       fromBlock: chunkFrom,
       toBlock: chunkTo,
     }), 8_000);
+    const matchedLogs = [...queriedMatchedLogs as any[]];
+    if (
+      tx.intentMatchedAt != null
+      && /^0x[0-9a-f]{64}$/.test(durableMatchedTxHash)
+      && durableMatchedBlockNumber != null
+      && durableMatchedBlockNumber >= chunkFrom
+      && durableMatchedBlockNumber <= chunkTo
+      && !matchedLogs.some((log) => String(log.transactionHash || "").toLowerCase() === durableMatchedTxHash)
+    ) {
+      // A provider cannot erase positive evidence another replica already
+      // persisted. Re-query the payout block even if this RPC omits the SOR
+      // event on a later scan.
+      matchedLogs.push({
+        transactionHash: durableMatchedTxHash,
+        blockNumber: durableMatchedBlockNumber,
+      });
+    }
+    if (
+      durableProvisional
+      && durableProvisional.blockNumber >= chunkFrom
+      && durableProvisional.blockNumber <= chunkTo
+      && !matchedLogs.some((log) => String(log.transactionHash || "").toLowerCase() === durableProvisional!.txHash)
+    ) {
+      // Once this height is finalized, the previously receipt-verified
+      // provisional envelope is safe to promote even if a later getLogs call
+      // is incomplete. Its block hash was rechecked above.
+      matchedLogs.push({
+        transactionHash: durableProvisional.txHash,
+        blockNumber: durableProvisional.blockNumber,
+        blockHash: durableProvisional.blockHash,
+      });
+    }
 
-    for (const matchedLog of matchedLogs as any[]) {
+    for (const matchedLog of matchedLogs) {
       const txHash = String(matchedLog.transactionHash || "").toLowerCase();
       const blockNumber = parseStoredBlockNumber(matchedLog.blockNumber);
       if (!/^0x[0-9a-f]{64}$/.test(txHash) || blockNumber === null) continue;
+      const observationStage = classifySeraSettlementObservationStage({
+        settlementBlockNumber: blockNumber,
+        provisionalScanHead,
+        finalizedBlockNumber,
+      });
+      if (observationStage === "immature") continue;
+      const matchedAtFinalizedHead = observationStage === "finalized";
+
+      // Finding the exact bound log at/before finalized is already enough to
+      // forbid a negative decision in this pass. Receipt or payout RPC failure
+      // is incomplete corroboration, never proof that the event was absent.
+      if (matchedAtFinalizedHead) sawBoundIntentMatched = true;
+
+      // getLogs can race a short reorg. Before persisting or notifying, require
+      // the transaction's successful receipt and verify that its receipt block
+      // hash is still the canonical hash at that exact height.
+      let receipt: Record<string, unknown>;
+      let canonicalBlock: Record<string, unknown>;
+      try {
+        [receipt, canonicalBlock] = await Promise.all([
+          withDirectScanTimeout(client.getTransactionReceipt({ hash: txHash as `0x${string}` }), 8_000),
+          withDirectScanTimeout(client.getBlock({ blockNumber }), 8_000),
+        ]) as [Record<string, unknown>, Record<string, unknown>];
+      } catch {
+        continue;
+      }
+      if (!isCanonicalSuccessfulSeraSettlement({
+        expectedTransactionHash: txHash,
+        expectedBlockNumber: blockNumber,
+        matchedLogBlockHash: matchedLog.blockHash,
+        matchedLogRemoved: matchedLog.removed,
+        receipt,
+        canonicalBlock,
+      })) continue;
+
+      sawBoundIntentMatched = true;
+
+      // Only finalized positive evidence is a permanent no-failure marker. An
+      // early-confirmation candidate stays ephemeral until the complete payout
+      // proof is committed, so a pre-commit reorg cannot strand the row behind
+      // a stale marker forever.
+      if (matchedAtFinalizedHead) {
+        const marker = await markSeraIntentMatchedEvidence({
+          transactionId: tx.id,
+          quoteUuid: tx.quoteUuid!,
+          intentHash,
+          settlementTxHash: txHash,
+          blockNumber: blockNumber.toString(),
+        });
+        if (marker.outcome === "not_found") return tx;
+        if (marker.outcome === "already_confirmed") return marker.transaction;
+        if (marker.outcome === "binding_mismatch" || marker.outcome === "invalid_state") {
+          return marker.transaction;
+        }
+      }
 
       const payoutLogs = await withDirectScanTimeout(client.getLogs({
-        address: token.address.toLowerCase() as `0x${string}`,
+        address: receiveTokenAddress as `0x${string}`,
         event: ERC20_TRANSFER_EVENT,
         args: {
-          from: config.vault_address.toLowerCase() as `0x${string}`,
+          from: deployment.vaultAddress,
           to: tx.toAddress.toLowerCase() as `0x${string}`,
         },
         fromBlock: blockNumber,
         toBlock: blockNumber,
       }), 8_000);
-      const payout = (payoutLogs as any[]).find((log) => {
-        if (String(log.transactionHash || "").toLowerCase() !== txHash) return false;
-        try { return BigInt(String(log.args?.value ?? 0)) >= expectedRawAmount; } catch { return false; }
+      const payout = corroborateSeraIntentPayout({
+        settlementTxHash: txHash,
+        outputTokenAddress: receiveTokenAddress,
+        vaultAddress: deployment.vaultAddress,
+        recipientAddress: tx.toAddress,
+        signedMinimumOutputRaw: boundIntent.minOutputAmount,
+        requiredOutputRaw: expectedRawAmount.toString(),
+        transferLogs: payoutLogs as any[],
       });
       if (!payout) continue;
 
-      const alreadyRecorded = await getTransactionByHash(txHash);
-      if (alreadyRecorded && alreadyRecorded.id !== tx.id) {
-        console.warn("[payment/swap/reconcile-chain] Settlement hash already belongs to another payment");
-        return tx;
+      const providerReportedHash = reportedSeraSettlementHash(notes);
+      const providerHashMismatch = Boolean(providerReportedHash && providerReportedHash !== txHash);
+      if (providerHashMismatch) {
+        // GET /orders is useful accounting evidence, but the exact canonical
+        // Intent event and payout are authoritative. A stale provider hash
+        // must never hide a real merchant payment or make it fail.
+        console.warn("[payment/swap/reconcile-chain] Sera order hash differs from authoritative on-chain settlement");
       }
-      const merchant = await getMerchantById(tx.merchantId);
-      if (!merchant) return tx;
+      const settlementEvidence = {
+        intentHash,
+        txHash,
+        blockNumber: blockNumber.toString(),
+        blockHash: String(receipt.blockHash).toLowerCase(),
+        signedMinimumOutputRaw: boundIntent.minOutputAmount,
+        requiredOutputRaw: expectedRawAmount.toString(),
+        corroboratingVaultTransferCount: payout.observedTransferCount,
+        // SeraBatcher may include several intents in this transaction, so
+        // transfer values are deliberately not summed as actual economics.
+        verifiedAgainst: "IntentMatchedEnvelope+VaultTransferPresence+CanonicalReceipt",
+      };
 
-      const rawPayout = BigInt(String(payout.args?.value ?? 0));
-      const settlementNotes = JSON.stringify({
-        ...notes,
-        seraStatus: "settled",
-        seraOnchainSettlement: {
+      if (!matchedAtFinalizedHead) {
+        const provisional = await claimSeraSwapProvisionalSettlement({
+          transactionId: tx.id,
+          quoteUuid: tx.quoteUuid!,
           intentHash,
           txHash,
           blockNumber: blockNumber.toString(),
-          payoutRaw: rawPayout.toString(),
-          verifiedAgainst: "IntentMatched+VaultTransfer",
-        },
+          blockHash: settlementEvidence.blockHash,
+          confirmations: SERA_PROVISIONAL_CONFIRMATIONS,
+          ...(tx.tradeId ? { expectedTradeId: tx.tradeId } : {}),
+        });
+        if (provisional.outcome === "not_found") return tx;
+        if (provisional.outcome === "binding_mismatch" || provisional.outcome === "invalid_state") {
+          return provisional.transaction;
+        }
+        if (provisional.outcome === "evidence_conflict") {
+          // Never replace one durable observation with another implicitly. A
+          // canonical block-hash mismatch must clear the first envelope before
+          // any new one can be shown as received.
+          return provisional.transaction;
+        }
+        if (provisional.outcome === "claimed") {
+          notifySseClients(tx.id, {
+            status: "received",
+            received: true,
+            finality: "provisional",
+            txHash,
+            confirmations: SERA_PROVISIONAL_CONFIRMATIONS,
+          });
+        }
+        return provisional.transaction;
+      }
+
+      const merchant = await getMerchantById(tx.merchantId);
+      if (!merchant) return tx;
+      const settlementNotes = JSON.stringify({
+        ...notes,
+        seraStatus: "settled",
+        ...(providerHashMismatch ? {
+          seraOrderHashMismatch: {
+            reportedTxHash: providerReportedHash,
+            verifiedTxHash: txHash,
+            observedAt: new Date().toISOString(),
+          },
+        } : {}),
+        seraOnchainSettlement: { ...settlementEvidence, confirmationPolicy: "finalized" },
       });
-      await updateTransaction(tx.id, { notes: settlementNotes });
-      const pending = await getTransactionById(tx.id) ?? { ...tx, notes: settlementNotes };
+      // Do not persist a half-settled `settled + confirming` state. The CAS
+      // below writes proof, final state and notification ownership together.
+      const pending: Transaction = {
+        ...tx,
+        notes: settlementNotes,
+      };
+      const confirmedOutputRaw = pending.actualReceiveAmountRaw;
       return confirmPendingDirectTransfer({
         pending,
         merchant,
@@ -2805,19 +4404,68 @@ async function performSeraSwapOnChainReconciliation(tx: Transaction, notes: Reco
         fromAddress: tx.fromAddress,
         toAddress: tx.toAddress,
         coin: tx.coin,
-        amount: fromRawTokenAmount(rawPayout, token.decimals),
+        amount: confirmedOutputRaw
+          ? fromRawTokenAmount(BigInt(confirmedOutputRaw), tokenDecimals)
+          : String(tx.amount),
         verified: true,
       });
     }
   }
 
   const current = await getTransactionById(tx.id) ?? tx;
-  let currentNotes = notes;
-  try { currentNotes = current.notes ? JSON.parse(current.notes) as Record<string, unknown> : notes; } catch {}
-  await updateTransaction(tx.id, {
-    notes: JSON.stringify({ ...currentNotes, seraLastScannedBlock: scanToBlock.toString() }),
+  const currentNotes = parseSeraTransactionNotes(current.notes);
+  if (sawBoundIntentMatched) {
+    console.warn("[payment/swap/reconcile-chain] Canonical IntentMatched is awaiting merchant payout corroboration", {
+      transactionId: tx.id,
+      intentHash,
+    });
+    const pendingEvidence = await claimSeraSwapPostNetworkUpdate({
+      transactionId: current.id,
+      intentHash,
+      quoteUuid: current.quoteUuid!,
+      patch: {
+        status: "confirming",
+        submitState: "settlement_unknown",
+        seraStatus: "settlement_unknown",
+        failureCode: "payout_evidence_pending",
+        notes: JSON.stringify({
+          ...currentNotes,
+          seraStatus: "settlement_unknown",
+          seraOnchainEvidence: {
+            state: "intent_matched_payout_pending",
+            intentHash,
+            txHash: current.intentMatchedTxHash,
+            blockNumber: current.intentMatchedBlockNumber,
+            observedAt: new Date().toISOString(),
+          },
+        }),
+      },
+    });
+    return pendingEvidence.outcome === "not_found" ? current : pendingEvidence.transaction;
+  }
+  // Never derive negative proof from the faster head. A swap may fail only
+  // after the finalized range reaches its signed deadline with no match.
+  if (finalizedBlockNumber === null || !finalizedBlockTimestamp || fromBlock > finalizedBlockNumber) return current;
+  const finalizedScanToBlock = fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n < finalizedBlockNumber
+    ? fromBlock + SERA_CHAIN_SCAN_MAX_BLOCKS - 1n
+    : finalizedBlockNumber;
+  let scanThroughTimestamp: Date | null = finalizedBlockTimestamp;
+  if (finalizedScanToBlock !== finalizedBlockNumber) {
+    const scanThroughBlock = await withDirectScanTimeout(
+      client.getBlock({ blockNumber: finalizedScanToBlock }),
+      8_000,
+    ) as { timestamp?: bigint | null };
+    scanThroughTimestamp = blockTimestampToDate(scanThroughBlock.timestamp);
+  }
+  if (!scanThroughTimestamp) return current;
+  return claimExpiredSeraSwapAfterFinalizedScan({
+    tx: current,
+    notes: currentNotes,
+    intentHash,
+    scanFromBlock: fromBlock,
+    scanThroughBlock: finalizedScanToBlock,
+    scanThroughTimestamp,
   });
-  return await getTransactionById(tx.id) ?? current;
 }
 
 async function reconcileSeraSwapOnChain(tx: Transaction, notes: Record<string, unknown>): Promise<Transaction> {
@@ -3077,14 +4725,13 @@ async function resolveDirectQrWatch({
  * or intent — a watch row has neither.
  */
 async function expireDirectQrWatch(tx: Transaction) {
-  if (tx.status !== "pending") return false;
   const reason = "QR watch expired after 5 minutes without payment.";
-  await updateTransaction(tx.id, {
-    status: "canceled",
+  const cancellation = await claimDirectTransactionCancellation({
+    transactionId: tx.id,
     memo: tx.memo || reason.slice(0, 200),
     notes: notesWithCancellationReason(tx.notes, reason),
   });
-  return true;
+  return cancellation.outcome === "claimed";
 }
 
 async function findMatchingPendingTransaction({
@@ -3106,6 +4753,7 @@ async function findMatchingPendingTransaction({
 }) {
   const recent = await getMerchantTransactions(merchantId, 100);
   const candidates = recent.filter((tx) => {
+    if (!isDirectTransferCandidate(tx)) return false;
     if (tx.txHash) return false;
     if (tx.status !== "pending" && tx.status !== "confirming") return false;
     if (String(tx.toAddress || "").toLowerCase() !== toAddress.toLowerCase()) return false;
@@ -3153,7 +4801,7 @@ async function notifyRecordedDirectTransfer({
   toAddress: string;
   verified: boolean;
   source?: "direct_wallet_qr" | "sera_swap";
-}) {
+}): Promise<boolean> {
   notifyMerchantSse(merchant.id, {
     event: "payment_received",
     transactionId: txId,
@@ -3168,7 +4816,7 @@ async function notifyRecordedDirectTransfer({
   });
 
   if (merchant.webhookUrl) {
-    sendWebhook(
+    const delivery = sendWebhook(
       merchant.webhookUrl,
       merchant.webhookSecret,
       {
@@ -3185,8 +4833,14 @@ async function notifyRecordedDirectTransfer({
         source,
       },
       { merchantId: merchant.id, txId, txHash },
-    ).catch((error) => logSeraOperationFailure("payment-notification", error));
+    );
+    // Sera terminal state is recovered from a durable queue, so its completion
+    // marker must be written only after the webhook request really succeeds.
+    // Direct-transfer behavior stays fire-and-forget for backward compatibility.
+    if (source === "sera_swap") return delivery;
+    void delivery.catch((error) => logSeraOperationFailure("payment-notification", error));
   }
+  return true;
 }
 
 async function confirmPendingDirectTransfer({
@@ -3208,41 +4862,73 @@ async function confirmPendingDirectTransfer({
   amount: string;
   verified: boolean;
 }) {
-  const meta = transactionNotesMeta(pending.notes);
   const source = isSeraSwapTransaction(pending) ? "sera_swap" : "direct_wallet_qr";
-  await updateTransaction(pending.id, {
-    txHash,
-    fromAddress: source === "sera_swap"
-      ? pending.fromAddress
-      : fromAddress?.toLowerCase() || null,
-    status: "confirmed",
-    verified: verified ? 1 : 0,
-    payCoin: pending.payCoin || coin,
-    payAmount: pending.payAmount || amount,
-    notifiedAt: new Date(),
-    webhookSentAt: merchant.webhookUrl ? new Date() : null,
-  });
-  if (meta.orderId) {
-    await updateMenuOrderPayment(meta.orderId, merchant.id, { status: "paid", paymentId: pending.id, transactionId: pending.id }).catch(() => undefined);
+  let finalized: Transaction;
+  if (source === "sera_swap") {
+    if (!pending.intentHash || !pending.quoteUuid) {
+      console.warn("[payment/swap/confirm] Refused settlement without durable quote and Intent binding");
+      return pending;
+    }
+    const claim = await claimSeraSwapSettlementConfirmation({
+      transactionId: pending.id,
+      intentHash: pending.intentHash,
+      txHash,
+      expectedQuoteUuid: pending.quoteUuid,
+      ...(pending.tradeId ? { expectedTradeId: pending.tradeId } : {}),
+      patch: {
+        notes: pending.notes,
+        actualPayAmountRaw: pending.actualPayAmountRaw,
+        // For SeraBatcher transactions, raw ERC-20 values cannot be safely
+        // aggregated across intents. Only API-validated economics are stored
+        // as the actual receive amount; IntentMatched proves the signed floor.
+        actualReceiveAmountRaw: pending.actualReceiveAmountRaw,
+        feeAmountRaw: pending.feeAmountRaw,
+        feeTokenAddress: pending.feeTokenAddress,
+      },
+    });
+    if (claim.outcome === "already_confirmed") {
+      await deliverSeraSwapOutcomeEffects(claim.transaction, merchant);
+      return claim.transaction;
+    }
+    if (claim.outcome !== "claimed") {
+      console.warn("[payment/swap/confirm] Settlement confirmation was not claimed", { outcome: claim.outcome });
+      return claim.outcome === "not_found" ? pending : claim.transaction;
+    }
+    finalized = claim.transaction;
+    await deliverSeraSwapOutcomeEffects(finalized, merchant);
+    return finalized;
+  } else {
+    const claim = await claimDirectTransactionConfirmation({
+      transactionId: pending.id,
+      txHash,
+      fromAddress: fromAddress?.toLowerCase() || null,
+      payCoin: pending.payCoin || coin,
+      payAmount: pending.payAmount || amount,
+      notifiedAt: new Date(),
+      webhookSentAt: merchant.webhookUrl ? new Date() : null,
+    });
+    if (claim.outcome === "already_confirmed") return claim.transaction;
+    if (claim.outcome !== "claimed") {
+      console.warn("[payment/direct/confirm] Direct confirmation was not claimed", { outcome: claim.outcome });
+      return claim.outcome === "not_found" ? pending : claim.transaction;
+    }
+    finalized = claim.transaction;
   }
-  if (meta.paymentIntentId) {
-    await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
-  }
-  notifySseClients(pending.id, { status: "confirmed", txHash, verified });
+  notifySseClients(finalized.id, { status: "confirmed", txHash, verified });
   await notifyRecordedDirectTransfer({
     merchant,
-    txId: pending.id,
+    txId: finalized.id,
     txHash,
-    coin: pending.coin,
-    amount: pending.amount,
-    payCoin: pending.payCoin || coin,
-    payAmount: pending.payAmount || amount,
-    fromAddress: source === "sera_swap" ? pending.fromAddress : fromAddress,
+    coin: finalized.coin,
+    amount,
+    payCoin: finalized.payCoin || coin,
+    payAmount: finalized.payAmount || amount,
+    fromAddress,
     toAddress,
     verified,
-    source,
+    source: "direct_wallet_qr",
   });
-  return await getTransactionById(pending.id) ?? pending;
+  return finalized;
 }
 
 async function scanDirectTransfersForReceiver({
@@ -3262,6 +4948,7 @@ async function scanDirectTransfersForReceiver({
   const token = await resolveSeraTokenForChain(chainId, coin).catch(() => null);
   const coinAddress = token?.address as `0x${string}` | undefined;
   if (!client || !coinAddress) return;
+  const seraVaultAddresses = await getSeraVaultExclusionSet(chainId, merchant.id);
 
   const decimals = token?.decimals ?? await getTokenDecimals(client, coinAddress);
   const logs = await client.getLogs({
@@ -3282,6 +4969,10 @@ async function scanDirectTransfersForReceiver({
     if (rawAmount <= 0n) continue;
     const amount = fromRawTokenAmount(rawAmount, decimals);
     const fromAddress = typeof args.from === "string" ? args.from.toLowerCase() : null;
+    // Swap payouts are claimed only by the IntentMatched + same-transaction
+    // Vault-transfer reconciler. Never let the generic sweep reserve their
+    // hash or create a competing direct-payment row.
+    if (!fromAddress || seraVaultAddresses.has(fromAddress)) continue;
     const pending = await findMatchingPendingTransaction({
       merchantId: merchant.id,
       toAddress,
@@ -3398,6 +5089,7 @@ async function recordDirectTransferPayment({
   paymentUrl?: string | null;
   verified: boolean;
 }) {
+  await assertDirectTransferSender(fromAddress, chainId);
   const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
   const existing = await getTransactionByHash(normalizedTxHash) || await getTransactionByHash(txHash);
   if (existing) {
@@ -3522,6 +5214,7 @@ async function recordDirectTransferFailure({
   paymentUrl?: string | null;
   reason: string;
 }) {
+  await assertDirectTransferSender(fromAddress, chainId);
   const normalizedTxHash = txHash.toLowerCase() as `0x${string}`;
   const existing = await getTransactionByHash(normalizedTxHash) || await getTransactionByHash(txHash);
   if (existing) {
@@ -3595,6 +5288,7 @@ async function findDirectTransfer({
   chainId,
   fromBlock,
   toBlock,
+  excludedFromAddresses,
 }: {
   toAddress: string;
   coin: string;
@@ -3602,6 +5296,7 @@ async function findDirectTransfer({
   chainId: number;
   fromBlock: bigint;
   toBlock: bigint;
+  excludedFromAddresses: ReadonlySet<string>;
 }) {
   const client = CHAIN_CLIENTS[chainId];
   const token = await resolveSeraTokenForChain(chainId, coin).catch(() => null);
@@ -3629,9 +5324,11 @@ async function findDirectTransfer({
     const actualRaw = BigInt(String(args.value ?? 0));
     const txHash = String(log.transactionHash || "");
     if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) continue;
+    const fromAddress = typeof args.from === "string" ? args.from.toLowerCase() : null;
+    if (!fromAddress || excludedFromAddresses.has(fromAddress)) continue;
     const entry: DirectTransferCandidate = {
       txHash: txHash as `0x${string}`,
-      fromAddress: typeof args.from === "string" ? args.from.toLowerCase() : null,
+      fromAddress,
       actualAmount: fromRawTokenAmount(actualRaw, decimals),
     };
     const diff = actualRaw > expectedRaw ? actualRaw - expectedRaw : expectedRaw - actualRaw;
@@ -3695,18 +5392,18 @@ async function waitForReceiptViaWs(
 
 async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   const tx = await getTransactionById(txId);
-  if (!tx || tx.status === "confirmed") return;
-  const meta = transactionNotesMeta(tx.notes);
-  const orderId = meta.orderId;
+  if (!tx || tx.status !== "confirming" || isSeraSwapTransaction(tx)) return;
 
   const chainId = tx.chainId ?? SERA_MAINNET_CHAIN_ID;
   const client = CHAIN_CLIENTS[chainId];
   if (!client) {
     console.error(`[verify] No client for chainId ${chainId}`);
-    await updateTransaction(txId, { status: "failed" });
-    if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "failed", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
-    notifySseClients(txId, { status: "failed", txHash });
+    await releaseRejectedDirectSubmission(
+      tx,
+      txHash,
+      `No settlement RPC is configured for chain ${chainId}.`,
+      "settlement_rpc_unavailable",
+    );
     return;
   }
 
@@ -3741,10 +5438,12 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
 
   if (receipt.status !== "success") {
     console.warn("[verify] Transaction reverted");
-    await updateTransaction(txId, { status: "failed" });
-    if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "failed", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "failed" }).catch(() => undefined);
-    notifySseClients(txId, { status: "failed", txHash });
+    await releaseRejectedDirectSubmission(
+      tx,
+      txHash,
+      "The submitted transaction reverted on-chain.",
+      "transaction_reverted",
+    );
     return;
   }
 
@@ -3753,12 +5452,20 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   const coinAddress = token?.address as `0x${string}` | undefined;
   if (!token || !coinAddress) {
     console.warn(`[verify] Unknown coin ${tx.coin} on chain ${chainId}`);
-    await failTransactionRecord(tx, `Token ${tx.coin} is not in the active Sera registry for chain ${chainId}.`);
+    await releaseRejectedDirectSubmission(
+      tx,
+      txHash,
+      `Token ${tx.coin} is not in the active Sera registry for chain ${chainId}.`,
+      "token_registry_unavailable",
+    );
     return;
   }
 
   // Parse Transfer logs from the ERC-20 contract
-  let transferVerified = false;
+  // Combine the current deployment with every Vault bound to a persisted
+  // quote. If this lookup fails, verification fails closed and the normal
+  // backoff retries instead of guessing whether a swap payout was direct.
+  const seraVaultAddresses = await getSeraVaultExclusionSet(chainId, tx.merchantId);
   const tokenDecimals = token.decimals;
   // Rows written before the create-side precision guard can carry more
   // decimals than the token itself (rate-derived 6dp figures on 2-decimal
@@ -3774,41 +5481,93 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
   } catch {
     const scaled = Number(String(tx.amount).replace(/,/g, "")) * 10 ** tokenDecimals;
     if (!Number.isFinite(scaled) || scaled <= 0) {
-      await failTransactionRecord(tx, `Stored amount ${tx.amount} cannot be expressed in ${tx.coin}'s ${tokenDecimals}-decimal precision.`);
+      await releaseRejectedDirectSubmission(
+        tx,
+        txHash,
+        `Stored amount ${tx.amount} cannot be expressed in ${tx.coin}'s ${tokenDecimals}-decimal precision.`,
+        "invalid_stored_amount",
+      );
       return;
     }
     expectedRaw = BigInt(Math.round(scaled));
   }
+  const transferEvidence: DecodedErc20TransferEvidence[] = [];
   for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== coinAddress.toLowerCase()) continue;
     try {
       const decoded = decodeEventLog({ abi: ERC20_ABI, data: log.data, topics: log.topics as any }) as any;
       if (decoded.eventName !== "Transfer") continue;
-      const toMatch = (decoded.args.to as string).toLowerCase() === tx.toAddress.toLowerCase();
-      if (!toMatch) continue;
-      // Verify amount (allow ±1 unit tolerance for rounding)
-      const actualRaw = BigInt(decoded.args.value);
-      const diff = actualRaw > expectedRaw ? actualRaw - expectedRaw : expectedRaw - actualRaw;
-      if (diff <= 1n) {
-        transferVerified = true;
-        break;
-      }
+      transferEvidence.push({
+        tokenAddress: log.address,
+        fromAddress: decoded.args?.from,
+        toAddress: decoded.args?.to,
+        amountRaw: decoded.args?.value,
+      });
     } catch { /* skip malformed log */ }
   }
+  const selectedTransfer = selectDirectTransferEvidence({
+    transfers: transferEvidence,
+    expectedTokenAddress: coinAddress,
+    expectedRecipientAddress: tx.toAddress,
+    expectedAmountRaw: expectedRaw,
+    seraVaultAddresses,
+  });
 
-  if (!transferVerified) {
-    console.warn("[verify] Transfer event not found or amount mismatch");
-    await failTransactionRecord(tx, "The submitted transaction did not contain the expected token transfer, recipient, and amount.");
+  if (selectedTransfer?.kind === "sera_vault") {
+    // The hash belongs to swap reconciliation, not this direct-payment watch.
+    // Release the tentative claim without failing the linked order, so a real
+    // direct transfer may still be submitted against this watch row.
+    await releaseTentativeDirectTransactionHash({ transactionId: txId, txHash });
+    notifySseClients(txId, {
+      status: "pending",
+      errorCode: "sera_swap_hash",
+      reason: "This transaction hash belongs to a Sera swap settlement.",
+    });
     return;
-  } else {
-    await updateTransaction(txId, { status: "confirmed", verified: 1 });
-    if (orderId) await updateMenuOrderPayment(orderId, tx.merchantId, { status: "paid", paymentId: txId, transactionId: txId }).catch(() => undefined);
-    if (meta.paymentIntentId) await updatePaymentIntent(meta.paymentIntentId, { status: "paid" }).catch(() => undefined);
-    notifySseClients(txId, { status: "confirmed", txHash, verified: true });
   }
 
+  if (!selectedTransfer) {
+    console.warn("[verify] Transfer event not found or amount mismatch");
+    await releaseRejectedDirectSubmission(
+      tx,
+      txHash,
+      "The submitted transaction did not contain the expected token transfer, recipient, and amount.",
+      "transfer_evidence_mismatch",
+    );
+    return;
+  }
+  const verifiedFromAddress = selectedTransfer.sender;
+  const transferVerified = true;
+  const compliance = await screenWalletAddress(verifiedFromAddress, "payer_wallet", tx.merchantId);
+  if (compliance.blocked) {
+    await failTransactionRecord(tx, "The on-chain payer address failed compliance screening.");
+    return;
+  }
+  const confirmation = await claimDirectTransactionConfirmation({
+    transactionId: txId,
+    txHash,
+    fromAddress: verifiedFromAddress,
+  });
+  if (confirmation.outcome === "already_confirmed") return;
+  if (confirmation.outcome !== "claimed") {
+    if (confirmation.outcome === "hash_conflict") {
+      // A finalized Sera settlement won terminal ownership while this direct
+      // receipt was being checked. Release only this exact tentative claim and
+      // leave any order now owned by the swap untouched.
+      await releaseTentativeDirectTransactionHash({ transactionId: txId, txHash });
+    }
+    notifySseClients(txId, {
+      status: confirmation.transaction?.status ?? "pending",
+      ...(confirmation.outcome === "hash_conflict" ? {
+        errorCode: "transaction_hash_conflict",
+        reason: "This transaction hash is already owned by another finalized payment.",
+      } : {}),
+    });
+    return;
+  }
+  notifySseClients(txId, { status: "confirmed", txHash, verified: true });
+
   // Notify merchant dashboard (SSE + polling buffer)
-  notifyMerchantSse(tx.merchantId, { event: "payment_received", transactionId: txId, txHash, amount: tx.amount, coin: tx.coin, from: tx.fromAddress, verified: transferVerified });
+  notifyMerchantSse(tx.merchantId, { event: "payment_received", transactionId: txId, txHash, amount: tx.amount, coin: tx.coin, from: verifiedFromAddress, verified: transferVerified });
 
   // Send webhook
   const merchant = await getMerchantById(tx.merchantId);
@@ -3816,7 +5575,7 @@ async function verifyTransactionAsync(txId: string, txHash: `0x${string}`) {
     sendWebhook(
       merchant.webhookUrl,
       merchant.webhookSecret,
-      { event: "payment.confirmed", txId, txHash, coin: tx.coin, amount: tx.amount, fromAddress: tx.fromAddress, toAddress: tx.toAddress, verified: transferVerified },
+      { event: "payment.confirmed", txId, txHash, coin: tx.coin, amount: tx.amount, fromAddress: verifiedFromAddress, toAddress: tx.toAddress, verified: transferVerified },
       { merchantId: merchant.id, txId, txHash }
     ).catch((error) => logSeraOperationFailure("payment-notification", error));
   }
@@ -3857,14 +5616,14 @@ async function sendWebhook(
   secret: string | null | undefined,
   payload: object,
   logCtx?: { merchantId: string; txId: string; txHash?: string | null }
-) {
+): Promise<boolean> {
   // SSRF: resolve the host and refuse any private/internal address before the
   // outbound POST. A stored webhook URL is fetched unattended, so this is the
   // last line of defence if a merchant configured an internal target.
   try {
     await assertPublicHttpUrl(url);
   } catch {
-    return; // silently skip delivery to a non-public address
+    return false; // silently skip delivery to a non-public address
   }
   const body = JSON.stringify(payload);
   const sig = secret ? "sha256=" + crypto.createHmac("sha256", secret).update(body).digest("hex") : undefined;
@@ -3905,6 +5664,7 @@ async function sendWebhook(
       });
     } catch { console.error("[webhook-log] persistence failed"); }
   }
+  return success;
 }
 
 /** GET /api/payer/history?address=0x... — public payer payment history */
