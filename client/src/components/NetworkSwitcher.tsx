@@ -75,7 +75,7 @@ export function NetworkModeButton({
 }
 
 export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
-  const { switchChain, isPending } = useSwitchChain();
+  const { switchChainAsync, isPending } = useSwitchChain();
   const { activeMode, networkInfo } = useActiveNetworkMode();
   const updateConfig = useUpdateSeraApiConfig();
 
@@ -94,7 +94,10 @@ export function NetworkSwitcherModal({ onClose }: { onClose: () => void }) {
       // then reported Test. Moving TO mainnet is always safe to persist, so it
       // is recorded even if the wallet prompt is dismissed.
       if (targetMode === "live") await persistMode("live");
-      await switchChain({ chainId: targetChainId });
+      // switchChain (mutate) is fire-and-forget and never rejects; only
+      // switchChainAsync (mutateAsync) waits for the wallet and throws on
+      // rejection, which the catch below relies on.
+      await switchChainAsync({ chainId: targetChainId });
       if (targetMode === "test") await persistMode("test");
       onClose();
     } catch {
