@@ -2,7 +2,7 @@
  * SeraPay Payment API Routes
  * Registered under /api/ in server/_core/index.ts
  */
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, type NextFunction } from "express";
 import crypto from "crypto";
 import { assertPublicHttpUrl, UrlGuardError } from "./url-guard";
 import { v4 as uuidv4 } from "uuid";
@@ -115,7 +115,7 @@ function isTestnetChainEnabled(chainId?: number | null): boolean {
   return chainId === SERA_TESTNET_CHAIN_ID && ENV.seraEnableTestnet;
 }
 
-function getSeraApiBaseUrlForChain(chainId?: number | null): string {
+export function getSeraApiBaseUrlForChain(chainId?: number | null): string {
   // A caller-supplied `chainId: 11155111` must not be able to redirect the
   // token registry, quote, and FX pipeline at the testnet deployment.
   const baseUrl = isTestnetChainEnabled(chainId)
@@ -328,13 +328,15 @@ function notifySseClients(txId: string, data: object) {
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
-export async function requireApiKey(req: Request, res: Response, next: Function) {
+export async function requireApiKey(req: Request, res: Response, next: NextFunction) {
   try {
-    const apiKey = req.headers["x-api-key"] as string;
+    const apiKey = req.get("X-Api-Key");
     if (!apiKey) { res.status(401).json({ error: "Missing X-Api-Key header" }); return; }
+    if (typeof apiKey !== "string") { res.status(401).json({ error: "Invalid API key" }); return; }
     const merchant = await getMerchantByApiKey(apiKey);
     if (!merchant) { res.status(401).json({ error: "Invalid API key" }); return; }
     (req as any).merchant = merchant;
+    res.locals.merchant = merchant;
     next();
   } catch (error) {
     // Express 4 does not automatically catch rejected async middleware. A
@@ -1047,7 +1049,7 @@ paymentRouter.patch("/merchant/transactions/:id/cancel", requireApiKey as any, a
 
 // ─── Payment endpoints ────────────────────────────────────────────────────────
 
-function toRawTokenAmount(amount: string, decimals: number): string {
+export function toRawTokenAmount(amount: string, decimals: number): string {
   const normalized = amount.replace(/,/g, "").trim();
   if (!/^\d+(\.\d+)?$/.test(normalized)) throw new Error("Invalid token amount.");
   const [whole, fraction = ""] = normalized.split(".");
@@ -1144,7 +1146,7 @@ async function resolveSeraTokenBySymbol(baseUrl: string, symbol: string): Promis
   return token;
 }
 
-async function resolveSeraSwapToken(baseUrl: string, symbol: string): Promise<SeraToken> {
+export async function resolveSeraSwapToken(baseUrl: string, symbol: string): Promise<SeraToken> {
   try {
     return await resolveSeraTokenBySymbol(baseUrl, symbol);
   } catch (error) {
@@ -1406,50 +1408,38 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
   return canceled;
 }
 
-function seraPaymentErrorResponse(error: unknown, fallback: string) {
+const PROVIDER_CODES = new Set([
+  "ALLOWANCE_INSUFFICIENT", "INTENT_DEADLINE_EXPIRED", "SLIPPAGE_EXCEEDED", "STP_BLOCKED",
+]);
+const PAYMENT_ERROR_MESSAGES = new Map([
+  ["no_liquidity", "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."],
+  ["quote_stale", "This quote closed before it could be submitted. Please try again."],
+  ["sera_unavailable", "Sera is temporarily unavailable. Please try again shortly."],
+  ["sera_rate_limited", "Sera is receiving too many requests. Please try again shortly."],
+  ["amount_below_min", "This payment amount is below Sera's minimum for this currency pair."],
+]);
+
+function paymentErrorCode(error: SeraApiError): string {
+  const code = String(error.errorCode || "").toUpperCase();
+  if (code === "NO_LIQUIDITY" || code === "PAIR_INACTIVE") return "no_liquidity";
+  if (code === "AMOUNT_BELOW_MIN") return "amount_below_min";
+  if (code === "QUOTE_STALE" || error.status === 410) return "quote_stale";
+  if (PROVIDER_CODES.has(code)) return code.toLowerCase();
+  if (error.status === 429) return "sera_rate_limited";
+  if (error.status >= 500) return "sera_unavailable";
+  return code.toLowerCase() || "invalid_quote";
+}
+
+export function seraPaymentErrorResponse(error: unknown, fallback: string) {
   const quoteError = serializeSeraQuoteError(error);
   if (quoteError) return quoteError;
   if (error instanceof SeraApiError) {
-    const providerCode = String(error.errorCode || "").toUpperCase();
-    const isQuoteStale = providerCode === "QUOTE_STALE";
-    const isUnavailable = error.status >= 500;
-    const stableCode = providerCode === "NO_LIQUIDITY" || providerCode === "PAIR_INACTIVE"
-      ? "no_liquidity"
-      : providerCode === "AMOUNT_BELOW_MIN"
-        ? "amount_below_min"
-        : isQuoteStale || error.status === 410
-          ? "quote_stale"
-          : providerCode === "ALLOWANCE_INSUFFICIENT"
-            ? "allowance_insufficient"
-            : providerCode === "INTENT_DEADLINE_EXPIRED"
-              ? "intent_deadline_expired"
-              : providerCode === "SLIPPAGE_EXCEEDED"
-                ? "slippage_exceeded"
-                : providerCode === "STP_BLOCKED"
-                  ? "stp_blocked"
-                  : error.status === 429
-                    ? "sera_rate_limited"
-                    : isUnavailable
-                      ? "sera_unavailable"
-                      : providerCode
-                        ? providerCode.toLowerCase()
-                        : "invalid_quote";
-    const message = stableCode === "no_liquidity"
-      ? "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."
-      : stableCode === "quote_stale"
-        ? "This quote closed before it could be submitted. Please try again."
-        : stableCode === "sera_unavailable"
-          ? "Sera is temporarily unavailable. Please try again shortly."
-          : stableCode === "sera_rate_limited"
-            ? "Sera is receiving too many requests. Please try again shortly."
-            : stableCode === "amount_below_min"
-              ? "This payment amount is below Sera's minimum for this currency pair."
-              : fallback;
+    const errorCode = paymentErrorCode(error);
     return {
       status: error.status >= 400 && error.status < 500 ? error.status : 503,
       body: {
-        error: message,
-        errorCode: stableCode,
+        error: PAYMENT_ERROR_MESSAGES.get(errorCode) ?? fallback,
+        errorCode,
         seraStatus: error.status,
       },
     };
@@ -2372,6 +2362,127 @@ paymentRouter.post("/payment/create", async (req, res) => {
 });
 
 /**
+ * Shared disposable quote check for dashboard and API-generated QR codes.
+ * Callers validate ownership and screen the recipient before invoking it.
+ */
+export async function preflightSeraConversion({
+  merchantId,
+  receiverAddress,
+  payCoin,
+  receiveCoin,
+  receiveAmount,
+  estimatedPayAmount,
+  chainId,
+}: {
+  merchantId: string;
+  receiverAddress: string;
+  payCoin: string;
+  receiveCoin: string;
+  receiveAmount: string;
+  estimatedPayAmount: string;
+  chainId: number;
+}) {
+  const baseUrl = getSeraApiBaseUrlForChain(chainId);
+  const [fromToken, toToken] = await Promise.all([
+    resolveSeraSwapToken(baseUrl, payCoin),
+    resolveSeraSwapToken(baseUrl, receiveCoin),
+  ]);
+  let requestedInputRaw: string;
+  let targetOutputRaw: string;
+  try {
+    requestedInputRaw = toRawTokenAmount(estimatedPayAmount, fromToken.decimals);
+    targetOutputRaw = toRawTokenAmount(receiveAmount, toToken.decimals);
+  } catch (error) {
+    throw new SeraQuoteValidationError(
+      "invalid_request",
+      error instanceof Error ? error.message : "Payment amount exceeds token precision",
+      { field: "amount" },
+    );
+  }
+
+  if (payCoin === receiveCoin) {
+    if (fromToken.address.toLowerCase() !== toToken.address.toLowerCase()) {
+      throw new SeraQuoteValidationError("invalid_config", "Sera returned inconsistent token metadata for a direct payment");
+    }
+    if (requestedInputRaw !== targetOutputRaw) {
+      throw new SeraQuoteValidationError(
+        "invalid_request",
+        "A direct payment must pay exactly the requested receive amount",
+        { field: "estimatedPayAmount" },
+      );
+    }
+    return {
+      executable: true,
+      advisory: false,
+      requiresCustomerRequote: false,
+      direct: true,
+      source: "direct-payment",
+      chainId,
+      toAddress: receiverAddress,
+      payCoin,
+      receiveCoin,
+      requestedPayAmount: estimatedPayAmount,
+      maximumPayAmount: receiveAmount,
+      targetReceiveAmount: receiveAmount,
+      minimumReceiveAmount: receiveAmount,
+      checkedAt: Math.floor(Date.now() / 1000),
+    };
+  }
+
+  const [rawConfig, seraNowSec] = await Promise.all([
+    callSeraApi<unknown>({ baseUrl, path: "/config", authMode: "none", merchantId }),
+    getSeraServerTimestamp(baseUrl, merchantId),
+  ]);
+  const probeOwner = getSeraPreflightProbeAddress();
+  if (probeOwner === receiverAddress.toLowerCase()) {
+    throw new SeraQuoteValidationError(
+      "invalid_config",
+      "The Sera preflight probe address must differ from the merchant recipient",
+      { field: "SERA_PREFLIGHT_PROBE_ADDRESS" },
+    );
+  }
+  const initialRequest: SeraSwapQuoteRequest = {
+    from_token: fromToken.address.toLowerCase() as `0x${string}`,
+    to_token: toToken.address.toLowerCase() as `0x${string}`,
+    from_amount: requestedInputRaw,
+    owner_address: probeOwner,
+    recipient: receiverAddress.toLowerCase() as `0x${string}`,
+    expiration: seraNowSec + 300,
+    gas_mode: "pay_more",
+  };
+  const result = await solveSeraFixedOutputQuote({
+    initialRequest,
+    targetOutputRaw,
+    minimumInputRaw: fromToken.min_trade_amount_raw || "0",
+    minimumInputSymbol: fromToken.symbol,
+    config: rawConfig,
+    expectedChainId: chainId,
+    serverTime: seraNowSec,
+    policy: getSeraFixedOutputPolicy(),
+    requestQuote: (request) => callSeraApi<unknown>({
+      baseUrl,
+      path: "/swap/quote",
+      method: "POST",
+      body: request,
+      authMode: "none",
+      merchantId,
+    }),
+  });
+  return {
+    ...toSeraPreflightSummary(result, seraNowSec),
+    chainId,
+    toAddress: receiverAddress,
+    payCoin,
+    receiveCoin,
+    requestedPayAmount: estimatedPayAmount,
+    quotedPayAmount: fromRawTokenAmount(result.finalRequest.from_amount, fromToken.decimals),
+    maximumPayAmount: fromRawTokenAmount(result.quote.routeParams.maxInputAmount, fromToken.decimals),
+    targetReceiveAmount: receiveAmount,
+    minimumReceiveAmount: fromRawTokenAmount(result.quote.routeParams.minOutputAmount, toToken.decimals),
+  };
+}
+
+/**
  * POST /api/payment/swap/preflight
  *
  * Merchant-authenticated, disposable liquidity check used immediately before
@@ -2428,106 +2539,15 @@ paymentRouter.post("/payment/swap/preflight", requireApiKey as any, async (req: 
       return;
     }
 
-    const baseUrl = getSeraApiBaseUrlForChain(chainId);
-    const [fromToken, toToken] = await Promise.all([
-      resolveSeraSwapToken(baseUrl, payCoin),
-      resolveSeraSwapToken(baseUrl, receiveCoin),
-    ]);
-    let requestedInputRaw: string;
-    let targetOutputRaw: string;
-    try {
-      requestedInputRaw = toRawTokenAmount(estimatedPayAmount, fromToken.decimals);
-      targetOutputRaw = toRawTokenAmount(receiveAmount, toToken.decimals);
-    } catch (error) {
-      throw new SeraQuoteValidationError(
-        "invalid_request",
-        error instanceof Error ? error.message : "Payment amount exceeds token precision",
-        { field: "amount" },
-      );
-    }
-
-    if (payCoin === receiveCoin) {
-      if (fromToken.address.toLowerCase() !== toToken.address.toLowerCase()) {
-        throw new SeraQuoteValidationError("invalid_config", "Sera returned inconsistent token metadata for a direct payment");
-      }
-      if (requestedInputRaw !== targetOutputRaw) {
-        throw new SeraQuoteValidationError(
-          "invalid_request",
-          "A direct payment must pay exactly the requested receive amount",
-          { field: "estimatedPayAmount" },
-        );
-      }
-      res.json({
-        executable: true,
-        advisory: false,
-        requiresCustomerRequote: false,
-        direct: true,
-        source: "direct-payment",
-        chainId,
-        toAddress: resolved.toAddress,
-        payCoin,
-        receiveCoin,
-        requestedPayAmount: estimatedPayAmount,
-        maximumPayAmount: receiveAmount,
-        targetReceiveAmount: receiveAmount,
-        minimumReceiveAmount: receiveAmount,
-        checkedAt: Math.floor(Date.now() / 1000),
-      });
-      return;
-    }
-
-    const [rawConfig, seraNowSec] = await Promise.all([
-      callSeraApi<unknown>({ baseUrl, path: "/config", authMode: "none", merchantId: req.merchant.id }),
-      getSeraServerTimestamp(baseUrl, req.merchant.id),
-    ]);
-    const probeOwner = getSeraPreflightProbeAddress();
-    if (probeOwner === resolved.toAddress.toLowerCase()) {
-      throw new SeraQuoteValidationError(
-        "invalid_config",
-        "The Sera preflight probe address must differ from the merchant recipient",
-        { field: "SERA_PREFLIGHT_PROBE_ADDRESS" },
-      );
-    }
-    const initialRequest: SeraSwapQuoteRequest = {
-      from_token: fromToken.address.toLowerCase() as `0x${string}`,
-      to_token: toToken.address.toLowerCase() as `0x${string}`,
-      from_amount: requestedInputRaw,
-      owner_address: probeOwner,
-      recipient: resolved.toAddress.toLowerCase() as `0x${string}`,
-      expiration: seraNowSec + 300,
-      gas_mode: "pay_more",
-    };
-    const result = await solveSeraFixedOutputQuote({
-      initialRequest,
-      targetOutputRaw,
-      minimumInputRaw: fromToken.min_trade_amount_raw || "0",
-      minimumInputSymbol: fromToken.symbol,
-      config: rawConfig,
-      expectedChainId: chainId,
-      serverTime: seraNowSec,
-      policy: getSeraFixedOutputPolicy(),
-      requestQuote: (request) => callSeraApi<unknown>({
-        baseUrl,
-        path: "/swap/quote",
-        method: "POST",
-        body: request,
-        authMode: "none",
-        merchantId: req.merchant.id,
-      }),
-    });
-    const summary = toSeraPreflightSummary(result, seraNowSec);
-    res.json({
-      ...summary,
-      chainId,
-      toAddress: resolved.toAddress,
+    res.json(await preflightSeraConversion({
+      merchantId: req.merchant.id,
+      receiverAddress: resolved.toAddress,
       payCoin,
       receiveCoin,
-      requestedPayAmount: estimatedPayAmount,
-      quotedPayAmount: fromRawTokenAmount(result.finalRequest.from_amount, fromToken.decimals),
-      maximumPayAmount: fromRawTokenAmount(result.quote.routeParams.maxInputAmount, fromToken.decimals),
-      targetReceiveAmount: receiveAmount,
-      minimumReceiveAmount: fromRawTokenAmount(result.quote.routeParams.minOutputAmount, toToken.decimals),
-    });
+      receiveAmount,
+      estimatedPayAmount,
+      chainId,
+    }));
   } catch (error) {
     logSeraOperationFailure("payment/swap/preflight", error);
     const response = seraPaymentErrorResponse(error, "Unable to verify this Sera conversion right now");
@@ -5780,7 +5800,7 @@ const SERA_NO_LIQUIDITY_RATE_MESSAGE =
  * distinguishes a Sera-wide FX outage from a pair with no market maker, so the
  * merchant is told which one it is instead of a generic failure.
  */
-class SeraRateUnavailableError extends Error {
+export class SeraRateUnavailableError extends Error {
   errorCode: "sera_fx_unavailable" | "no_liquidity";
   constructor(message: string, errorCode: "sera_fx_unavailable" | "no_liquidity") {
     super(message);
@@ -5801,7 +5821,7 @@ class SeraRateUnavailableError extends Error {
  * Sera returns HTTP 200 on that feed even when its provider data has coverage
  * gaps, so the timestamp is the only staleness signal there is.
  */
-async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): Promise<{ rate: number; source: string; asOf?: number }> {
+export async function fetchSeraRestFxRate(from: string, to: string, chainId?: number): Promise<{ rate: number; source: string; asOf?: number }> {
   const scope = chainId === SERA_TESTNET_CHAIN_ID ? "test" : "live";
   const failureKey = `sera-quote:${scope}:${from}:${to}`;
   try {
