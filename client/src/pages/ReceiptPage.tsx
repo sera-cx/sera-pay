@@ -3,6 +3,7 @@ import { useParams } from "wouter";
 import { Download, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SeraLogo } from "@/components/SeraPayHeader";
+import { ReceiptMerchantLogo } from "@/components/ReceiptMerchantLogo";
 
 type TxData = {
   txId: string;
@@ -123,13 +124,7 @@ export default function ReceiptPage() {
             SeraPay - Payment Receipt
           </div>
           <div className="px-5 py-4 text-center">
-            {tx.merchantLogo ? (
-              <img src={tx.merchantLogo} alt={merchantName} className="mx-auto mb-2 h-12 w-12 rounded-lg object-contain" />
-            ) : (
-              <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-lg bg-gradient-to-br from-[#00D1A0] to-[#00B88A] text-lg font-bold text-white">
-                {merchantName.slice(0, 1).toUpperCase()}
-              </div>
-            )}
+            <ReceiptMerchantLogo name={merchantName} logo={tx.merchantLogo} />
             <h1 className="text-base font-bold text-[#0A1F1A]">{merchantName}</h1>
             {tx.merchantDescription ? <p className="mt-1 text-xs text-gray-500">{tx.merchantDescription}</p> : null}
             <p className="mt-1 font-mono text-[10px] text-gray-400">Wallet: {shortAddress(tx.toAddress)}</p>

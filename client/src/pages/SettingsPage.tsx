@@ -12,8 +12,8 @@ import { buildClientAppUrl } from "@/lib/app-url";
 import { resolvePaymentChainId, TEST_PAYMENT_CHAIN_ID } from "@/lib/payment";
 import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { useChainId } from "wagmi";
+import { ReceiptMerchantLogo } from "@/components/ReceiptMerchantLogo";
 
-const LS_LOGO = "serapay_store_logo";
 type CurrencyGroup = { region: string; coins: SeraCurrency[] };
 const SETTINGS_QR_STYLES = QR_STYLES.filter((styleOption) => styleOption.id !== "classy");
 const SETTINGS_QR_STYLE_IDS = new Set(SETTINGS_QR_STYLES.map((styleOption) => styleOption.id));
@@ -245,12 +245,7 @@ function ReceiptPreview({
 
       {/* ── Logo + Merchant info ── */}
       <div style={{ textAlign: "center", padding: "12px 14px 8px" }}>
-        {logoUrl
-          ? <img src={logoUrl} alt="logo" style={{ width: 38, height: 38, borderRadius: 6, margin: "0 auto 7px", display: "block", objectFit: "contain" }} />
-          : <div style={{ width: 38, height: 38, borderRadius: 6, background: "linear-gradient(135deg,#00D1A0,#00B88A)", margin: "0 auto 7px", display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <span style={{ ...sans, color: "#fff", fontSize: 16, fontWeight: "bold" }}>{(storeName || "S").slice(0,1).toUpperCase()}</span>
-            </div>
-        }
+        <ReceiptMerchantLogo name={storeName} logo={logoUrl} size={38} />
         <div style={{ ...sans, fontSize: 12, fontWeight: "bold", color: "#0A1F1A" }}>{storeName || "Your Store Name"}</div>
         {storeAddress && <div style={{ ...sans, fontSize: 8, color: "#6B7280", marginTop: 2 }}>{storeAddress}</div>}
         <div style={{ ...mono, fontSize: 7, color: "#9CA3AF", marginTop: 3 }}>Wallet: {addrDisplay}</div>
@@ -407,7 +402,7 @@ export function Settings() {
   const [storeName, setStoreName] = useState("");
   const [storeDescription, setStoreDescription] = useState("");
   const [storeAddress, setStoreAddress] = useState("");
-  const [logoUrl, setLogoUrl] = useState(() => localStorage.getItem(LS_LOGO) || "");
+  const [logoUrl, setLogoUrl] = useState("");
   const [logoCropSource, setLogoCropSource] = useState<SettingsLogoCropSource | null>(null);
   const [qrStyle, setQrStyle] = useState<QrStyle>("rounded");
   const [qrFgColor, setQrFgColor] = useState("#000000");
@@ -454,10 +449,7 @@ export function Settings() {
       if ((profile as any).qrBgColor) setQrBgColor((profile as any).qrBgColor);
       if ((profile as any).qrMode) setQrMode(normalizeSettingsQrMode((profile as any).qrMode));
       const profileLogo = typeof (profile as any).logoData === "string" ? (profile as any).logoData : "";
-      if (profileLogo) {
-        setLogoUrl(profileLogo);
-        try { localStorage.setItem(LS_LOGO, profileLogo); } catch {}
-      }
+      setLogoUrl(profileLogo);
       if ((profile as any).receiveCoin) setReceiveCoin((profile as any).receiveCoin);
       if ((profile as any).storeAddress) setStoreAddress((profile as any).storeAddress);
     }
@@ -530,9 +522,8 @@ export function Settings() {
 
   const saveLogoData = (dataUrl: string) => {
     updateProfile.mutate({ logoData: dataUrl } as any, {
-      onSuccess: () => {
-        setLogoUrl(dataUrl);
-        try { localStorage.setItem(LS_LOGO, dataUrl); } catch {}
+      onSuccess: (updatedProfile) => {
+        setLogoUrl(updatedProfile.logoData || "");
         setLogoCropSource(null);
         toast({ title: "Logo saved", type: "success" });
       },
@@ -543,10 +534,10 @@ export function Settings() {
   };
 
   const removeLogo = () => {
-    setLogoUrl("");
-    setLogoCropSource(null);
-    localStorage.removeItem(LS_LOGO);
-    updateProfile.mutate({ logoData: null });
+    updateProfile.mutate({ logoData: null }, {
+      onSuccess: () => { setLogoUrl(""); setLogoCropSource(null); },
+      onError: (error: any) => toast({ title: "Logo removal failed", description: error.message || "Please try again.", type: "error" }),
+    });
   };
 
   const normalizedCoinSearch = coinSearch.trim().toLowerCase();

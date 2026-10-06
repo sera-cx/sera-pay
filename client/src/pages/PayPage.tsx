@@ -12,6 +12,7 @@ import { SeraPayHeader } from "@/components/SeraPayHeader";
 import { StablecoinLogo } from "@/components/StablecoinLogo";
 import { detectLocale, getTranslations, RTL_LOCALES } from "@/lib/i18n";
 import jsPDF from "jspdf";
+import { getReceiptInitial, getReceiptLogo, prepareReceiptLogo } from "@/lib/receipt-branding";
 
 const font = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', sans-serif";
 
@@ -1580,28 +1581,15 @@ export default function PayPage() {
     const addrShort = req?.receiverAddress ? `${req.receiverAddress.slice(0,6)}...${req.receiverAddress.slice(-4)}` : "";
     const isCrossToken = paidCoin !== receivedCoin;
 
-    // Pre-load merchant logo as base64 if available
-    let logoBase64 = "";
-    let logoFormat: "JPEG" | "PNG" = "JPEG";
-    if (merchantLogo) {
-      try {
-        const resp = await fetch(merchantLogo);
-        const blob = await resp.blob();
-        logoFormat = blob.type.includes("png") ? "PNG" : "JPEG";
-        logoBase64 = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve((reader.result as string).split(",")[1]);
-          reader.readAsDataURL(blob);
-        });
-      } catch { logoBase64 = ""; }
-    }
+    const receiptLogo = await getReceiptLogo(req?.receiverAddress, merchantLogo);
+    const logoPng = await prepareReceiptLogo(receiptLogo);
 
     // Calculate dynamic height
-    // Header(11) + logo(18) + merchant name(5) + addr(5) + divider(8) + invoice meta(18) + divider(8)
+    // Header(11) + logo(21) + merchant name(5) + addr(5) + divider(8) + invoice meta(18) + divider(8)
     // + conversion box(8 + boxRows*5.5 + 2) + network(10) + txHash(txHash ? 18 : 0) + divider(10) + footer(20)
     const boxRows = isCrossToken || referenceAmount ? 4 : 3;
     const boxH = 8 + boxRows * 5.5;
-    const estimatedH = 11 + 18 + (addrShort ? 10 : 5) + 8 + 18 + 8 + boxH + 2 + 10 + (txHash ? 20 : 0) + 10 + 20;
+    const estimatedH = 11 + 21 + (addrShort ? 10 : 5) + 8 + 18 + 8 + boxH + 2 + 10 + (txHash ? 20 : 0) + 10 + 20;
     const doc = new jsPDF({ unit: "mm", format: [W, Math.max(estimatedH, 140)] });
 
     // ── Green header bar ──
@@ -1611,18 +1599,17 @@ export default function PayPage() {
     doc.text("SERAPAY · PAYMENT RECEIPT", W / 2, 7, { align: "center" });
 
     // ── Merchant logo or initials avatar ──
-    let y = 18;
-    const logoSize = 14;
+    let y = 22;
+    const logoSize = 12;
     const logoX = W / 2 - logoSize / 2;
-    if (logoBase64) {
-      // Circular clip via ellipse mask
-      doc.addImage(logoBase64, logoFormat, logoX, y - logoSize / 2, logoSize, logoSize);
+    if (logoPng) {
+      doc.addImage(logoPng, "PNG", logoX, y - logoSize / 2, logoSize, logoSize);
     } else {
-      doc.setFillColor(0, 200, 83);
-      doc.roundedRect(logoX, y - logoSize / 2, logoSize, logoSize, 3, 3, "F");
-      doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
-      const initials = (merchantName || "S").split(" ").map((w: string) => w[0]).join("").slice(0,2).toUpperCase();
-      doc.text(initials, W / 2, y + 2.5, { align: "center" });
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(0, 209, 160); doc.setLineWidth(0.6);
+      doc.circle(W / 2, y, logoSize / 2, "FD");
+      doc.setFont("helvetica", "bold"); doc.setFontSize(13); doc.setTextColor(0, 209, 160);
+      doc.text(getReceiptInitial(merchantName), W / 2, y, { align: "center", baseline: "middle" });
     }
     y += logoSize / 2 + 4;
 

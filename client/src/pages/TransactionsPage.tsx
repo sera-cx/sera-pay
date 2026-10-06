@@ -15,6 +15,7 @@ import { cn } from "@/lib/dashboard-utils";
 import { fetchApi } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { ReceiptMerchantLogo } from "@/components/ReceiptMerchantLogo";
 
 // ── Date Range Types ──────────────────────────────────────────────────────────
 type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
@@ -427,13 +428,7 @@ function TransactionDrawer({
               <p className="text-[10px] font-extrabold uppercase tracking-[0.22em] text-white">SeraPay · Transaction Receipt</p>
             </div>
             <div className="px-4 pb-5 pt-4 text-center">
-              <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-[#E6FAF5]">
-                {merchantLogo ? (
-                  <img src={merchantLogo} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  <span className="text-lg font-extrabold text-[#00A87A]">{storeName.slice(0, 1).toUpperCase()}</span>
-                )}
-              </div>
+              <ReceiptMerchantLogo name={storeName} logo={merchantLogo} />
               <h3 className="text-base font-extrabold text-[#0A1F1A]">{storeName}</h3>
               <p className="mt-1 font-mono text-[10px] text-muted-foreground">Wallet: {shortenAddress(tx.toAddress || "")}</p>
               <div className="my-4 border-t border-dashed border-border" />
