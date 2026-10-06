@@ -145,3 +145,5 @@ vite.config.ts.timestamp-*
 
 # Local test and artifact-rendering scratch files
 /tmp/
+/output/
+.codex-logs/

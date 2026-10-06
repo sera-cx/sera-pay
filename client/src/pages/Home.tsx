@@ -78,13 +78,14 @@ function capAmountForCoin(value: string, coin: Stablecoin | null | undefined): s
  * Privy's Google/Twitter login ends in `window.location.assign(...)` — a full
  * page unload — so every piece of in-memory form state dies mid-flow. The
  * merchant returns to a blank form and has to set the whole request up again.
- * Email and wallet sign-in never navigate, which is exactly why this looked
- * intermittent rather than broken.
+ * Mobile wallets can also reload the page while handing control back after
+ * signing. The request must survive either kind of page unload.
  *
  * Persisted rather than held in memory so it survives that unload, an
  * ErrorBoundary reload, and a manual refresh. localStorage rather than
- * sessionStorage because an OAuth round trip can land in a different tab or
- * browser context on mobile.
+ * sessionStorage because an OAuth round trip can land in a different tab.
+ * Separate wallet browsers do not share this storage; mobile connections must
+ * use WalletConnect to keep the request in the originating browser.
  */
 const PENDING_REQUEST_KEY = "serapay_pending_request";
 /** Long enough to finish signing in; short enough not to resurrect stale work. */
@@ -1946,7 +1947,7 @@ export default function Home() {
   // something to run on each keystroke of a component this size.
   const pendingRequestRef = useRef<PendingRequest | null | undefined>(undefined);
   if (pendingRequestRef.current === undefined) pendingRequestRef.current = readPendingRequest();
-  const pendingRestoredRef = useRef(false);
+  const pendingRestoredRef = useRef(!pendingRequestRef.current);
   const pendingResumeRef = useRef(false);
 
   const [step, setStep] = useState<1 | 2>(1); // 1 = form, 2 = QR display
@@ -1990,7 +1991,7 @@ export default function Home() {
   // Pass merchantApiKey so the query only fires once the key is loaded from localStorage.
   // This prevents the race condition where the query fires on mount before the key is available,
   // gets a 401, and never retries — causing logo and profile data to disappear on reload.
-  const { data: merchantProfile } = useMerchantProfile(merchantApiKey || undefined);
+  const { data: merchantProfile, isLoading: merchantProfileLoading } = useMerchantProfile(merchantApiKey || undefined);
   const [localLogoData, setLocalLogoData] = useState(""); // optimistic local logo after upload
   // Local QR prefs — wallet-scoped keys, restored lazily after walletAddress is known
   const [localQrFgColor, setLocalQrFgColor] = useState("");
@@ -2211,6 +2212,9 @@ export default function Home() {
   // on step 1: once the QR exists the request is already encoded in its URL.
   useEffect(() => {
     if (step !== 1) return;
+    // The registry restores the saved coins asynchronously. Until that has
+    // happened, this empty initial form is not a user-cleared draft.
+    if (!pendingRestoredRef.current && pendingRequestRef.current) return;
     if (!selectedCoin && !amount && !customerCoin && !customerAmount) {
       // Emptied on purpose. Returning early here used to leave the previous
       // copy in storage, so a figure the merchant had just deleted came back on
@@ -2485,6 +2489,7 @@ export default function Home() {
         wantQr: true,
       };
       writePendingRequest(pendingRequestRef.current);
+      pendingResumeRef.current = true;
       setShowGuestReceiverModal(true);
       return;
     }
@@ -2515,6 +2520,10 @@ export default function Home() {
   useEffect(() => {
     if (!pendingResumeRef.current) return;
     if (step !== 1 || !selectedCoin || !receiverAddress) return;
+    // Wait for login and registration to finish, including any wallet proof.
+    // Otherwise a linked address can trigger signing before the dashboard key
+    // is ready and before the receiver profile has been loaded.
+    if (isConnected && (!merchantWorkspaceReady || merchantApiKey !== dashboardApiKey || accountSetupLoading || merchantProfileLoading)) return;
     if (currenciesLoading || currenciesError || rateLoading) return;
     if (customerCoin && customerCoin.symbol !== selectedCoin.symbol && !exchangeRate) return;
     pendingResumeRef.current = false;
@@ -2526,7 +2535,7 @@ export default function Home() {
     // stays on screen with the reason, and cannot resume again.
     cancelPendingQrIntent();
     handleGenerateQR();
-  }, [step, selectedCoin, receiverAddress, currenciesLoading, currenciesError, rateLoading, customerCoin, exchangeRate, handleGenerateQR, cancelPendingQrIntent]);
+  }, [step, selectedCoin, receiverAddress, isConnected, merchantWorkspaceReady, merchantApiKey, dashboardApiKey, accountSetupLoading, merchantProfileLoading, currenciesLoading, currenciesError, rateLoading, customerCoin, exchangeRate, handleGenerateQR, cancelPendingQrIntent]);
 
   const handleGuestReceiverSubmit = useCallback((address: string) => {
     if (!selectedCoin) return;
