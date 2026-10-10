@@ -48,20 +48,42 @@ function buildStorageProxyUrl(key: string): string {
   return `/api/storage/objects/${key.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-async function streamToBuffer(body: unknown): Promise<Buffer> {
+type StorageReadOptions = { signal?: AbortSignal; maxBytes?: number };
+
+async function streamToBuffer(body: unknown, { signal, maxBytes = Infinity }: StorageReadOptions): Promise<Buffer> {
+  const checked = (buffer: Buffer) => {
+    if (buffer.length > maxBytes) throw new Error("Storage object is too large");
+    return buffer;
+  };
+  if (signal?.aborted) {
+    (body as { destroy?: () => void } | undefined)?.destroy?.();
+    signal.throwIfAborted();
+  }
   if (!body) return Buffer.alloc(0);
-  if (Buffer.isBuffer(body)) return body;
-  if (body instanceof Uint8Array) return Buffer.from(body);
-  if (typeof (body as { transformToByteArray?: unknown }).transformToByteArray === "function") {
+  if (Buffer.isBuffer(body)) return checked(body);
+  if (body instanceof Uint8Array) return checked(Buffer.from(body));
+  if (!(Symbol.asyncIterator in Object(body)) && typeof (body as { transformToByteArray?: unknown }).transformToByteArray === "function") {
     const bytes = await (body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray();
-    return Buffer.from(bytes);
+    signal?.throwIfAborted();
+    return checked(Buffer.from(bytes));
   }
 
+  const abort = () => (body as { destroy?: (error: Error) => void }).destroy?.(signal!.reason);
+  signal?.addEventListener("abort", abort, { once: true });
   const chunks: Buffer[] = [];
-  for await (const chunk of body as AsyncIterable<Buffer | Uint8Array | string>) {
-    chunks.push(Buffer.from(chunk));
+  let bytes = 0;
+  try {
+    for await (const chunk of body as AsyncIterable<Buffer | Uint8Array | string>) {
+      signal?.throwIfAborted();
+      const buffer = Buffer.from(chunk);
+      bytes += buffer.length;
+      if (bytes > maxBytes) throw new Error("Storage object is too large");
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
+  } finally {
+    signal?.removeEventListener("abort", abort);
   }
-  return Buffer.concat(chunks);
 }
 
 function getStorageConfig(): StorageConfig {
@@ -179,15 +201,15 @@ export async function storageGet(relKey: string): Promise<{ key: string; url: st
   };
 }
 
-export async function storageRead(relKey: string): Promise<{ key: string; body: Buffer; contentType: string }> {
+export async function storageRead(relKey: string, options: StorageReadOptions = {}): Promise<{ key: string; body: Buffer; contentType: string }> {
   const r2 = getR2Config();
   if (!r2) throw new Error("R2 storage is not configured");
 
   const key = normalizeKey(relKey);
-  const response = await getR2Client(r2).send(new GetObjectCommand({ Bucket: r2.bucket, Key: key }));
+  const response = await getR2Client(r2).send(new GetObjectCommand({ Bucket: r2.bucket, Key: key }), { abortSignal: options.signal });
   return {
     key,
-    body: await streamToBuffer(response.Body),
+    body: await streamToBuffer(response.Body, options),
     contentType: response.ContentType || "application/octet-stream",
   };
 }

@@ -557,6 +557,7 @@ type EndpointDef = {
   auth: boolean;
   params?: { name: string; in: "header" | "query" | "body"; type: string; required: boolean; desc: string }[];
   response: string;
+  exampleBody?: Record<string, string | number | boolean>;
 };
 
 const ENDPOINTS: EndpointDef[] = [
@@ -616,6 +617,17 @@ const ENDPOINTS: EndpointDef[] = [
       { name: "receiveCoin", in: "body", type: "string", required: false, desc: "Preferred receive coin" },
     ],
     response: `{ "id": "...", "label": "Storefront A", "address": "0x...", "status": "active" }`,
+  },
+  {
+    method: "POST", path: "/api/payment/qr", desc: "Generate the same full payment-card PNG as the web Download button, with amount, currency, merchant details, and saved QR branding. Base is what you receive; target is the customer's payment token. Reusable same-token QRs open the wallet directly; conversions and single-use QRs open checkout. Cross-currency amounts are indicative and re-quoted at checkout. No expiry; each successful call creates a new link.", auth: true,
+    exampleBody: { baseAmount: "100", baseCurrency: "USDC", targetCurrency: "XSGD", singleUse: true },
+    params: [
+      { name: "baseAmount", in: "body", type: "string", required: true, desc: "Exact amount to receive, positive decimal string with up to 6 decimals (or the token's lower precision); max 9007199254.740991" },
+      { name: "baseCurrency", in: "body", type: "string", required: true, desc: "Receiving stablecoin symbol from the active Sera registry, e.g. USDC (not USD)" },
+      { name: "targetCurrency", in: "body", type: "string", required: true, desc: "Customer payment stablecoin, e.g. XSGD. Equal symbols create a direct payment." },
+      { name: "singleUse", in: "body", type: "boolean", required: false, desc: "Default false (reusable). True saves a single-use intent trackable via GET /api/payments/:id. No expiry." },
+    ],
+    response: `{ "checkoutUrl": "https://pay.sera.cx/pay/...", "qrValue": "https://pay.sera.cx/pay/...", "qrCodeDataUrl": "data:image/png;base64,...", "baseAmount": "100", "baseCurrency": "USDC", "targetCurrency": "XSGD", "targetAmount": "130", "receiverAddress": "0x...", "chainId": 1, "singleUse": true, "paymentIntentId": "<uuid>", "requiresCustomerRequote": true }`,
   },
   {
     method: "POST", path: "/api/payments", desc: "Create a checkout session/payment link.", auth: true,
@@ -687,7 +699,7 @@ function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
 
   const exampleCurl = ep.method === "GET"
     ? `curl -H "x-api-key: ${apiKey}" \\\n  https://pay.sera.cx${ep.path}`
-    : `curl -X ${ep.method} \\\n  -H "x-api-key: ${apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '{}' \\\n  https://pay.sera.cx${ep.path}`;
+    : `curl -X ${ep.method} \\\n  -H "x-api-key: ${apiKey}" \\\n  -H "Content-Type: application/json" \\\n  -d '${JSON.stringify(ep.exampleBody ?? {})}' \\\n  https://pay.sera.cx${ep.path}`;
 
   return (
     <div className="border border-border rounded-lg overflow-hidden">

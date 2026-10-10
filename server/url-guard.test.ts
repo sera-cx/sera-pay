@@ -168,6 +168,10 @@ describe("IPv6 literals", () => {
     "[fc00::1]",            // ULA lower half
     "[fd12:3456::1]",       // ULA upper half
     "[fe80::1]",            // link-local
+    "[fe90::1]",            // link-local /10 includes more than fe80
+    "[febf:ffff::1]",       // link-local upper bound
+    "[fec0::1]",            // deprecated site-local
+    "[ff02::1]",            // link-local multicast
     "[::ffff:a00:1]",       // IPv4-mapped 10.0.0.1, hex form
     "[::ffff:7f00:1]",      // IPv4-mapped 127.0.0.1, hex form
   ])("blocks https://%s/", async (host) => {
@@ -235,6 +239,11 @@ describe("hostnames that need DNS", () => {
 
   it("rejects an IPv4-mapped IPv6 record in hex form", async () => {
     resolveTo([record("8.8.8.8"), record("::ffff:7f00:1")]);
+    await expectGuardError("https://hooks.example.com/", "Webhook host resolves to a private address");
+  });
+
+  it.each(["0:0:0:0:0:0:0:1", "0:0:0:0:0:ffff:a00:1", "febf::1"])("rejects nonpublic IPv6 DNS result %s", async (address) => {
+    resolveTo([record("8.8.8.8"), record(address)]);
     await expectGuardError("https://hooks.example.com/", "Webhook host resolves to a private address");
   });
 

@@ -10,6 +10,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { paymentRouter } from "../payment-routes";
+import { createPaymentQrRouter } from "../payment-qr-routes";
 import { menuRouter } from "../menu-routes";
 import { gatewayRouter } from "../gateway-routes";
 import { validateRuntimeEnv } from "./env";
@@ -88,6 +89,7 @@ async function startServer() {
     });
 
   app.use("/api/payment/create",   makeLimit(20, "Too many payment requests, please slow down."));
+  app.use("/api/payment/qr",       makeLimit(20, "Too many QR generation requests, please slow down."));
   app.use("/api/payment/swap/preflight", makeLimit(20, "Too many swap preflight requests, please slow down."));
   app.use("/api/payment/swap/quote", makeLimit(20, "Too many swap quote requests, please slow down."));
   app.use("/api/payment/swap/submit", makeLimit(10, "Too many swap submissions, please slow down."));
@@ -134,6 +136,7 @@ async function startServer() {
   // ── Payment API routes under /api/ ────────────────────────────────────────────
   app.use("/api", gatewayRouter);
   app.use("/api", paymentRouter);
+  app.use("/api", createPaymentQrRouter());
   app.use("/api", menuRouter);
 
   // ── tRPC API ──────────────────────────────────────────────────────────────────

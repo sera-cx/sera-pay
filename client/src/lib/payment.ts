@@ -2,6 +2,8 @@ import { buildClientAppUrl } from "@/lib/app-url";
 import { normalizeDecimalAmountText } from "@/lib/decimalInput";
 import { fetchApi } from "@/lib/api";
 import type { SeraApiMode } from "@shared/gateway";
+import { buildWalletPaymentUri, type WalletPaymentUriRequest } from "@shared/wallet-payment-uri";
+export { buildWalletPaymentUri, parseAmountToRaw, type WalletPaymentUriRequest } from "@shared/wallet-payment-uri";
 
 export const LIVE_PAYMENT_CHAIN_ID = 1;
 export const TEST_PAYMENT_CHAIN_ID = 11155111;
@@ -321,33 +323,6 @@ export function getCrossCurrencyReceiveLabel(
     : `Priced at ${pricedAs} · merchant receives ${normalizedPayCoin}`;
 }
 
-export function parseAmountToRaw(amount: string, decimals: number): bigint {
-  const normalized = amount.trim();
-  if (!/^\d+(\.\d+)?$/.test(normalized) || parseFloat(normalized) <= 0) return 0n;
-  const parts = normalized.split(".");
-  const intPart = parts[0] || "0";
-  const meaningfulFraction = (parts[1] || "").replace(/0+$/, "");
-  if (meaningfulFraction.length > decimals) {
-    throw new Error(`Amount exceeds the token's ${decimals}-decimal precision.`);
-  }
-  const fracPart = meaningfulFraction.padEnd(decimals, "0");
-  const scale = 10n ** BigInt(decimals);
-  return BigInt(intPart) * scale + BigInt(fracPart);
-}
-
-const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
-
-export interface WalletPaymentUriRequest {
-  receiverAddress: string;
-  coin?: string | null;
-  amount?: string | null;
-  chainId?: number | null;
-  /** Exact address returned by the active Sera /tokens registry. */
-  tokenAddress?: string | null;
-  /** Decimals returned beside tokenAddress by the same registry response. */
-  tokenDecimals?: number | null;
-}
-
 export interface PaymentQrValueRequest extends WalletPaymentUriRequest {
   receiveCoin?: string | null;
   /** Merchant's exact target output amount for a cross-currency checkout. */
@@ -385,54 +360,6 @@ function signedHostedPaymentUrlForRequest(request: PaymentQrValueRequest): strin
   } catch {
     return "";
   }
-}
-
-/**
- * Builds a raw EIP-681 wallet URI so wallet scanners can prefill token + amount.
- * Merchant QR history relies on backend direct-transfer reconciliation because
- * raw wallet URIs do not call the /pay checkout recorder.
- */
-export function buildWalletPaymentUri({
-  receiverAddress,
-  coin,
-  amount,
-  chainId,
-  tokenAddress,
-  tokenDecimals,
-}: WalletPaymentUriRequest): string {
-  const receiver = receiverAddress.trim();
-  // Callers such as TransactionsPage and MenuManagerPage pass a nullable
-  // chainId straight from a stored row. Mainnet is the only safe default:
-  // falling back to Sepolia minted QR codes that asked a customer's wallet to
-  // send real payments on a test network.
-  const resolvedChainId = chainId || LIVE_PAYMENT_CHAIN_ID;
-  if (!EVM_ADDRESS_RE.test(receiver)) return "";
-
-  const symbol = String(coin || "").trim().toUpperCase();
-  const normalizedAmount = normalizeDecimalAmountText(String(amount || "")) || "";
-
-  if (symbol === "ETH") {
-    const rawNative = normalizedAmount ? parseAmountToRaw(normalizedAmount, 18) : 0n;
-    const params = rawNative > 0n ? `?value=${rawNative.toString()}&gas=21000` : "";
-    return `ethereum:${receiver}@${resolvedChainId}${params}`;
-  }
-
-  const decimals = Number(tokenDecimals);
-  if (tokenAddress && EVM_ADDRESS_RE.test(tokenAddress) && Number.isInteger(decimals) && decimals >= 0 && decimals <= 255) {
-    let rawAmount = 0n;
-    try {
-      rawAmount = normalizedAmount ? parseAmountToRaw(normalizedAmount, decimals) : 0n;
-    } catch {
-      return "";
-    }
-    const params = new URLSearchParams({ address: receiver });
-    if (rawAmount > 0n) params.set("uint256", rawAmount.toString());
-    return `ethereum:${tokenAddress}@${resolvedChainId}/transfer?${params.toString()}`;
-  }
-
-  // Never degrade an ERC-20 request to a native/plain-address URI. That loses
-  // the selected token and wallets may display it as ETH, USDC, or "Unknown".
-  return "";
 }
 
 /**
