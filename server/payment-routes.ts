@@ -56,6 +56,7 @@ import {
   getApiKeyConfigRecord,
   getPaymentIntentById,
   getMenuOrderById,
+  hashMerchantApiKey,
   updatePaymentIntent,
   updateMenuOrderPayment,
   updateDirectLinkedPaymentStatus,
@@ -69,6 +70,7 @@ import { notePairResult } from "./pair-liquidity";
 import { hashSeraIntentStruct, SERA_INTENT_TYPES, type SeraIntentMessage } from "./sera-intent";
 import { PaymentBindingError, assertAmountMatchesReference, assertMenuOrderBindable, assertPaymentIntentBindable, sameMicroAmount } from "./payment-binding";
 import { CheckoutPayloadError, isCheckoutSigningReady, signCheckoutPayload, verifyCheckoutPayload } from "./checkout-payload";
+import { issueDashboardSession, verifyDashboardSession } from "./dashboard-session";
 import { isDirectTransferCandidate, isSeraSwapTransactionRecord } from "./payment-transaction-kind";
 import { selectDirectTransferEvidence, type DecodedErc20TransferEvidence } from "./direct-transfer-evidence";
 import {
@@ -328,11 +330,40 @@ function notifySseClients(txId: string, data: object) {
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
+/**
+ * Resolves a credential to its merchant. Two kinds share the x-api-key
+ * channel: merchant API keys (sk_-prefixed, looked up by SHA-256 hash) and
+ * dashboard session tokens (Privy-authenticated JWTs minted by
+ * /merchant/register). Bearer tokens are accepted as an alias for sessions.
+ */
+export async function getMerchantByCredential(credential: string): Promise<Merchant | undefined> {
+  if (!credential) return undefined;
+  if (credential.startsWith("sk_")) return getMerchantByApiKey(credential);
+  const session = await verifyDashboardSession(credential);
+  if (!session) return undefined;
+  return getMerchantById(session.merchantId);
+}
+
+/** Rows sent to clients must never carry the key hash or webhook secret. */
+function merchantPublicJson(merchant: Merchant | undefined | null) {
+  if (!merchant) return merchant;
+  const { apiKeyHash, webhookSecret, ...rest } = merchant as Merchant & Record<string, unknown>;
+  return rest;
+}
+
+function credentialFromRequest(req: Request): string {
+  const header = req.headers["x-api-key"];
+  if (typeof header === "string" && header.trim()) return header.trim();
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
+  return "";
+}
+
 export async function requireApiKey(req: Request, res: Response, next: Function) {
   try {
-    const apiKey = req.headers["x-api-key"] as string;
-    if (!apiKey) { res.status(401).json({ error: "Missing X-Api-Key header" }); return; }
-    const merchant = await getMerchantByApiKey(apiKey);
+    const credential = credentialFromRequest(req);
+    if (!credential) { res.status(401).json({ error: "Missing X-Api-Key header" }); return; }
+    const merchant = await getMerchantByCredential(credential);
     if (!merchant) { res.status(401).json({ error: "Invalid API key" }); return; }
     (req as any).merchant = merchant;
     next();
@@ -462,13 +493,27 @@ paymentRouter.post("/merchant/register", async (req, res) => {
         await updateMerchant(existing.id, { name });
         existing.name = name;
       }
-      res.json({ id: existing.id, userId: identity.userId, walletAddress: existing.walletAddress, name: existing.name, apiKey: existing.apiKey, isNew: false });
+      // The API key is a shown-once credential: it is never re-returned, so
+      // an existing merchant only gets a fresh dashboard session token.
+      const sessionToken = await issueDashboardSession(existing.id, existing.walletAddress);
+      res.json({ id: existing.id, userId: identity.userId, walletAddress: existing.walletAddress, name: existing.name, apiKeyLast4: null, sessionToken, isNew: false });
       return;
     }
     const id = uuidv4();
     const apiKey = "sk_" + crypto.randomBytes(32).toString("hex");
-    await createMerchant({ id, walletAddress: addr, name: name.trim(), apiKey, receiveCoin: "USDC" });
-    res.json({ id, userId: identity.userId, walletAddress: addr, name: name.trim(), apiKey, isNew: true });
+    await createMerchant({ id, walletAddress: addr, name: name.trim(), apiKeyHash: hashMerchantApiKey(apiKey), receiveCoin: "USDC" });
+    const sessionToken = await issueDashboardSession(id, addr);
+    res.json({
+      id,
+      userId: identity.userId,
+      walletAddress: addr,
+      name: name.trim(),
+      // Shown once, here. Only the SHA-256 hash is stored.
+      apiKey,
+      apiKeyLast4: apiKey.slice(-4),
+      sessionToken,
+      isNew: true,
+    });
   } catch (e) {
     if (e instanceof PrivyAuthError) { sendPrivyAuthError(res, e); return; }
     logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" });
@@ -599,7 +644,7 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
     await updateMerchant(merchant.id, updates);
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
-    res.json(updated || { success: true });
+    res.json(merchantPublicJson(updated) || { success: true });
   } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
@@ -669,7 +714,7 @@ paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, re
     await updateMerchant(merchant.id, updates);
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
-    res.json(updated);
+    res.json(merchantPublicJson(updated));
   } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
@@ -768,6 +813,16 @@ paymentRouter.post("/merchant/webhook/secret/regenerate", requireApiKey as any, 
     const newSecret = "whsec_" + randomBytes(24).toString("hex"); // 48-char hex prefixed
     await updateMerchant(req.merchant.id, { webhookSecret: newSecret });
     res.json({ success: true, webhookSecret: newSecret });
+  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
+});
+
+/** POST /api/merchant/api-key/regenerate — rotate the merchant API key (shown once) */
+paymentRouter.post("/merchant/api-key/regenerate", requireApiKey as any, async (req: any, res) => {
+  try {
+    const apiKey = "sk_" + crypto.randomBytes(32).toString("hex");
+    await updateMerchant(req.merchant.id, { apiKeyHash: hashMerchantApiKey(apiKey) });
+    // Shown once, here. The previous key stops working immediately.
+    res.json({ success: true, apiKey, apiKeyLast4: apiKey.slice(-4) });
   } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
 });
 
@@ -885,14 +940,18 @@ export function notifyMerchantSse(merchantId: string, data: Record<string, unkno
 }
 
 /** GET /api/merchant/events — SSE stream for live payment notifications
- *  Accepts API key via X-Api-Key header (preferred) or apiKey query param (legacy, logged as warning).
+ *  Auth: one-time SSE token from POST /api/merchant/sse-token, or an API key /
+ *  dashboard session via the X-Api-Key header. Credentials are never accepted
+ *  as URL query parameters — they leak into proxy and server logs.
  */
 paymentRouter.get("/merchant/events", async (req, res) => {
   // Express 4 does not catch a rejected async handler, and this one awaits the
   // database twice before it streams anything. Unguarded, a single DB blip
   // here became an unhandled rejection and took the whole payment server down.
   try {
-    // Auth: accept short-lived SSE token (preferred), X-Api-Key header, or legacy query param
+    // Auth: one-time SSE token from POST /api/merchant/sse-token, or an API
+    // key / dashboard session via the X-Api-Key header. Credentials are never
+    // accepted as URL query parameters — they leak into proxy and server logs.
     const sseToken = req.query.token as string | undefined;
     let merchantId: string | undefined;
     if (sseToken) {
@@ -903,9 +962,9 @@ paymentRouter.get("/merchant/events", async (req, res) => {
       merchantId = entry.merchantId;
       sseTokens.delete(sseToken); // one-time use
     } else {
-      const apiKey = (req.headers["x-api-key"] as string) || (req.query.apiKey as string);
-      if (!apiKey) { res.status(401).json({ error: "Missing authentication" }); return; }
-      const merchant = await getMerchantByApiKey(apiKey);
+      const credential = credentialFromRequest(req);
+      if (!credential) { res.status(401).json({ error: "Missing authentication" }); return; }
+      const merchant = await getMerchantByCredential(credential);
       if (!merchant) { res.status(401).json({ error: "Invalid API key" }); return; }
       merchantId = merchant.id;
     }

@@ -991,7 +991,7 @@ function CartSidebar({
   variant?: "sidebar" | "drawer";
   onClose?: () => void;
 }) {
-  const { apiKey } = useAuth();
+  const { credential: apiKey } = useAuth();
   const walletChainId = useChainId();
   const { data: seraConfig } = useSeraApiConfig();
   const paymentChainId = resolvePaymentChainId(walletChainId, seraConfig?.mode);
@@ -1778,7 +1778,7 @@ export function MenuManager() {
   const [renameMenuName, setRenameMenuName] = useState("");
   const [renamingMenu, setRenamingMenu] = useState(false);
   const [cart, setCart] = useState<CartEntry[]>([]);
-  const { apiKey: dashboardApiKey, isAuthenticated } = useAuth();
+  const { credential: dashboardApiKey, isAuthenticated } = useAuth();
   const { data: merchantProfile } = useMerchantProfile(dashboardApiKey || undefined);
   const [, navigate] = useLocation();
   const search = useSearch();
