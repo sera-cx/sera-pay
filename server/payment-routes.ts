@@ -158,6 +158,13 @@ paymentRouter.get("/storage/objects/*", async (req, res) => {
 
     const object = await storageRead(key);
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    // Defense in depth for whatever is in the bucket: an object opened
+    // directly must never execute (CSP), must download rather than render,
+    // and must not be MIME-sniffed into something active. <img> rendering
+    // ignores Content-Disposition, so logos keep displaying normally.
+    res.setHeader("Content-Security-Policy", "default-src 'none'");
+    res.setHeader("Content-Disposition", "attachment");
+    res.setHeader("X-Content-Type-Options", "nosniff");
     res.type(object.contentType);
     res.send(object.body);
   } catch (error) {
@@ -475,7 +482,11 @@ paymentRouter.post("/merchant/register", async (req, res) => {
   }
 });
 
-const LOGO_DATA_URI_RE = /^data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,([A-Za-z0-9+/=]+)$/;
+// SVG is deliberately absent: it is the one image format that can carry
+// script. Uploaded logos are stored to R2 and served back, and an SVG served
+// from a storage domain executes when opened directly, even though <img>
+// rendering is inert. The client uploader only ever sends jpeg/png/webp.
+const LOGO_DATA_URI_RE = /^data:image\/(png|jpeg|jpg|gif|webp);base64,([A-Za-z0-9+/=]+)$/;
 const LOGO_URL_RE = /^https:\/\/[\w.-]+(?:\/[\w./%+~-]*)?(?:\?[\w=&.%+-]*)?$/;
 const MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024;
 
