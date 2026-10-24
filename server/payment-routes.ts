@@ -149,6 +149,32 @@ function getTransactionVolumeValue(tx: Transaction): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+/**
+ * Payer-safe subset of a transaction row for the unauthenticated scan
+ * endpoints. The full row carries merchant identifiers, order links and
+ * notes metadata that belong to the merchant, not to whoever holds a public
+ * QR link.
+ */
+export function publicTransactionJson(tx: Transaction | null) {
+  if (!tx) return null;
+  let meta: any = null;
+  if (typeof tx.notes === "string" && tx.notes.trim().startsWith("{")) {
+    try { meta = JSON.parse(tx.notes); } catch {}
+  }
+  return {
+    id: tx.id,
+    txHash: tx.txHash,
+    fromAddress: tx.fromAddress,
+    toAddress: tx.toAddress,
+    coin: tx.coin,
+    amount: tx.amount,
+    chainId: tx.chainId,
+    status: tx.status,
+    createdAt: tx.createdAt,
+    paymentSource: typeof meta?.type === "string" ? meta.type : null,
+  };
+}
+
 paymentRouter.get("/storage/objects/*", async (req, res) => {
   try {
     const key = String((req.params as Record<string, string | undefined>)[0] || "").replace(/^\/+/, "");
@@ -3748,12 +3774,19 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
           paymentUrl: storedPaymentUrl,
           verified: true,
         });
+        // The transfer fits several pending rows equally and this poll named
+        // no link: recording it would guess. Answer pending and leave the
+        // transfer for a poller that knows its QR.
+        if (recorded.ambiguous || !recorded.transaction) {
+          res.json({ status: "pending", fromBlock: cursor.toString(), latestBlock: latestBlock.toString() });
+          return;
+        }
         res.json({
           status: "confirmed",
           fromBlock: cursor.toString(),
           latestBlock: latestBlock.toString(),
           txHash: recorded.transaction.txHash,
-          transaction: transactionToJson(recorded.transaction),
+          transaction: publicTransactionJson(recorded.transaction),
           created: recorded.created,
         });
         return;
@@ -3784,11 +3817,12 @@ paymentRouter.post("/payment/direct/scan", async (req, res) => {
         status: "amount_mismatch",
         fromBlock: cursor.toString(),
         latestBlock: latestBlock.toString(),
+        txHash: mismatch.txHash,
         expectedAmount: amount,
         actualAmount,
         coin,
         message: `Received ${actualAmount} ${coin}, but this QR requires ${amount} ${coin}.`,
-        transaction: transactionToJson(recorded.transaction),
+        transaction: publicTransactionJson(recorded.transaction),
         created: recorded.created,
       });
       return;
@@ -4675,6 +4709,30 @@ async function expireDirectQrWatch(tx: Transaction) {
   return cancellation.outcome === "claimed";
 }
 
+/**
+ * Pick which pending row a direct transfer pays for.
+ *
+ * When the caller knows which link it is scanning for, that link's row is the
+ * one to confirm. Without a link, several pending rows with the same
+ * receiver, coin and amount are interchangeable — a fixed-price menu or a
+ * repeated invoice makes this the common case, and confirming the newest (the
+ * old behaviour) can credit one customer's order with another customer's
+ * transfer. No link, no guess: the caller waits for a poller that knows its
+ * QR, or for the pending rows to expire.
+ */
+export function selectDirectPaymentCandidate(
+  candidates: Transaction[],
+  paymentUrl: string | null | undefined,
+): { transaction: Transaction | null; ambiguous: boolean } {
+  const storedUrl = storedDirectQrPaymentUrl(paymentUrl);
+  if (storedUrl) {
+    const own = candidates.find((tx) => directQrNotes(tx).paymentUrl === storedUrl);
+    if (own) return { transaction: own, ambiguous: false };
+  }
+  if (candidates.length > 1) return { transaction: null, ambiguous: true };
+  return { transaction: candidates[0] ?? null, ambiguous: false };
+}
+
 async function findMatchingPendingTransaction({
   merchantId,
   toAddress,
@@ -4691,7 +4749,7 @@ async function findMatchingPendingTransaction({
   rawAmount: bigint;
   decimals: number;
   paymentUrl?: string | null;
-}) {
+}): Promise<{ transaction: Transaction | null; ambiguous: boolean }> {
   const recent = await getMerchantTransactions(merchantId, 100);
   const candidates = recent.filter((tx) => {
     if (!isDirectTransferCandidate(tx)) return false;
@@ -4706,16 +4764,7 @@ async function findMatchingPendingTransaction({
       return false;
     }
   });
-  // Several pending rows can await the same amount at the same address: the
-  // QR's own watch row and, a few minutes back, an identical QR's. When the
-  // caller knows which link it is scanning for, that link's row is the one to
-  // confirm; the sweep knows no link and takes the newest, as before.
-  const storedUrl = storedDirectQrPaymentUrl(paymentUrl);
-  if (storedUrl) {
-    const own = candidates.find((tx) => directQrNotes(tx).paymentUrl === storedUrl);
-    if (own) return own;
-  }
-  return candidates[0];
+  return selectDirectPaymentCandidate(candidates, paymentUrl);
 }
 
 async function notifyRecordedDirectTransfer({
@@ -4923,9 +4972,15 @@ async function scanDirectTransfersForReceiver({
       decimals,
     });
 
-    if (pending) {
+    // Ambiguous: several pending rows want this exact amount and the sweep
+    // cannot know which customer's row it is. Skip the transfer entirely —
+    // the QR pollers confirm their own link's row, and once the pending rows
+    // expire a later sweep records it as an unsolicited payment.
+    if (pending.ambiguous) continue;
+
+    if (pending.transaction) {
       await confirmPendingDirectTransfer({
-        pending,
+        pending: pending.transaction,
         merchant,
         txHash: txHash as `0x${string}`,
         fromAddress,
@@ -5057,9 +5112,16 @@ async function recordDirectTransferPayment({
       decimals,
       paymentUrl,
     });
-    if (pending) {
+    // Ambiguous match: several pending rows fit equally and the caller passed
+    // no link that would pick one. Recording the transfer standalone would
+    // claim its hash and shadow the row a link-aware poller must still
+    // confirm, so report the ambiguity and record nothing.
+    if (pending.ambiguous) {
+      return { transaction: null, created: false, ambiguous: true };
+    }
+    if (pending.transaction) {
       const transaction = await confirmPendingDirectTransfer({
-        pending,
+        pending: pending.transaction,
         merchant: resolved.merchant,
         txHash: normalizedTxHash,
         fromAddress,
@@ -5134,6 +5196,17 @@ async function recordDirectTransferPayment({
   return { transaction: transaction!, created: true };
 }
 
+/**
+ * Does a failed row record the same transfer already? Mismatch rows carry
+ * their hash only in `notes`, so this is how polls dedupe without the unique
+ * index.
+ */
+export function isDuplicateDirectFailureRow(tx: Pick<Transaction, "status" | "notes">, txHash: string): boolean {
+  if (tx.status !== "failed") return false;
+  const notes = typeof tx.notes === "string" ? tx.notes : "";
+  return notes.includes(txHash.toLowerCase());
+}
+
 async function recordDirectTransferFailure({
   txHash,
   fromAddress,
@@ -5167,11 +5240,25 @@ async function recordDirectTransferFailure({
     throw new Error("Receiver wallet is not attached to a SeraPay merchant.");
   }
 
+  // A mismatch row deliberately carries no txHash. The same transfer can be
+  // an exact match for a different link on this address (a cheaper or pricier
+  // QR), and storing the hash would let whichever poller saw it first
+  // permanently claim the transfer — its failed row would shadow the pending
+  // row that must still confirm it, and the unique index would keep anyone
+  // from ever re-claiming the hash. The hash lives in `notes` as evidence;
+  // `isDuplicateDirectFailureRow` keeps repeat polls from stacking rows.
+  const recent = await getMerchantTransactions(resolved.merchant.id, 100);
+  const duplicate = recent.find((tx) => isDuplicateDirectFailureRow(tx, normalizedTxHash));
+  if (duplicate) {
+    return { transaction: duplicate, created: false };
+  }
+
   const txId = uuidv4();
   const safeReason = reason.slice(0, 180);
   const notes = JSON.stringify({
     type: "direct_wallet_qr",
     paymentUrl: typeof paymentUrl === "string" ? paymentUrl.slice(0, 1200) : null,
+    txHash: normalizedTxHash,
     errorCode: "amount_mismatch",
     expectedAmount,
     actualAmount,
@@ -5181,7 +5268,6 @@ async function recordDirectTransferFailure({
   await createTransaction({
     id: txId,
     merchantId: resolved.merchant.id,
-    txHash: normalizedTxHash,
     fromAddress: fromAddress?.toLowerCase() || null,
     toAddress: resolved.receiveAddress,
     coin,

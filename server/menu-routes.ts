@@ -3,6 +3,7 @@
  * Registered under /api/ in server/_core/index.ts
  */
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { createMenuOrder, getApiKeyConfigRecord, getDb } from "./db";
 import { menus, menuItems, merchants, type MenuItem } from "../drizzle/schema";
 import { eq, and, asc, lte, or, isNull } from "drizzle-orm";
@@ -456,7 +457,17 @@ menuRouter.get("/public/menu/:slug", async (req, res) => {
 });
 
 /** POST /api/public/menu/:slug/orders — create an order before checkout */
-menuRouter.post("/public/menu/:slug/orders", async (req, res) => {
+// Unauthenticated: each hit prices an order server-side, writes a row and
+// mints a signed checkout payload, so cap per client like the payment routes.
+const publicOrderLimit = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many orders from this address, please slow down." },
+});
+
+menuRouter.post("/public/menu/:slug/orders", publicOrderLimit, async (req, res) => {
   try {
     const db = await getDb();
     if (!db) { res.status(503).json({ error: "Database unavailable" }); return; }

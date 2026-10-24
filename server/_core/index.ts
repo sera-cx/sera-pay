@@ -92,6 +92,9 @@ async function startServer() {
   app.use("/api/payment/swap/quote", makeLimit(20, "Too many swap quote requests, please slow down."));
   app.use("/api/payment/swap/submit", makeLimit(10, "Too many swap submissions, please slow down."));
   app.use("/api/payment/notify",   makeLimit(10, "Too many notification requests, please slow down."));
+  app.use("/api/payment/direct/scan", makeLimit(30, "Too many scan requests, please slow down."));
+  app.use("/api/payment/events",   makeLimit(30, "Too many SSE connections."));
+  app.use("/api/sera",             makeLimit(60, "Too many Sera API requests, please slow down."));
   app.use("/api/rates",            makeLimit(60, "Too many rate requests, please slow down."));
   app.use("/api/merchant/register",makeLimit(5,  "Too many registration attempts."));
   app.use("/api/merchant/events",  makeLimit(30, "Too many SSE connections."));
