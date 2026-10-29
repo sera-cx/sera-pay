@@ -1,3 +1,5 @@
+import { getSeraPublicErrorCode, getSeraPublicErrorMessage } from "@shared/sera-errors";
+
 const API_BASE = "/api";
 
 export const DASHBOARD_API_KEY_STORAGE_KEY = "serapay_dashboard_apiKey";
@@ -10,7 +12,7 @@ export const DASHBOARD_SESSION_IDLE_TIMEOUT_MS = 16 * 60 * 60 * 1000;
 export const DASHBOARD_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public errorCode?: string) {
     super(message);
     this.name = "ApiError";
   }
@@ -74,6 +76,7 @@ function notifyInvalidDashboardAuth(message: string) {
 }
 
 export async function fetchApi<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const isSeraRequest = /^\/(?:payment\/swap(?:\/|\?|$)|sera(?:\/|\?|$)|merchant\/sera-config(?:\/|\?|$))/.test(path);
   if (isDashboardSessionExpired()) {
     notifyExpiredDashboardSession("Dashboard session expired. Please sign in again.");
     throw new ApiError(401, "Dashboard session expired. Please sign in again.");
@@ -86,23 +89,42 @@ export async function fetchApi<T = any>(path: string, options: RequestInit = {})
   if (!headers.has("Content-Type") && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers,
-  });
-  if (!response.ok) {
-    let errorMsg = "An error occurred";
-    try {
-      const errorData = await response.json();
-      errorMsg = errorData.error || errorMsg;
-    } catch {
-      errorMsg = (await response.text()) || response.statusText;
-    }
-    if (response.status === 401 && /invalid api key|missing x-api-key/i.test(errorMsg)) {
-      notifyInvalidDashboardAuth(errorMsg);
-      errorMsg = "Dashboard session expired. Reconnecting your wallet workspace.";
-    }
-    throw new ApiError(response.status, errorMsg);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+    });
+  } catch (error) {
+    if (!isSeraRequest) throw error;
+    throw new ApiError(0, getSeraPublicErrorMessage(null), "sera_unavailable");
   }
-  return response.json();
+  if (!response.ok) {
+    // Read the stream once: a failed response.json() still consumes its body.
+    const errorText = await response.text().catch(() => "");
+    let errorData: any = null;
+    try {
+      errorData = JSON.parse(errorText);
+    } catch {
+      // Proxy pages and malformed responses are never user-facing messages.
+    }
+    const serverMessage = typeof errorData?.error === "string" ? errorData.error : "";
+    if (response.status === 401 && /invalid api key|missing x-api-key/i.test(serverMessage)) {
+      notifyInvalidDashboardAuth("Dashboard session expired. Please sign in again.");
+      throw new ApiError(response.status, "Dashboard session expired. Reconnecting your wallet workspace.");
+    }
+    const errorCode = getSeraPublicErrorCode(errorData) ?? (isSeraRequest ? "sera_unavailable" : undefined);
+    const errorMsg = isSeraRequest
+      ? getSeraPublicErrorMessage(errorCode)
+      : serverMessage && !/[<>]/.test(serverMessage)
+        ? serverMessage
+        : "Something went wrong. Please try again.";
+    throw new ApiError(response.status, errorMsg, errorCode);
+  }
+  try {
+    return await response.json();
+  } catch (error) {
+    if (!isSeraRequest) throw error;
+    throw new ApiError(response.status, getSeraPublicErrorMessage(null), "sera_unavailable");
+  }
 }

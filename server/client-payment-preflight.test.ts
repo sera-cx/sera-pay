@@ -75,7 +75,7 @@ describe("client conversion QR preflight", () => {
       payCoin: "IDRT",
       payAmount: "2000",
       chainId: 1,
-    })).rejects.toThrow(/no executable route/i);
+    })).rejects.toMatchObject({ errorCode: "no_liquidity", message: "No liquidity for this pair — try another currency." });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/payment/swap/preflight");
@@ -104,7 +104,7 @@ describe("client conversion QR preflight", () => {
       payCoin: "IDRT",
       payAmount: "2000",
       chainId: 1,
-    })).rejects.toThrow(/different payment request/i);
+    })).rejects.toMatchObject({ errorCode: "invalid_quote" });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

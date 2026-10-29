@@ -130,10 +130,12 @@ function objectMessage(value: unknown): string {
 }
 
 function objectErrorCode(value: unknown): string | null {
+  if (typeof value === "string") return /^[A-Za-z][A-Za-z0-9_:-]{0,99}$/.test(value) ? value : null;
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  const direct = record.error_code ?? record.error ?? record.code;
-  if (typeof direct === "string") return direct;
+  // Typed codes take precedence over human-readable provider error text.
+  const direct = record.error_code ?? record.code ?? record.error;
+  if (typeof direct === "string" && /^[A-Za-z][A-Za-z0-9_:-]{0,99}$/.test(direct)) return direct;
   if (record.detail && record.detail !== value) return objectErrorCode(record.detail);
   return null;
 }
@@ -237,7 +239,7 @@ export async function callSeraApi<T>(options: SeraRequestOptions): Promise<T> {
         ? (parsed as { detail: unknown }).detail
         : parsed;
       const message = objectMessage(detail) || text || response.statusText;
-      throw new SeraApiError(response.status, `Sera API ${response.status}: ${message}`, detail, objectErrorCode(detail));
+      throw new SeraApiError(response.status, `Sera API ${response.status}: ${message}`, detail, objectErrorCode(parsed));
     }
 
     return parsed as T;

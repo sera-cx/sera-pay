@@ -4,6 +4,8 @@
  */
 import { Router, Request, Response } from "express";
 import crypto from "crypto";
+import { getSeraPublicErrorCode, getSeraPublicErrorMessage } from "../shared/sera-errors";
+import { publicSeraFailure, publicSeraSubmissionResult, seraErrorDiagnostic, seraRouteErrorResponse } from "./sera-error-response";
 import { assertPublicHttpUrl, UrlGuardError } from "./url-guard";
 import { v4 as uuidv4 } from "uuid";
 import { createPublicClient, fallback, http, webSocket, parseAbi, parseAbiItem, decodeEventLog, verifyMessage } from "viem";
@@ -73,7 +75,6 @@ import { isDirectTransferCandidate, isSeraSwapTransactionRecord } from "./paymen
 import { selectDirectTransferEvidence, type DecodedErc20TransferEvidence } from "./direct-transfer-evidence";
 import {
   SeraQuoteValidationError,
-  serializeSeraQuoteError,
   solveSeraFixedOutputQuote,
   toSeraPreflightSummary,
   validateSeraDeploymentConfig,
@@ -1362,6 +1363,8 @@ async function releaseRejectedDirectSubmission(
  * failure or racing a successful on-chain settlement.
  */
 async function emitTransactionFailureSideEffects(tx: Transaction, reason: string) {
+  const publicFailure = isSeraSwapTransaction(tx) ? publicSeraFailure(tx.failureCode, tx.status) : null;
+  if (publicFailure) reason = publicFailure.reason;
   const meta = transactionNotesMeta(tx.notes);
   if (meta.orderId || meta.paymentIntentId) {
     await updateDirectLinkedPaymentStatus({
@@ -1370,7 +1373,7 @@ async function emitTransactionFailureSideEffects(tx: Transaction, reason: string
       status: "failed",
     }).catch(() => undefined);
   }
-  notifySseClients(tx.id, { status: "failed", reason });
+  notifySseClients(tx.id, { status: "failed", reason, ...(publicFailure ? { errorCode: publicFailure.errorCode } : {}) });
   notifyMerchantSse(tx.merchantId, {
     event: "payment_failed",
     transactionId: tx.id,
@@ -1378,6 +1381,7 @@ async function emitTransactionFailureSideEffects(tx: Transaction, reason: string
     amount: tx.amount,
     coin: tx.coin,
     reason,
+    ...(publicFailure ? { errorCode: publicFailure.errorCode } : {}),
   });
 }
 
@@ -1406,70 +1410,9 @@ async function cancelStaleMerchantTransactions(merchantId: string, transactions?
   return canceled;
 }
 
-function seraPaymentErrorResponse(error: unknown, fallback: string) {
-  const quoteError = serializeSeraQuoteError(error);
-  if (quoteError) return quoteError;
-  if (error instanceof SeraApiError) {
-    const providerCode = String(error.errorCode || "").toUpperCase();
-    const isQuoteStale = providerCode === "QUOTE_STALE";
-    const isUnavailable = error.status >= 500;
-    const stableCode = providerCode === "NO_LIQUIDITY" || providerCode === "PAIR_INACTIVE"
-      ? "no_liquidity"
-      : providerCode === "AMOUNT_BELOW_MIN"
-        ? "amount_below_min"
-        : isQuoteStale || error.status === 410
-          ? "quote_stale"
-          : providerCode === "ALLOWANCE_INSUFFICIENT"
-            ? "allowance_insufficient"
-            : providerCode === "INTENT_DEADLINE_EXPIRED"
-              ? "intent_deadline_expired"
-              : providerCode === "SLIPPAGE_EXCEEDED"
-                ? "slippage_exceeded"
-                : providerCode === "STP_BLOCKED"
-                  ? "stp_blocked"
-                  : error.status === 429
-                    ? "sera_rate_limited"
-                    : isUnavailable
-                      ? "sera_unavailable"
-                      : providerCode
-                        ? providerCode.toLowerCase()
-                        : "invalid_quote";
-    const message = stableCode === "no_liquidity"
-      ? "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."
-      : stableCode === "quote_stale"
-        ? "This quote closed before it could be submitted. Please try again."
-        : stableCode === "sera_unavailable"
-          ? "Sera is temporarily unavailable. Please try again shortly."
-          : stableCode === "sera_rate_limited"
-            ? "Sera is receiving too many requests. Please try again shortly."
-            : stableCode === "amount_below_min"
-              ? "This payment amount is below Sera's minimum for this currency pair."
-              : fallback;
-    return {
-      status: error.status >= 400 && error.status < 500 ? error.status : 503,
-      body: {
-        error: message,
-        errorCode: stableCode,
-        seraStatus: error.status,
-      },
-    };
-  }
-  return {
-    status: 502,
-    body: {
-      error: "Unable to reach Sera right now. Please try again shortly.",
-      errorCode: "sera_unavailable",
-    },
-  };
-}
-
 function logSeraOperationFailure(scope: string, error: unknown) {
-  if (error instanceof SeraApiError) {
-    if (error.errorCode === "no_liquidity" || error.errorCode === "NO_LIQUIDITY") return;
-    console.error(`[${scope}] failed`, { status: error.status, code: error.errorCode || "sera_api_error" });
-    return;
-  }
-  console.error(`[${scope}] failed`, { type: error instanceof Error ? error.name : "unknown_error" });
+  if (getSeraPublicErrorCode(error) === "no_liquidity") return;
+  console.error(`[${scope}] failed`, seraErrorDiagnostic(error));
 }
 
 function errorHasDatabaseConstraint(error: unknown, constraint: string, depth = 0): boolean {
@@ -1760,8 +1703,8 @@ async function performSeraSwapOutcomeEffects(
           source: "sera_swap",
         });
       } else {
-        const reason = transactionFailureReason(latest.notes) || "Sera swap settlement failed.";
-        notifySseClients(latest.id, { status: "failed", reason });
+        const { reason, errorCode } = publicSeraFailure(latest.failureCode, latest.status);
+        notifySseClients(latest.id, { status: "failed", reason, errorCode });
         notifyMerchantSse(merchant.id, {
           event: "payment_failed",
           transactionId: latest.id,
@@ -1769,6 +1712,7 @@ async function performSeraSwapOutcomeEffects(
           amount: latest.amount,
           coin: latest.coin,
           reason,
+          errorCode,
           source: "sera_swap",
         });
       }
@@ -2530,7 +2474,7 @@ paymentRouter.post("/payment/swap/preflight", requireApiKey as any, async (req: 
     });
   } catch (error) {
     logSeraOperationFailure("payment/swap/preflight", error);
-    const response = seraPaymentErrorResponse(error, "Unable to verify this Sera conversion right now");
+    const response = seraRouteErrorResponse(error);
     res.status(response.status).json(response.body);
   }
 });
@@ -2893,7 +2837,7 @@ paymentRouter.post("/payment/swap/quote", async (req, res) => {
     if (e instanceof PaymentBindingError) { res.status(e.status).json({ error: e.message }); return; }
     if (e instanceof CheckoutPayloadError) { res.status(e.status).json({ error: e.message }); return; }
     logSeraOperationFailure("payment/swap/quote", e);
-    const response = seraPaymentErrorResponse(e, "Unable to create Sera swap quote");
+    const response = seraRouteErrorResponse(e);
     res.status(response.status).json(response.body);
   }
 });
@@ -3003,8 +2947,8 @@ async function respondToPreviouslyClaimedSeraSwap(tx: Transaction, res: Response
     res.status(409).json({
       success: false,
       status: tx.status,
-      error: tx.status === "canceled" ? "Transaction was canceled" : "Sera swap failed",
-      errorCode: tx.failureCode ?? (tx.status === "canceled" ? "canceled" : "settlement_failed"),
+      error: publicSeraFailure(tx.failureCode, tx.status).reason,
+      errorCode: publicSeraFailure(tx.failureCode, tx.status).errorCode,
     });
     return;
   }
@@ -3054,11 +2998,11 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     const tx = await getTransactionById(txId);
     if (!tx) { res.status(404).json({ error: "Transaction not found" }); return; }
     if (!isSeraSwapTransaction(tx) || !tx.quoteUuid || !tx.intentHash) {
-      res.status(409).json({ error: "Transaction is not a bound Sera swap quote", errorCode: "invalid_quote" });
+      res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
       return;
     }
     if (tx.quoteUuid !== quoteUuid) {
-      res.status(409).json({ error: "quoteUuid does not match this transaction", errorCode: "invalid_quote" });
+      res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
       return;
     }
     if (tx.status === "confirmed" || tx.submitState === "settled") {
@@ -3077,14 +3021,14 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       || !/^0x[0-9a-fA-F]{40}$/.test(tx.seraAddress)
       || hashSeraIntentStruct(route).toLowerCase() !== tx.intentHash.toLowerCase()
     ) {
-      res.status(409).json({ error: "Stored Sera route binding is invalid", errorCode: "invalid_quote" });
+      res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
       return;
     }
 
     const storedPermitDeadline = timestampToUnixSeconds(tx.permitDeadline);
     if (tx.permitRequired === 1) {
       if (!permitSignature || permitDeadline === null || permitDeadline === undefined || permitDeadline === "") {
-        res.status(400).json({ error: "This quote requires its bound Permit signature and deadline", errorCode: "allowance_insufficient" });
+        res.status(400).json({ error: getSeraPublicErrorMessage("allowance_insufficient"), errorCode: "allowance_insufficient" });
         return;
       }
       let submittedPermitDeadline: string;
@@ -3095,7 +3039,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
         return;
       }
       if (!storedPermitDeadline || submittedPermitDeadline !== storedPermitDeadline) {
-        res.status(409).json({ error: "Permit deadline does not match this quote", errorCode: "invalid_quote" });
+        res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
         return;
       }
     } else if (permitSignature || (permitDeadline !== null && permitDeadline !== undefined && permitDeadline !== "")) {
@@ -3105,7 +3049,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
 
     const settlementClient = CHAIN_CLIENTS[tx.chainId];
     if (!settlementClient) {
-      res.status(409).json({ error: "Unsupported settlement chain", errorCode: "invalid_quote" });
+      res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
       return;
     }
     const storedNotes = parseSeraTransactionNotes(tx.notes);
@@ -3114,7 +3058,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       tx.permitRequired === 1
       && (!permitTypedData || typeof permitTypedData !== "object" || Array.isArray(permitTypedData))
     ) {
-      res.status(409).json({ error: "Stored Permit binding is invalid", errorCode: "invalid_quote" });
+      res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
       return;
     }
 
@@ -3216,7 +3160,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
       return;
     }
     if (claim.outcome === "binding_mismatch") {
-      res.status(409).json({ error: "Sera quote binding changed before submission", errorCode: "invalid_quote" });
+      res.status(409).json({ error: getSeraPublicErrorMessage("invalid_quote"), errorCode: "invalid_quote" });
       return;
     }
     if (claim.outcome === "binding_conflict") {
@@ -3236,7 +3180,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
         || (claim.transaction.intentDeadline && new Date(claim.transaction.intentDeadline).getTime() <= Date.now()),
       );
       res.status(409).json({
-        error: stale ? "This Sera quote has expired. Please request a fresh quote." : "This Sera swap is not in a submittable state.",
+        error: getSeraPublicErrorMessage(stale ? "quote_stale" : "invalid_quote"),
         errorCode: stale ? "quote_stale" : "invalid_quote",
       });
       return;
@@ -3321,7 +3265,7 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
         tradeId,
         txHash,
         providerRejected: true,
-        sera: result,
+        sera: publicSeraSubmissionResult(result),
       });
       return;
     }
@@ -3351,10 +3295,10 @@ paymentRouter.post("/payment/swap/submit", async (req, res) => {
     // Even when POST /swap says "settled", its documented response does not
     // include the order identity, merchant credit, or recipient proof. Only
     // reconciliation may turn this row into a confirmed payment.
-    res.json({ success: true, status: "confirming", tradeId, txHash, sera: result });
+    res.json({ success: true, status: "confirming", tradeId, txHash, sera: publicSeraSubmissionResult(result) });
   } catch (e: any) {
     logSeraOperationFailure("payment/swap/submit", e);
-    const response = seraPaymentErrorResponse(e, "Unable to submit Sera swap");
+    const response = seraRouteErrorResponse(e);
     const providerCode = e instanceof SeraApiError ? String(e.errorCode || "").toUpperCase() : "";
     if (
       txForFailure
@@ -3560,7 +3504,11 @@ paymentRouter.get("/payment/status/:txId", async (req, res) => {
       toAddress: tx.toAddress,
       fromAddress: tx.fromAddress,
       memo: tx.memo || null,
-      failureReason: transactionFailureReason(tx.notes) || tx.memo || null,
+      failureReason: isSeraSwapTransaction(tx)
+        ? tx.status === "failed" || tx.status === "canceled" ? publicSeraFailure(tx.failureCode, tx.status).reason : null
+        : transactionFailureReason(tx.notes) || tx.memo || null,
+      ...(isSeraSwapTransaction(tx) && (tx.status === "failed" || tx.status === "canceled")
+        ? { errorCode: publicSeraFailure(tx.failureCode, tx.status).errorCode } : {}),
       createdAt: tx.createdAt,
       chainId: tx.chainId ?? SERA_MAINNET_CHAIN_ID,
       merchantName: merchant?.name || null,
@@ -6120,7 +6068,7 @@ paymentRouter.get("/rates", async (req, res) => {
       // own in seconds, and calling it an outage sends merchants chasing a
       // problem that does not exist.
       res.setHeader("Retry-After", String(Math.ceil(e.retryAfterMs / 1000)));
-      res.status(429).json({ error: e.message, errorCode: "sera_rate_limited" });
+      res.status(429).json({ error: getSeraPublicErrorMessage("sera_rate_limited"), errorCode: "sera_rate_limited" });
       return;
     }
     if (e instanceof SeraRateUnavailableError && e.errorCode === "no_liquidity") {
@@ -6132,17 +6080,17 @@ paymentRouter.get("/rates", async (req, res) => {
       // 503 for a Sera-side outage so callers and uptime checks can tell it
       // apart from a pair-specific 409.
       res.status(e.errorCode === "sera_fx_unavailable" ? 503 : 409)
-        .json({ error: e.message, errorCode: e.errorCode });
+        .json({ error: getSeraPublicErrorMessage(e.errorCode), errorCode: e.errorCode });
       return;
     }
     if (e instanceof SeraApiError && (e.errorCode === "no_liquidity" || e.errorCode === "NO_LIQUIDITY")) {
       res.status(409).json({
-        error: SERA_NO_LIQUIDITY_RATE_MESSAGE,
+        error: getSeraPublicErrorMessage("no_liquidity"),
         errorCode: "no_liquidity",
       });
       return;
     }
     logSeraOperationFailure("rates", e);
-    res.status(502).json({ error: "Failed to fetch exchange rate from Sera" });
+    res.status(502).json({ error: getSeraPublicErrorMessage("sera_unavailable"), errorCode: "sera_unavailable" });
   }
 });

@@ -23,6 +23,7 @@ export interface Transaction {
   paymentIntentId?: string | null;
   quoteUuid?: string | null;
   paymentSource?: string | null;
+  failureCode?: string | null;
   merchantId?: string;
   webhookSent?: boolean;
   webhookSentAt?: string | null;

@@ -1,5 +1,6 @@
 import { getStablecoinBySymbol, getStablecoinLogoUrl, type Stablecoin } from "./stablecoins";
 import { formatDecimalAmount } from "./decimalInput";
+import { getSeraPublicErrorCode, getSeraPublicErrorMessage } from "@shared/sera-errors";
 
 export type SeraCurrency = Stablecoin & {
   source: "sera" | "fallback";
@@ -165,8 +166,11 @@ export async function loadSeraCurrencies(chainId?: number): Promise<SeraCurrency
   const params = new URLSearchParams();
   if (chainId) params.set("chainId", String(chainId));
   const response = await fetch(`/api/sera/tokens${params.size ? `?${params.toString()}` : ""}`);
-  const data = await response.json().catch(() => ({})) as { tokens?: SeraTokenPayload[]; error?: string };
-  if (!response.ok) throw new Error(data.error || "Unable to load Sera currencies");
+  const data = await response.json().catch(() => ({})) as { tokens?: SeraTokenPayload[]; error?: string; errorCode?: string };
+  if (!response.ok) {
+    const errorCode = getSeraPublicErrorCode(data) ?? "sera_unavailable";
+    throw Object.assign(new Error(getSeraPublicErrorMessage(errorCode)), { errorCode, status: response.status });
+  }
   const tokens = Array.isArray(data.tokens) ? data.tokens : [];
   const bySymbol = new Map<string, SeraCurrency>();
   for (const token of tokens) {
@@ -191,7 +195,8 @@ export async function getCurrencyRate(from: string, to: string, chainId?: number
   const response = await fetch(`/api/rates?${params.toString()}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !Number.isFinite(Number(data.rate)) || Number(data.rate) <= 0) {
-    throw new Error(data.detail || data.error || `Unable to convert ${source} to ${target}`);
+    const errorCode = getSeraPublicErrorCode(data) ?? "sera_unavailable";
+    throw Object.assign(new Error(getSeraPublicErrorMessage(errorCode)), { errorCode, status: response.status });
   }
   return { from: source, to: target, rate: Number(data.rate), source: String(data.source || "sera") };
 }

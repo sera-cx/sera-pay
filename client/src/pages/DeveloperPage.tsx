@@ -369,12 +369,10 @@ function SeraApiConfigCard() {
     }
 
     try {
-      const systemResponse = await fetch(`/api/sera/system?mode=${encodeURIComponent(mode)}&baseUrl=${encodeURIComponent(seraApiBaseUrl)}`);
-      if (!systemResponse.ok) throw new Error(await systemResponse.text());
-      const system = await systemResponse.json() as {
+      const system = await fetchApi<{
         chainId?: number | null;
         seraAddress?: string | null;
-      };
+      }>(`/sera/system?mode=${encodeURIComponent(mode)}&baseUrl=${encodeURIComponent(seraApiBaseUrl)}`);
 
       const owner = wallet.address;
       // Never guess the signing domain. Falling back to Sepolia meant a mainnet

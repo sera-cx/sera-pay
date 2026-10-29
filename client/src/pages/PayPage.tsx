@@ -4,7 +4,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { parseUnits } from "viem";
 import { ChevronDown, ChevronRight, Wallet } from "lucide-react";
 import { type Stablecoin } from "@/lib/stablecoins";
-import { decodeCheckoutPayload, getCrossCurrencyReceiveLabel, LIVE_PAYMENT_CHAIN_ID, SERA_NO_LIQUIDITY_MESSAGE, seraRateErrorMessage, TEST_PAYMENT_CHAIN_ID, type PaymentRequest } from "@/lib/payment";
+import { decodeCheckoutPayload, getCrossCurrencyReceiveLabel, isQuoteStaleError, LIVE_PAYMENT_CHAIN_ID, PaymentApiError, paymentFailureMessage, readPaymentApiJson, seraRateErrorMessage, TEST_PAYMENT_CHAIN_ID, type PaymentRequest } from "@/lib/payment";
 import { buildClientAppUrl } from "@/lib/app-url";
 import { getCurrencyRate, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { formatDecimalAmount, limitDecimalPlaces, normalizeDecimalAmountText } from "@/lib/decimalInput";
@@ -72,42 +72,6 @@ function formatTokenAmount(value: number) {
 function parseDisplayAmount(value?: string | null) {
   const parsed = Number(String(value ?? "").replace(/[~,]/g, ""));
   return Number.isFinite(parsed) ? parsed : NaN;
-}
-
-class PaymentApiError extends Error {
-  errorCode?: string;
-  detail?: unknown;
-  status: number;
-
-  constructor(message: string, status: number, errorCode?: string, detail?: unknown) {
-    super(message);
-    this.name = "PaymentApiError";
-    this.status = status;
-    this.errorCode = errorCode;
-    this.detail = detail;
-  }
-}
-
-async function readPaymentApiJson<T>(response: Response, fallbackMessage: string): Promise<T> {
-  const text = await response.text();
-  let data: any = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      if (!response.ok) throw new PaymentApiError(`${fallbackMessage} (${response.status})`, response.status);
-      throw new Error("Payment server returned an invalid response.");
-    }
-  }
-  if (!response.ok) {
-    throw new PaymentApiError(
-      data?.error || data?.message || `${fallbackMessage} (${response.status})`,
-      response.status,
-      data?.errorCode,
-      data?.detail,
-    );
-  }
-  return data as T;
 }
 
 async function switchPaymentChain(provider: any, chainId: number) {
@@ -220,55 +184,10 @@ async function approveWalletToken(
 }
 
 function isWalletCancellation(error: any): boolean {
+  if (error instanceof PaymentApiError) return false;
   const message = String(error?.message || error?.cause?.message || error || "");
-  return error?.code === 4001 || error?.cause?.code === 4001 || /rejected|denied|cancelled|canceled/i.test(message);
-}
-
-function paymentFailureMessage(error: any): string {
-  const message = String(error?.message || error || "Transaction failed");
-  if (error?.code === 4001 || /rejected|denied|cancelled/i.test(message)) return "Transaction cancelled.";
-  if (/gas limit too high|gas required exceeds allowance|execution reverted|transaction is likely to fail|transfer simulation failed/i.test(message)) {
-    return "Transaction simulation failed. Please check your token balance and network gas, then try again.";
-  }
-  if (/wallet_addEthereumChain|wallet_switchEthereumChain|unrecognized chain|unsupported chain/i.test(message)) {
-    return "Please add or switch to the payment network in your wallet, then try again.";
-  }
-  if (/string did not match the expected pattern|Load failed|URI malformed|invalid url|Failed to construct 'URL'/i.test(message)) {
-    return "Your wallet browser could not open this payment request. Please try Connect existing wallet, or open the browser payment QR.";
-  }
-  if (error?.errorCode === "no_liquidity" || /no liquidity|No liquidity is available/i.test(message)) {
-    return SERA_NO_LIQUIDITY_MESSAGE;
-  }
-  // Sera's own FX feed is down. Say so plainly — this is not a SeraPay fault
-  // and not something the customer can fix by retrying a different coin.
-  // Must be checked before the generic status >= 500 branch below.
-  if (error?.errorCode === "sera_fx_unavailable") {
-    return message || "Sera's FX rate service is currently unavailable, so this currency pair cannot be priced right now.";
-  }
-  if (isQuoteStaleError(error)) {
-    return "The quote closed before it could be submitted. Please try again.";
-  }
-  if (
-    error?.errorCode === "sera_connection_error"
-    || error?.status >= 500
-    || /Failed to fetch|fetch failed|network|timeout|aborted|ECONN|Unable to reach Sera|Sera is temporarily unavailable/i.test(message)
-  ) {
-    return "We could not connect to Sera right now. Please try again in a moment.";
-  }
-  if (/Unable to create Sera swap quote/i.test(message)) {
-    return "Unable to create a Sera swap quote right now. Please try the same receive coin, or try again later.";
-  }
-  return message;
-}
-
-function isQuoteStaleError(error: any): boolean {
-  const message = String(error?.message || error || "");
-  if (error?.errorCode === "no_liquidity" || error?.errorCode === "NO_LIQUIDITY") return false;
-  return error?.errorCode === "quote_stale"
-    || error?.errorCode === "QUOTE_STALE"
-    || error?.status === 409
-    || error?.status === 410
-    || /quote.*(expired|closed|stale|consumed|not found)|QUOTE_STALE/i.test(message);
+  return error?.code === 4001 || error?.cause?.code === 4001 || error?.code === "ACTION_REJECTED"
+    || /user (?:rejected|denied)|request (?:rejected|denied)|transaction cancel(?:led|ed)/i.test(message);
 }
 
 function sameTypedData(a: unknown, b: unknown): boolean {
@@ -661,7 +580,7 @@ export default function PayPage() {
         setOrderMinimumPayAmount(null);
         setRateExpiry(null);
         setCountdown(0);
-        setTxError(error instanceof Error ? error.message : "This payment currency cannot currently be converted by Sera. Please choose another currency.");
+        setTxError(seraRateErrorMessage(error));
       } finally {
         if (!cancelled) setUnifiedLoading(false);
       }
@@ -814,7 +733,7 @@ export default function PayPage() {
         if (!active) return;
         setSupportedCoins([]);
         setSelectedCoin(null);
-        setRegistryError(error instanceof Error ? error.message : "Unable to load Sera currencies");
+        setRegistryError(seraRateErrorMessage(error));
       })
       .finally(() => {
         if (active) setRegistryLoading(false);
@@ -842,8 +761,7 @@ export default function PayPage() {
     setRateLoading(true);
     try {
       const res = await fetch(`/api/rates?from=${receiveCoin}&to=${payCoin}&chainId=${rateChainId}`);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw Object.assign(new Error(data.detail || data.error || ""), { errorCode: data.errorCode });
+      const data = await readPaymentApiJson<any>(res);
       if (requestId !== payRateRequestRef.current) return;
       if (data.rate) {
         const converted = parseFloat(amount) * data.rate;
@@ -1087,12 +1005,7 @@ export default function PayPage() {
             // but never render that outcome as success for the current one.
             rememberSeraAttempt(null);
           } else {
-            throw new PaymentApiError(
-              "A previous Sera payment is still resolving in this tab. Return to that checkout or try this payment after it reaches a final status.",
-              409,
-              "previous_payment_pending",
-              { transactionId: priorStoredAttempt.transactionId },
-            );
+            throw new PaymentApiError(409, "previous_payment_pending");
           }
         }
 
@@ -1124,12 +1037,7 @@ export default function PayPage() {
           }
           if (storedStatus?.status === "failed" || storedStatus?.status === "canceled") {
             rememberSeraAttempt(null);
-            throw new PaymentApiError(
-              storedStatus.failureReason || "The previous Sera payment attempt did not settle.",
-              409,
-              storedStatus.errorCode || storedStatus.status,
-              storedStatus,
-            );
+            throw new PaymentApiError(409, storedStatus.errorCode || storedStatus.status);
           }
 
           try {
@@ -1138,7 +1046,7 @@ export default function PayPage() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(storedAttempt.submitPayload),
             });
-            const recovery = await readPaymentApiJson<any>(recoveryRes, "Unable to recover the existing Sera swap");
+            const recovery = await readPaymentApiJson<any>(recoveryRes);
             if (recovery.txHash) setTxHash(String(recovery.txHash));
             if (recovery.status === "confirmed") {
               rememberSeraAttempt(null);
@@ -1189,12 +1097,10 @@ export default function PayPage() {
           });
           let quoteData: any;
           try {
-            quoteData = await readPaymentApiJson<any>(quoteRes, "Unable to create Sera swap quote");
+            quoteData = await readPaymentApiJson<any>(quoteRes);
           } catch (error) {
             if (error instanceof PaymentApiError && error.errorCode === "payment_attempt_in_progress") {
-              const existingTxId = typeof (error.detail as any)?.txId === "string"
-                ? String((error.detail as any).txId)
-                : "";
+              const existingTxId = error.existingTransactionId || "";
               if (!existingTxId) throw error;
               setTxId(existingTxId);
               throw Object.assign(new Error("Existing Sera payment is still resolving"), {
@@ -1225,7 +1131,7 @@ export default function PayPage() {
             throw new Error("Sera returned invalid payment token or amount metadata.");
           }
           if (quoteTokenAddress.toLowerCase() !== String(selectedCoin.contractAddress || "").toLowerCase()) {
-            throw new Error(`${selectedCoin.symbol} token metadata changed while this payment was open. Refresh the page before paying.`);
+            throw new Error("This currency changed while the payment was open. Refresh the page before paying.");
           }
           const required = BigInt(maximumInputRaw);
           return { quoteTokenAddress, required };
@@ -1265,7 +1171,7 @@ export default function PayPage() {
                 const refreshedSpender = String(quoteData.approvalSpender || spender);
                 const refreshedAllowance = await getWalletTokenAllowance(provider, quoteTokenAddress, activeWalletAddress, refreshedSpender);
                 if (refreshedAllowance < required) {
-                  throw new Error(`${selectedCoin.symbol} approval is below the refreshed Sera quote. Please try again.`);
+                  throw new Error("Your approval does not cover the updated amount. Please try again.");
                 }
               }
             }
@@ -1328,7 +1234,7 @@ export default function PayPage() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(submitPayload),
             });
-            const submitData = await readPaymentApiJson<any>(submitRes, "Unable to submit Sera swap");
+            const submitData = await readPaymentApiJson<any>(submitRes);
             if (submitData.txHash) setTxHash(submitData.txHash);
             if (submitData.status === "confirmed") {
               rememberSeraAttempt(null);
@@ -1394,7 +1300,7 @@ export default function PayPage() {
           checkoutPayload: encoded || undefined,
         }),
       });
-      const createData = await readPaymentApiJson<any>(createRes, "Unable to create payment");
+      const createData = await readPaymentApiJson<any>(createRes);
       setTxId(createData.txId);
 
       const coinAddress = String(createData.tokenAddress || "");
@@ -1403,7 +1309,7 @@ export default function PayPage() {
         throw new Error(`Sera did not return valid ${selectedCoin.symbol} token metadata for ${CHAIN_NAMES[cid] || "this network"}`);
       }
       if (coinAddress.toLowerCase() !== selectedTokenAddress.toLowerCase() || decimals !== selectedTokenDecimals) {
-        throw new Error(`${selectedCoin.symbol} token metadata changed while this payment was open. Refresh the page before paying.`);
+        throw new Error("This currency changed while the payment was open. Refresh the page before paying.");
       }
 
       const selector = "0xa9059cbb";
@@ -1506,8 +1412,8 @@ export default function PayPage() {
         setUnifiedCoin(selectedCoin.symbol);
         setUnifiedNote(payTotal.convertedCoins.length ? `Includes ${payTotal.convertedCoins.join(", ")} converted at live rate` : null);
         await executePay(chosenPayAmount, finalReceiveAmount);
-      } catch {
-        setTxError("Unable to refresh the currency conversion. Please try again.");
+      } catch (error) {
+        setTxError(seraRateErrorMessage(error));
         setPhase("failed");
       } finally {
         setRateLoading(false);
@@ -1523,7 +1429,7 @@ export default function PayPage() {
     setRateLoading(true);
     try {
       const res = await fetch(`/api/rates?from=${req.receiveCoin}&to=${selectedCoin.symbol}&chainId=${chainId}`);
-      const data = await res.json();
+      const data = await readPaymentApiJson<any>(res);
       if (data.rate) {
         const newConverted = parseFloat(req.amount) * data.rate;
         // This string is what executePay sends, so the rule from fetchRate
@@ -1551,10 +1457,10 @@ export default function PayPage() {
         // Rate within tolerance — proceed
         await executePay(newFormatted);
       } else {
-        throw new Error(data.detail || data.error || "Sera did not return an exchange rate");
+        throw new PaymentApiError(res.status);
       }
     } catch (error) {
-      setTxError(error instanceof Error ? error.message : "Unable to refresh the Sera exchange rate. Please try again.");
+      setTxError(seraRateErrorMessage(error));
     } finally {
       setRateLoading(false);
     }

@@ -16,6 +16,7 @@ import { fetchApi } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ReceiptMerchantLogo } from "@/components/ReceiptMerchantLogo";
+import { getSeraPublicErrorCode, getSeraPublicErrorMessage } from "@shared/sera-errors";
 
 // ── Date Range Types ──────────────────────────────────────────────────────────
 type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
@@ -389,11 +390,13 @@ function TransactionDrawer({
   const orderId = tx.orderId || (typeof meta?.orderId === "string" ? meta.orderId : null);
   const paymentIntentId = tx.paymentIntentId || (typeof meta?.paymentIntentId === "string" ? meta.paymentIntentId : null);
   const quoteUuid = tx.quoteUuid || (typeof meta?.quoteUuid === "string" ? meta.quoteUuid : null);
-  const cancellationReason = typeof meta?.cancellationReason === "string"
-    ? meta.cancellationReason
-    : typeof meta?.failureReason === "string"
-      ? meta.failureReason
-      : null;
+  const isSeraFailure = tx.paymentSource === "sera_swap" || meta?.type === "sera_swap" || Boolean(tx.quoteUuid);
+  const cancellationReason = isSeraFailure && (tx.status === "failed" || tx.status === "canceled")
+    ? getSeraPublicErrorMessage(getSeraPublicErrorCode(tx.failureCode)
+      ?? (tx.status === "canceled" ? "canceled" : "settlement_failed"))
+    : typeof meta?.cancellationReason === "string"
+      ? meta.cancellationReason
+      : typeof meta?.failureReason === "string" ? meta.failureReason : null;
 
   const handleCancel = () => {
     cancelTransaction.mutate(tx.id, {

@@ -1,44 +1,98 @@
 import { buildClientAppUrl } from "@/lib/app-url";
 import { normalizeDecimalAmountText } from "@/lib/decimalInput";
-import { fetchApi } from "@/lib/api";
+import { ApiError, fetchApi } from "@/lib/api";
 import type { SeraApiMode } from "@shared/gateway";
+import { getSeraPublicErrorCode, getSeraPublicErrorMessage, SERA_SERVICE_UNAVAILABLE_MESSAGE } from "@shared/sera-errors";
+
+export { SERA_NO_LIQUIDITY_MESSAGE } from "@shared/sera-errors";
 
 export const LIVE_PAYMENT_CHAIN_ID = 1;
 export const TEST_PAYMENT_CHAIN_ID = 11155111;
-export const SERA_NO_LIQUIDITY_MESSAGE = "No liquidity for this pair — try another currency.";
+export const SERA_RATE_UNAVAILABLE_MESSAGE = SERA_SERVICE_UNAVAILABLE_MESSAGE;
 
-/** Sera's own rate feed is unreachable — nothing the merchant or payer can fix. */
-export const SERA_RATE_UNAVAILABLE_MESSAGE = "Live rates unavailable for this pair — try another currency.";
-
-/**
- * Turns any exchange-rate failure into one short, friendly sentence.
- *
- * Three underlying causes need three different messages, and the raw upstream
- * text ("Sera API 503: Service temporarily unavailable") is not something to
- * show a merchant standing at a till:
- *   - no_liquidity        — nobody is quoting this pair
- *   - sera_fx_unavailable — Sera's FX service is down for this pair
- *   - anything else       — surface it, since it may be actionable
- */
+/** Exchange and provider failures use fixed public copy, never upstream text. */
 export function seraRateErrorMessage(error: unknown, errorCode?: string | null): string {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  const code = String(errorCode ?? (error as any)?.errorCode ?? "");
+  return getSeraPublicErrorMessage(getSeraPublicErrorCode(errorCode) ?? getSeraPublicErrorCode(error));
+}
 
-  // Sera enforces a per-token minimum on swaps. The server pre-flights it and
-  // sends back the exact figure, so pass that straight through.
-  if (code === "amount_below_min" || /AMOUNT_BELOW_MIN|minimum .* is required/i.test(message)) {
-    return message || "Amount is below Sera's minimum for this currency.";
+export class PaymentApiError extends Error {
+  readonly errorCode: string;
+  readonly existingTransactionId?: string;
+
+  constructor(public status: number, errorCode?: unknown, existingTransactionId?: unknown) {
+    const publicCode = getSeraPublicErrorCode(errorCode) ?? "sera_unavailable";
+    super(getSeraPublicErrorMessage(publicCode));
+    this.name = "PaymentApiError";
+    this.errorCode = publicCode;
+    // This identifier is used only to recover an existing payment. Retain no
+    // provider details, signatures or other response fields on public errors.
+    if (publicCode === "payment_attempt_in_progress"
+      && typeof existingTransactionId === "string"
+      && /^[A-Za-z0-9_-]{1,128}$/.test(existingTransactionId)) {
+      this.existingTransactionId = existingTransactionId;
+    }
   }
-  if (code === "no_liquidity" || /no[_ ]liquidity|no executable (?:liquidity|route|output)/i.test(message)) {
-    return SERA_NO_LIQUIDITY_MESSAGE;
+}
+
+export async function readPaymentApiJson<T>(response: Response): Promise<T> {
+  let data: any;
+  try {
+    const text = await response.text();
+    data = JSON.parse(text);
+  } catch {
+    throw new PaymentApiError(response.status);
   }
-  if (
-    code === "sera_fx_unavailable"
-    || /fx rate service|service temporarily unavailable|temporarily unavailable/i.test(message)
-  ) {
-    return SERA_RATE_UNAVAILABLE_MESSAGE;
+  if (!response.ok) {
+    throw new PaymentApiError(response.status, getSeraPublicErrorCode(data), data?.detail?.txId);
   }
-  return message || SERA_RATE_UNAVAILABLE_MESSAGE;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new PaymentApiError(response.status);
+  }
+  return data as T;
+}
+
+/** Only an explicit, recognized stale-quote code permits the existing retry. */
+export function isQuoteStaleError(error: unknown): boolean {
+  return getSeraPublicErrorCode(error) === "quote_stale";
+}
+
+const LOCAL_PAYMENT_MESSAGES = new Map([
+  ["No wallet connected", "Connect your wallet to continue."],
+  ["No wallet account selected", "Select an account in your wallet to continue."],
+  ["Invalid payment amount", "Enter a valid payment amount."],
+  ["Your wallet could not verify this token allowance.", "Your wallet could not verify this token allowance. Please try again."],
+  ["Token approval failed on-chain.", "Token approval failed. Please try again."],
+  ["Token approval is still pending. Please wait for it to confirm, then try again.", "Token approval is still pending. Please wait for it to confirm, then try again."],
+  ["Your wallet did not return a valid token approval transaction.", "Your wallet could not confirm the approval. Please try again."],
+  ["This currency changed while the payment was open. Refresh the page before paying.", "This currency changed while the payment was open. Refresh the page before paying."],
+  ["Your approval does not cover the updated amount. Please try again.", "Your approval does not cover the updated amount. Please try again."],
+  ["The existing Sera payment attempt is still resolving. Please retry this same payment shortly.", "Your payment is still processing. Please wait before trying again."],
+]);
+
+export function paymentFailureMessage(error: any): string {
+  if (error instanceof ApiError && error.status === 401
+    && /^(?:Dashboard session expired\. Please sign in again\.|Dashboard session expired\. Reconnecting your wallet workspace\.)$/.test(error.message)) {
+    return error.message;
+  }
+  const publicCode = getSeraPublicErrorCode(error);
+  if (error instanceof PaymentApiError || error instanceof ApiError || publicCode || error?.errorCode) {
+    return getSeraPublicErrorMessage(publicCode);
+  }
+  const message = typeof error?.message === "string" ? error.message : "";
+  if (error?.code === 4001 || error?.cause?.code === 4001 || error?.code === "ACTION_REJECTED"
+    || /user (?:rejected|denied)|request (?:rejected|denied)|transaction cancel(?:led|ed)/i.test(message)) {
+    return "Transaction cancelled.";
+  }
+  if (/gas limit too high|gas required exceeds allowance|execution reverted|transaction is likely to fail|transfer simulation failed/i.test(message)) {
+    return "Transaction simulation failed. Please check your token balance and network gas, then try again.";
+  }
+  if (error?.code === 4902 || /wallet_addEthereumChain|wallet_switchEthereumChain|unrecognized chain|unsupported chain/i.test(message)) {
+    return "Please add or switch to the payment network in your wallet, then try again.";
+  }
+  if (/string did not match the expected pattern|Load failed|URI malformed|invalid url|Failed to construct 'URL'/i.test(message)) {
+    return "Your wallet browser could not open this payment request. Please try Connect existing wallet, or open the browser payment QR.";
+  }
+  return LOCAL_PAYMENT_MESSAGES.get(message) ?? SERA_SERVICE_UNAVAILABLE_MESSAGE;
 }
 const LEGACY_LIVE_PAYMENT_CHAIN_IDS = new Set([10, 56, 137, 8453, 42161]);
 
@@ -273,6 +327,9 @@ export async function requestSeraSwapPreflight(request: SeraSwapPreflightRequest
     }),
   });
 
+  if (!response || typeof response !== "object") {
+    throw new ApiError(502, SERA_SERVICE_UNAVAILABLE_MESSAGE, "invalid_quote");
+  }
   const responsePayAmount = normalizeDecimalAmountText(String(response.requestedPayAmount || ""));
   const responseReceiveAmount = normalizeDecimalAmountText(String(response.targetReceiveAmount || ""));
   if (
@@ -284,7 +341,7 @@ export async function requestSeraSwapPreflight(request: SeraSwapPreflightRequest
     || responsePayAmount !== expectedPayAmount
     || responseReceiveAmount !== expectedReceiveAmount
   ) {
-    throw new Error("Sera returned a preflight result for a different payment request.");
+    throw new ApiError(502, SERA_SERVICE_UNAVAILABLE_MESSAGE, "invalid_quote");
   }
   return response;
 }

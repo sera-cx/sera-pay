@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { getSeraPublicErrorMessage } from "../shared/sera-errors";
+import { seraErrorDiagnostic, seraRouteErrorResponse } from "./sera-error-response";
 import { v4 as uuidv4 } from "uuid";
 import { ZodError } from "zod";
 import { ENV } from "./_core/env";
@@ -57,42 +59,8 @@ function validationError(res: any, error: unknown) {
   return false;
 }
 
-function seraGatewayErrorResponse(error: unknown, fallback: string) {
-  if (error instanceof SeraApiError) {
-    const code = error.errorCode;
-    const isQuoteStale = error.status === 409
-      || error.status === 410
-      || code === "QUOTE_STALE"
-      || code === "quote_stale";
-    const isUnavailable = error.status >= 500;
-    const message = code === "no_liquidity" || code === "NO_LIQUIDITY"
-      ? "Currently there's no liquidity on this exchange in Sera.cx. Please try another option."
-      : isQuoteStale
-        ? "This quote closed before it could be submitted. Please try again."
-      : isUnavailable
-        ? "Sera is temporarily unavailable. Please try again shortly."
-        : fallback;
-    return {
-      status: error.status >= 400 && error.status < 500 ? error.status : 502,
-      body: {
-        error: message,
-        errorCode: isQuoteStale ? "quote_stale" : code ?? (isUnavailable ? "sera_connection_error" : null),
-        seraStatus: error.status,
-      },
-    };
-  }
-  return {
-    status: 502,
-    body: {
-      error: "Unable to reach Sera right now. Please try again shortly.",
-      errorCode: "sera_connection_error",
-    },
-  };
-}
-
 function safeGatewayLog(scope: string, error: unknown) {
-  const type = error instanceof Error ? error.name : "unknown_error";
-  console.error(`[gateway/${scope}] failed`, { type });
+  console.error(`[gateway/${scope}] failed`, seraErrorDiagnostic(error));
 }
 
 function redactSeraLogForResponse<T extends {
@@ -402,14 +370,12 @@ gatewayRouter.get("/sera/fx-rate", async (req, res) => {
     // from a malformed request, and flattening both into 502 sent callers
     // looking in the wrong place. Pass the distinction through.
     if (error instanceof SeraApiError && error.status >= 500) {
-      res.status(503).json({ error: "Sera FX rate service is temporarily unavailable for this pair.", errorCode: "sera_fx_unavailable" });
+      res.status(503).json({ error: getSeraPublicErrorMessage("sera_fx_unavailable"), errorCode: "sera_fx_unavailable" });
       return;
     }
-    if (error instanceof SeraApiError && error.status >= 400) {
-      res.status(400).json({ error: error.message });
-      return;
-    }
-    res.status(502).json({ error: "Unable to fetch Sera FX rate" });
+    safeGatewayLog("sera/fx-rate", error);
+    const response = seraRouteErrorResponse(error);
+    res.status(response.status).json(response.body);
   }
 });
 
@@ -478,7 +444,7 @@ gatewayRouter.post("/sera/swap/quote", requireApiKey as any, async (req: any, re
       },
     });
   } catch (error) {
-    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera swap quote");
+    const response = seraRouteErrorResponse(error);
     res.status(response.status).json(response.body);
   }
 });
@@ -500,7 +466,7 @@ gatewayRouter.get("/sera/orders", requireApiKey as any, async (req: any, res) =>
     });
     res.json(data);
   } catch (error) {
-    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera orders");
+    const response = seraRouteErrorResponse(error);
     res.status(response.status).json(response.body);
   }
 });
@@ -522,7 +488,7 @@ gatewayRouter.get("/sera/fills", requireApiKey as any, async (req: any, res) => 
     });
     res.json(data);
   } catch (error) {
-    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera fills");
+    const response = seraRouteErrorResponse(error);
     res.status(response.status).json(response.body);
   }
 });
@@ -544,7 +510,7 @@ gatewayRouter.get("/sera/balances", requireApiKey as any, async (req: any, res) 
     });
     res.json(data);
   } catch (error) {
-    const response = seraGatewayErrorResponse(error, "Unable to fetch Sera balances");
+    const response = seraRouteErrorResponse(error);
     res.status(response.status).json(response.body);
   }
 });
@@ -916,7 +882,8 @@ gatewayRouter.put("/merchant/sera-config", requireApiKey as any, async (req: any
   } catch (error) {
     if (validationError(res, error)) return;
     if (error instanceof Error && error.message.includes("SERA_CONFIG_ENCRYPTION_KEY")) {
-      res.status(400).json({ error: error.message });
+      safeGatewayLog("sera-config/update", error);
+      res.status(503).json({ error: getSeraPublicErrorMessage("invalid_config"), errorCode: "invalid_config" });
       return;
     }
     safeGatewayLog("sera-config/update", error);
@@ -980,7 +947,7 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
     const apiSecret = result.api_secret ?? result.apiSecret ?? "";
     const credential = result.credential || (apiKey && apiSecret ? `${apiKey}:${apiSecret}` : "");
     if (!credential) {
-      res.status(502).json({ error: "Sera API did not return an api_key/api_secret pair." });
+      res.status(502).json({ error: getSeraPublicErrorMessage("sera_unavailable"), errorCode: "sera_unavailable" });
       return;
     }
 
@@ -1006,10 +973,11 @@ gatewayRouter.post("/merchant/sera-config/generate-api-key", requireApiKey as an
   } catch (error) {
     if (validationError(res, error)) return;
     if (error instanceof Error && error.message.includes("SERA_CONFIG_ENCRYPTION_KEY")) {
-      res.status(400).json({ error: error.message });
+      safeGatewayLog("sera-config/generate-api-key", error);
+      res.status(503).json({ error: getSeraPublicErrorMessage("invalid_config"), errorCode: "invalid_config" });
       return;
     }
-    const response = seraGatewayErrorResponse(error, "Unable to generate Sera API key");
+    const response = seraRouteErrorResponse(error);
     res.status(response.status).json(response.body);
   }
 });

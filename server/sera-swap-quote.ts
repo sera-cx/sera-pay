@@ -7,6 +7,8 @@
  * either path inheriting the other's persistence side effects.
  */
 
+import { getSeraPublicErrorCode, getSeraPublicErrorMessage } from "../shared/sera-errors";
+
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const BYTES32_RE = /^0x[0-9a-fA-F]{64}$/;
 const QUOTE_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -74,8 +76,6 @@ export interface SeraQuoteErrorResponse {
   body: {
     error: string;
     errorCode: SeraQuoteErrorCode;
-    field?: string;
-    detail?: Readonly<Record<string, unknown>>;
   };
 }
 
@@ -85,10 +85,8 @@ export function serializeSeraQuoteError(error: unknown): SeraQuoteErrorResponse 
   return {
     status: error.status,
     body: {
-      error: error.message,
+      error: getSeraPublicErrorMessage(error.code),
       errorCode: error.code,
-      ...(error.field ? { field: error.field } : {}),
-      ...(error.detail ? { detail: error.detail } : {}),
     },
   };
 }
@@ -558,10 +556,16 @@ function parsePermitMetadata(
     fail("invalid_quote", "quote.permit.permit_required must be boolean", "quote.permit.permit_required");
   }
   const permitSupported = value.permit_supported;
-  const permitRequired = value.permit_required;
+  // For non-EIP-2612 tokens Sera uses permit_required to signal that token
+  // authorization is needed, but returns approval metadata without an owner
+  // or signable Permit. Only supported tokens can require a Permit signature.
+  const authorizationRequired = value.permit_required;
+  const permitRequired = permitSupported && authorizationRequired;
   const token = asAddress(value.token, "invalid_quote", "quote.permit.token");
   const spender = asAddress(value.spender, "invalid_quote", "quote.permit.spender");
-  const owner = asAddress(value.owner, "invalid_quote", "quote.permit.owner");
+  const owner = !permitSupported && value.owner === undefined
+    ? context.owner
+    : asAddress(value.owner, "invalid_quote", "quote.permit.owner");
   const valueRaw = uint256(value.value_raw, "invalid_quote", "quote.permit.value_raw");
   const currentAllowanceRaw = uint256(
     value.current_allowance_raw,
@@ -582,9 +586,6 @@ function parsePermitMetadata(
   const allowanceCoversDeposit = BigInt(currentAllowanceRaw) >= initialDeposit;
   if (!allowanceCoversDeposit && BigInt(valueRaw) < initialDeposit) {
     fail("invalid_quote", "Permit or approval value does not cover the wallet deposit", "quote.permit.value_raw");
-  }
-  if (!permitSupported && permitRequired) {
-    fail("invalid_quote", "A token without Permit support cannot require a Permit signature", "quote.permit.permit_required");
   }
   if (permitSupported && !permitRequired && !allowanceCoversDeposit) {
     fail("invalid_quote", "Quote requires token authorization but does not request Permit or approval", "quote.permit");
@@ -623,9 +624,9 @@ function parsePermitMetadata(
 
   const authorizationKind: SeraAuthorizationKind = permitRequired
     ? "permit"
-    : allowanceCoversDeposit || initialDeposit === 0n
-      ? "none"
-      : "approval";
+    : initialDeposit > 0n && (!allowanceCoversDeposit || (!permitSupported && authorizationRequired))
+      ? "approval"
+      : "none";
   return {
     permitSupported,
     permitRequired,
@@ -878,37 +879,20 @@ function enforcePolicy(
   }
 }
 
-function nestedProviderCode(error: unknown, depth = 0): string | null {
-  if (!error || typeof error !== "object" || depth > 5) return null;
-  const value = error as RecordValue;
-  for (const key of ["errorCode", "error_code", "code", "error"]) {
-    const candidate = value[key];
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim().toUpperCase();
-  }
-  for (const key of ["detail", "cause"]) {
-    const candidate = nestedProviderCode(value[key], depth + 1);
-    if (candidate) return candidate;
-  }
-  return null;
-}
-
 /** Maps recognized Sera/network failures without mislabelling arbitrary bugs. */
 export function mapSeraQuoteProviderError(error: unknown): SeraQuoteValidationError | null {
   if (error instanceof SeraQuoteValidationError) return error;
   const value = error && typeof error === "object" ? error as RecordValue : null;
   const status = value && typeof value.status === "number" ? value.status : null;
-  const code = nestedProviderCode(error);
-  if (code === "NO_LIQUIDITY") {
+  const code = getSeraPublicErrorCode(error);
+  if (code === "no_liquidity") {
     return new SeraQuoteValidationError("no_liquidity", "Sera has no executable route for this direction and amount");
   }
-  if (status === 429 || code === "RATE_LIMITED" || code === "TOO_MANY_REQUESTS") {
+  if (status === 429 || code === "sera_rate_limited") {
     return new SeraQuoteValidationError("sera_rate_limited", "Sera quote service is rate limited");
   }
-  if (status === 503 || code === "ECONNRESET" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
+  if ((status !== null && status >= 500 && status <= 599) || code === "sera_unavailable") {
     return new SeraQuoteValidationError("sera_unavailable", "Sera quote service is temporarily unavailable");
-  }
-  if (value?.name === "AbortError") {
-    return new SeraQuoteValidationError("sera_unavailable", "Sera quote request timed out");
   }
   return null;
 }

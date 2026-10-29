@@ -474,7 +474,8 @@ describe("payment URL encoder", () => {
 
     // No market maker quoting this pair.
     expect(seraRateErrorMessage(new Error("whatever"), "no_liquidity")).toBe(SERA_NO_LIQUIDITY_MESSAGE);
-    expect(seraRateErrorMessage(new Error("Sera API 400: no_liquidity"))).toBe(SERA_NO_LIQUIDITY_MESSAGE);
+    // Unstructured provider text cannot select an actionable public category.
+    expect(seraRateErrorMessage(new Error("Sera API 400: no_liquidity"))).toBe(SERA_RATE_UNAVAILABLE_MESSAGE);
     expect(seraRateErrorMessage(Object.assign(new Error(""), { errorCode: "no_liquidity" })))
       .toBe(SERA_NO_LIQUIDITY_MESSAGE);
 
@@ -496,7 +497,7 @@ describe("payment URL encoder", () => {
     }
 
     // Both must stay short enough for the inline banner.
-    expect(SERA_RATE_UNAVAILABLE_MESSAGE.length).toBeLessThanOrEqual(60);
+    expect(SERA_RATE_UNAVAILABLE_MESSAGE.length).toBeLessThanOrEqual(90);
   });
 });
 

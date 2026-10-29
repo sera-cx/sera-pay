@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { SERA_NO_LIQUIDITY_MESSAGE, SERA_SERVICE_UNAVAILABLE_MESSAGE } from "../shared/sera-errors";
 import {
   SeraQuoteValidationError,
   assertSeraMinimumInput,
@@ -224,6 +225,65 @@ describe("strict Sera quote and authorization validation", () => {
     expect(existingAllowance.permit?.authorizationKind).toBe("none");
   });
 
+  const approvalOnlyQuote = () => ({
+    ...rawQuote(request),
+    // Live XSGD quotes carry these six fields. permit_required means an
+    // approval is needed here; this token cannot produce an EIP-2612 Permit.
+    permit: {
+      permit_supported: false,
+      permit_required: true,
+      token: INPUT_TOKEN,
+      spender: SOR,
+      value_raw: request.from_amount,
+      current_allowance_raw: "0",
+    },
+  });
+
+  it("accepts approval-only quotes without inventing a signable Permit", () => {
+    const quote = validateSeraSwapQuote(approvalOnlyQuote(), { request, config, serverTime: NOW });
+    expect(quote.permit).toMatchObject({
+      permitSupported: false,
+      permitRequired: false,
+      authorizationKind: "approval",
+      owner: OWNER,
+      token: INPUT_TOKEN,
+      spender: SOR,
+      valueRaw: request.from_amount,
+      typedData: null,
+    });
+  });
+
+  it("retains the approval check when an unsupported token requests authorization despite reported allowance", () => {
+    const raw = approvalOnlyQuote();
+    raw.permit.current_allowance_raw = request.from_amount;
+    const quote = validateSeraSwapQuote(raw, { request, config, serverTime: NOW });
+    expect(quote.permit?.authorizationKind).toBe("approval");
+
+    raw.permit.permit_required = false;
+    expect(validateSeraSwapQuote(raw, { request, config, serverTime: NOW }).permit?.authorizationKind).toBe("none");
+  });
+
+  it.each([
+    ["owner", (quote: any) => { quote.permit.owner = RECIPIENT; }],
+    ["malformed owner", (quote: any) => { quote.permit.owner = null; }],
+    ["empty owner", (quote: any) => { quote.permit.owner = ""; }],
+    ["zero owner", (quote: any) => { quote.permit.owner = "0x0000000000000000000000000000000000000000"; }],
+    ["token", (quote: any) => { quote.permit.token = OUTPUT_TOKEN; }],
+    ["spender", (quote: any) => { quote.permit.spender = VAULT; }],
+    ["value", (quote: any) => { quote.permit.value_raw = "999"; }],
+    ["unexpected Permit", (quote: any) => { quote.permit.eip712 = rawQuote(request).permit.eip712; }],
+  ])("rejects invalid approval-only %s metadata", (_label, mutate) => {
+    const raw = approvalOnlyQuote();
+    mutate(raw);
+    expectCode(() => validateSeraSwapQuote(raw, { request, config, serverTime: NOW }), "invalid_quote");
+  });
+
+  it("still requires the explicit owner on a signable Permit", () => {
+    const raw = rawQuote(request);
+    delete (raw.permit as Partial<typeof raw.permit>).owner;
+    expectCode(() => validateSeraSwapQuote(raw, { request, config, serverTime: NOW }), "invalid_quote");
+  });
+
   it("classifies a zero-output response as definitive no liquidity", () => {
     expectCode(
       () => validateSeraSwapQuote(rawQuote(request, { outputRaw: "0" }), { request, config, serverTime: NOW }),
@@ -366,7 +426,38 @@ describe("stable Sera quote error mapping", () => {
     const response = serializeSeraQuoteError(new SeraQuoteValidationError("no_liquidity", "No route"));
     expect(response).toEqual({
       status: 409,
-      body: { error: "No route", errorCode: "no_liquidity" },
+      body: { error: SERA_NO_LIQUIDITY_MESSAGE, errorCode: "no_liquidity" },
     });
+  });
+
+  it.each([500, 502, 503, 504, 599])("maps HTTP %i to an unavailable quote service", (status) => {
+    expect(mapSeraQuoteProviderError({ status })).toMatchObject({ code: "sera_unavailable", status: 503 });
+  });
+
+  it("recognizes nested infrastructure failures and inactive pairs", () => {
+    expect(mapSeraQuoteProviderError({ cause: { code: "UND_ERR_HEADERS_TIMEOUT" } })).toMatchObject({ code: "sera_unavailable" });
+    expect(mapSeraQuoteProviderError({ name: "TimeoutError" })).toMatchObject({ code: "sera_unavailable" });
+    expect(mapSeraQuoteProviderError({ status: 400, detail: { code: "PAIR_INACTIVE" } })).toMatchObject({ code: "no_liquidity" });
+  });
+
+  it.each(["ALLOWANCE_INSUFFICIENT", "INTENT_DEADLINE_EXPIRED", "SLIPPAGE_EXCEEDED", "QUOTE_STALE", "STP_BLOCKED"])(
+    "leaves submit lifecycle code %s for its caller",
+    (errorCode) => {
+      expect(mapSeraQuoteProviderError({ status: 409, errorCode })).toBeNull();
+    },
+  );
+
+  it("keeps validation diagnostics private while preserving the public code and status", () => {
+    const error = new SeraQuoteValidationError("invalid_quote", "Internal quote.permit.owner was malformed", {
+      field: "quote.permit.owner",
+      detail: { privatePayload: "do not expose", minimumInputRaw: "123456" },
+    });
+    expect(serializeSeraQuoteError(error)).toEqual({
+      status: 502,
+      body: { error: SERA_SERVICE_UNAVAILABLE_MESSAGE, errorCode: "invalid_quote" },
+    });
+    expect(error.field).toBe("quote.permit.owner");
+    expect(error.detail).toHaveProperty("privatePayload");
+    expect(error.message).toContain("quote.permit.owner");
   });
 });
