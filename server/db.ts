@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { eq, asc, desc, and, gt, gte, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
@@ -282,7 +283,7 @@ async function ensurePostgresSchema(pool: pg.Pool) {
       "walletAddress" varchar(42) NOT NULL UNIQUE,
       "name" varchar(120) NOT NULL,
       "description" varchar(500),
-      "apiKey" varchar(80) NOT NULL UNIQUE,
+      "apiKeyHash" varchar(64) NOT NULL,
       "receiveCoin" varchar(20) DEFAULT 'USDC',
       "logoData" text,
       "webhookUrl" varchar(512),
@@ -298,6 +299,16 @@ async function ensurePostgresSchema(pool: pg.Pool) {
     ALTER TABLE "merchants" ADD COLUMN IF NOT EXISTS "description" varchar(500);
     ALTER TABLE "merchants" ADD COLUMN IF NOT EXISTS "qrMode" varchar(20) DEFAULT 'standard';
     CREATE INDEX IF NOT EXISTS "idx_merchants_wallet" ON "merchants" ("walletAddress");
+    ALTER TABLE "merchants" ADD COLUMN IF NOT EXISTS "apiKeyHash" varchar(64);
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'merchants' AND column_name = 'apiKey') THEN
+        UPDATE "merchants" SET "apiKeyHash" = encode(sha256(convert_to("apiKey", 'UTF8')), 'hex') WHERE "apiKeyHash" IS NULL;
+      END IF;
+    END $$;
+    ALTER TABLE "merchants" ALTER COLUMN "apiKeyHash" SET NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS "idx_merchants_api_key_hash" ON "merchants" ("apiKeyHash");
+    ALTER TABLE "merchants" DROP COLUMN IF EXISTS "apiKey";
 
     CREATE TABLE IF NOT EXISTS "transactions" (
       "id" varchar(36) PRIMARY KEY,
@@ -1137,12 +1148,22 @@ export async function getMerchantByStoreAddress(storeAddress: string): Promise<M
   return result[0];
 }
 
+/**
+ * SHA-256 of a merchant API key — the only form ever persisted. The raw key
+ * exists at creation/regeneration time and in the merchant's own systems.
+ */
+export function hashMerchantApiKey(apiKey: string): string {
+  return crypto.createHash("sha256").update(apiKey, "utf8").digest("hex");
+}
+
 export async function getMerchantByApiKey(apiKey: string): Promise<Merchant | undefined> {
+  if (typeof apiKey !== "string" || !apiKey) return undefined;
+  const apiKeyHash = hashMerchantApiKey(apiKey);
   const pgPool = await getPostgresPool();
-  if (pgPool) return pgSelectOne<Merchant>(pgPool, "merchants", `"apiKey" = $1`, [apiKey]);
+  if (pgPool) return pgSelectOne<Merchant>(pgPool, "merchants", `"apiKeyHash" = $1`, [apiKeyHash]);
   const db = await getDb();
-  if (!db) return Array.from(memory.merchants.values()).find((m) => m.apiKey === apiKey);
-  const result = await db.select().from(merchants).where(eq(merchants.apiKey, apiKey)).limit(1);
+  if (!db) return Array.from(memory.merchants.values()).find((m) => m.apiKeyHash === apiKeyHash);
+  const result = await db.select().from(merchants).where(eq(merchants.apiKeyHash, apiKeyHash)).limit(1);
   return result[0];
 }
 

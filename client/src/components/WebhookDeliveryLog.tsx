@@ -17,7 +17,7 @@ type DeliveryEntry = {
 };
 
 export function WebhookDeliveryLog() {
-  const { apiKey } = useAuth();
+  const { credential: apiKey } = useAuth();
   const [entries, setEntries] = useState<DeliveryEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);

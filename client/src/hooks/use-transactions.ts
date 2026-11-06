@@ -37,7 +37,9 @@ interface TransactionsResponse {
 }
 
 export function useTransactions(limit = 50, offset = 0, chainId?: number) {
-  const { apiKey, isAuthenticated } = useAuth();
+  // The credential is a dashboard session token; the server accepts it
+  // wherever an API key is accepted.
+  const { credential: apiKey, isAuthenticated } = useAuth();
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (chainId) params.set("chainId", String(chainId));
   return useQuery<TransactionsResponse>({
@@ -50,7 +52,9 @@ export function useTransactions(limit = 50, offset = 0, chainId?: number) {
 }
 
 export function useTransaction(txHash: string) {
-  const { apiKey, isAuthenticated } = useAuth();
+  // The credential is a dashboard session token; the server accepts it
+  // wherever an API key is accepted.
+  const { credential: apiKey, isAuthenticated } = useAuth();
   return useQuery<Transaction>({
     queryKey: ["/merchant/transactions", txHash, apiKey || ""],
     queryFn: () => fetchApi(`/merchant/transactions/${txHash}`),

@@ -21,7 +21,7 @@ export interface MerchantProfile {
 
 export function useMerchantProfile(apiKey?: string) {
   const auth = useAuth();
-  const resolvedApiKey = apiKey ?? auth.apiKey ?? "";
+  const resolvedApiKey = apiKey ?? auth.credential ?? "";
   return useQuery<MerchantProfile>({
     // Include apiKey in queryKey so the query re-fires once the key becomes available.
     // Without this, the query fires on mount before the key is loaded from localStorage,
@@ -38,7 +38,7 @@ export function useMerchantProfile(apiKey?: string) {
 export function useRegisterMerchant() {
   return useMutation({
     mutationFn: (data: { walletAddress: string; name?: string; webhookUrl?: string }) => 
-      fetchApi<{ apiKey: string; id: string }>("/merchant/register", {
+      fetchApi<{ apiKey?: string; sessionToken: string; id: string }>("/merchant/register", {
         method: "POST",
         body: JSON.stringify(data),
       }),
