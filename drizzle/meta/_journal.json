@@ -57,6 +57,13 @@
       "when": 1788547479125,
       "tag": "0007_add_sera_provisional_settlement",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794066652348,
+      "tag": "0008_add_menu_orders",
+      "breakpoints": true
     }
   ]
 }
