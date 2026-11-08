@@ -16,6 +16,7 @@ import {
 import {
   createPaymentIntent,
   createSubWallet,
+  listAddressClaims,
   getApiKeyConfigRecord,
   getMerchantTransactions,
   getPaymentIntentById,
@@ -30,6 +31,12 @@ import {
 } from "./db";
 import { isUnpaidDirectQrWatch, requireApiKey } from "./payment-routes";
 import { screenWalletAddress } from "./compliance";
+import {
+  ADDRESS_ALREADY_CLAIMED_MESSAGE,
+  AddressClaimError,
+  assertAddressClaimable,
+  isAddressClaimConflict,
+} from "./address-claims";
 import { decryptSecret, encryptSecret, isSecretEncryptionReady, maskSecret } from "./secret-vault";
 import { signCheckoutPayload } from "./checkout-payload";
 import {
@@ -672,6 +679,10 @@ gatewayRouter.put("/wallets/default", requireApiKey as any, async (req: any, res
     const subWallets = await listSubWallets(req.merchant.id);
     res.json(walletViewsForMerchant({ ...req.merchant, storeAddress: wallet.address }, subWallets));
   } catch (error) {
+    if (isAddressClaimConflict(error)) {
+      res.status(409).json({ error: ADDRESS_ALREADY_CLAIMED_MESSAGE });
+      return;
+    }
     safeGatewayLog("wallets/default", error);
     res.status(500).json({ error: "Unable to set default wallet" });
   }
@@ -689,6 +700,13 @@ gatewayRouter.get("/sub-wallets", requireApiKey as any, async (req: any, res) =>
 gatewayRouter.post("/sub-wallets", requireApiKey as any, async (req: any, res) => {
   try {
     const input = createSubWalletInputSchema.parse(req.body);
+    // A sub-wallet is a claim on a receiving address, and an address belongs
+    // to one merchant: without this, any merchant could register any address —
+    // they are printed in every QR code — and take over the attribution of
+    // payments made to it. See server/address-claims.ts. Checked ahead of
+    // compliance screening so a claim that cannot be granted is not screened
+    // and logged against the caller first.
+    assertAddressClaimable(await listAddressClaims(input.address), req.merchant.id, "sub_wallet");
     const compliance = await screenWalletAddress(input.address, "sub_wallet", req.merchant.id);
     if (compliance.blocked) {
       res.status(403).json({ error: "Sub-wallet address failed compliance screening", compliance });
@@ -708,6 +726,16 @@ gatewayRouter.post("/sub-wallets", requireApiKey as any, async (req: any, res) =
     res.status(201).json(subWallet);
   } catch (error) {
     if (validationError(res, error)) return;
+    if (error instanceof AddressClaimError) {
+      res.status(error.status).json({ error: error.message });
+      return;
+    }
+    // Two requests can clear the check on the same free address; the unique
+    // index rejects the second, and that is a conflict, not a fault.
+    if (isAddressClaimConflict(error)) {
+      res.status(409).json({ error: ADDRESS_ALREADY_CLAIMED_MESSAGE });
+      return;
+    }
     safeGatewayLog("sub-wallets/create", error);
     res.status(500).json({ error: "Internal server error" });
   }

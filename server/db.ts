@@ -35,6 +35,7 @@ import {
   type SeraSwapSubmitState,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import { type AddressClaim, normalizeClaimAddress } from "./address-claims";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _db: any = null;
@@ -837,6 +838,50 @@ async function ensurePostgresSchema(pool: pg.Pool) {
     );
     CREATE INDEX IF NOT EXISTS "idx_sub_wallets_merchant" ON "sub_wallets" ("merchantId");
     CREATE INDEX IF NOT EXISTS "idx_sub_wallets_address" ON "sub_wallets" ("address");
+
+    -- A receiving address belongs to one merchant.
+    --
+    -- "sub_wallets.address" and "merchants.storeAddress" used to be claimable
+    -- by anyone with a merchant API key, and both are resolved back to a
+    -- single merchant by a LIMIT 1 read, so a second claim on the same address
+    -- decided attribution by index order. The same indexes and the same
+    -- one-time repair are in
+    -- drizzle/0010_unique_receiving_address_claims.sql, which explains the
+    -- resolution rules; they are here as well because this bootstrap, not the
+    -- migration, is what every database is guaranteed to have run.
+    --
+    -- The repair has to precede the indexes: a stored conflict would otherwise
+    -- fail CREATE UNIQUE INDEX and take the whole startup with it.
+    UPDATE "sub_wallets" SET "address" = lower("address")
+      WHERE "address" <> lower("address");
+    UPDATE "merchants" SET "storeAddress" = lower("storeAddress")
+      WHERE "storeAddress" IS NOT NULL AND "storeAddress" <> lower("storeAddress");
+    UPDATE "sub_wallets" AS s SET "status" = 'archived', "updatedAt" = now()
+      FROM "merchants" AS m
+      WHERE s."status" = 'active'
+        AND s."address" = m."walletAddress"
+        AND s."merchantId" <> m."id";
+    UPDATE "merchants" AS m SET "storeAddress" = NULL, "updatedAt" = now()
+      FROM "merchants" AS owner
+      WHERE m."storeAddress" IS NOT NULL
+        AND m."storeAddress" = owner."walletAddress"
+        AND m."id" <> owner."id";
+    WITH "ranked" AS (
+      SELECT "id", row_number() OVER (PARTITION BY "address" ORDER BY "createdAt", "id") AS "rn"
+      FROM "sub_wallets" WHERE "status" = 'active'
+    )
+    UPDATE "sub_wallets" AS s SET "status" = 'archived', "updatedAt" = now()
+      FROM "ranked" WHERE s."id" = "ranked"."id" AND "ranked"."rn" > 1;
+    WITH "ranked" AS (
+      SELECT "id", row_number() OVER (PARTITION BY "storeAddress" ORDER BY "createdAt", "id") AS "rn"
+      FROM "merchants" WHERE "storeAddress" IS NOT NULL
+    )
+    UPDATE "merchants" AS m SET "storeAddress" = NULL, "updatedAt" = now()
+      FROM "ranked" WHERE m."id" = "ranked"."id" AND "ranked"."rn" > 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS "uq_sub_wallets_active_address"
+      ON "sub_wallets" ("address") WHERE "status" = 'active';
+    CREATE UNIQUE INDEX IF NOT EXISTS "uq_merchants_store_address"
+      ON "merchants" ("storeAddress") WHERE "storeAddress" IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS "payment_intents" (
       "id" varchar(36) PRIMARY KEY,
@@ -5843,12 +5888,36 @@ export async function getSubWalletById(id: string): Promise<SubWallet | undefine
   return result[0];
 }
 
+/**
+ * The merchant-side sub-wallet a transfer recipient belongs to.
+ *
+ * "uq_sub_wallets_active_address" makes at most one active row match, but the
+ * ordering is written out anyway: this read is what decides which merchant a
+ * payment is credited to, and before that index it was a bare LIMIT 1 over
+ * "idx_sub_wallets_address" whose answer among duplicates was whatever the
+ * index scan reached first. Oldest-first is the tie-break the one-time repair
+ * in drizzle/0010_unique_receiving_address_claims.sql used, so a database that
+ * has not run the migration yet still resolves the way it will afterwards.
+ */
 export async function getSubWalletByAddress(address: string): Promise<SubWallet | undefined> {
+  const normalized = normalizeClaimAddress(address);
   const pgPool = await getPostgresPool();
-  if (pgPool) return pgSelectOne<SubWallet>(pgPool, "sub_wallets", `"address" = $1 AND "status" = 'active'`, [address.toLowerCase()]);
+  if (pgPool) {
+    const result = await pgPool.query(
+      `SELECT * FROM "sub_wallets" WHERE "address" = $1 AND "status" = 'active'
+         ORDER BY "createdAt", "id" LIMIT 1`,
+      [normalized],
+    );
+    return result.rows[0] as SubWallet | undefined;
+  }
   const db = await getDb();
-  if (!db) return Array.from(memory.subWallets.values()).find((wallet) => wallet.address === address.toLowerCase() && wallet.status === "active");
-  const result = await db.select().from(subWallets).where(and(eq(subWallets.address, address.toLowerCase()), eq(subWallets.status, "active"))).limit(1);
+  if (!db) return Array.from(memory.subWallets.values())
+    .filter((wallet) => wallet.address === normalized && wallet.status === "active")
+    .sort((a, b) => (+new Date(a.createdAt) - +new Date(b.createdAt)) || a.id.localeCompare(b.id))[0];
+  const result = await db.select().from(subWallets)
+    .where(and(eq(subWallets.address, normalized), eq(subWallets.status, "active")))
+    .orderBy(asc(subWallets.createdAt), asc(subWallets.id))
+    .limit(1);
   return result[0];
 }
 
@@ -5870,6 +5939,97 @@ export async function updateSubWallet(id: string, data: Partial<InsertSubWallet>
     return;
   }
   await db.update(subWallets).set({ ...data, updatedAt: new Date() }).where(eq(subWallets.id, id));
+}
+
+/**
+ * Every merchant-side claim on one receiving address.
+ *
+ * Three columns can hold a payment recipient — "merchants.walletAddress",
+ * "merchants.storeAddress" and an active "sub_wallets.address" — and an
+ * address may be claimed by one merchant only. No index can span three
+ * columns in two tables, so the route checks in server/address-claims.ts read
+ * them together and compare the holder against the caller.
+ */
+export async function listAddressClaims(address: string): Promise<AddressClaim[]> {
+  const normalized = normalizeClaimAddress(address);
+  if (!normalized) return [];
+  const pgPool = await getPostgresPool();
+  if (pgPool) {
+    const result = await pgPool.query(
+      `SELECT 'merchant_wallet' AS "kind", "id" AS "merchantId", NULL AS "subWalletId"
+         FROM "merchants" WHERE "walletAddress" = $1
+       UNION ALL
+       SELECT 'merchant_store' AS "kind", "id" AS "merchantId", NULL AS "subWalletId"
+         FROM "merchants" WHERE "storeAddress" = $1
+       UNION ALL
+       SELECT 'sub_wallet' AS "kind", "merchantId" AS "merchantId", "id" AS "subWalletId"
+         FROM "sub_wallets" WHERE "address" = $1 AND "status" = 'active'`,
+      [normalized],
+    );
+    return result.rows as AddressClaim[];
+  }
+  const db = await getDb();
+  if (!db) {
+    const claims: AddressClaim[] = [];
+    for (const merchant of memory.merchants.values()) {
+      if (merchant.walletAddress === normalized) claims.push({ kind: "merchant_wallet", merchantId: merchant.id });
+      if (merchant.storeAddress === normalized) claims.push({ kind: "merchant_store", merchantId: merchant.id });
+    }
+    for (const wallet of memory.subWallets.values()) {
+      if (wallet.address === normalized && wallet.status === "active") {
+        claims.push({ kind: "sub_wallet", merchantId: wallet.merchantId, subWalletId: wallet.id });
+      }
+    }
+    return claims;
+  }
+  const [merchantRows, subWalletRows] = await Promise.all([
+    db.select({ id: merchants.id, walletAddress: merchants.walletAddress, storeAddress: merchants.storeAddress })
+      .from(merchants)
+      .where(or(eq(merchants.walletAddress, normalized), eq(merchants.storeAddress, normalized))),
+    db.select({ id: subWallets.id, merchantId: subWallets.merchantId })
+      .from(subWallets)
+      .where(and(eq(subWallets.address, normalized), eq(subWallets.status, "active"))),
+  ]);
+  const claims: AddressClaim[] = [];
+  for (const row of merchantRows as { id: string; walletAddress: string; storeAddress: string | null }[]) {
+    if (row.walletAddress === normalized) claims.push({ kind: "merchant_wallet", merchantId: row.id });
+    if (row.storeAddress === normalized) claims.push({ kind: "merchant_store", merchantId: row.id });
+  }
+  for (const row of subWalletRows as { id: string; merchantId: string }[]) {
+    claims.push({ kind: "sub_wallet", merchantId: row.merchantId, subWalletId: row.id });
+  }
+  return claims;
+}
+
+/**
+ * Release any other merchant's claim on an address whose owner has just proven
+ * they hold it.
+ *
+ * Registration is the only place an address is proven — Privy wallet linkage,
+ * or an EIP-712 signature as the fallback — and a claim could be staked before
+ * that ever happened: register a sub-wallet pointing at an address, wait for
+ * its owner to sign up, and keep resolving their payments to you. Rejecting
+ * new claims cannot undo one made first, so proof takes the address back.
+ *
+ * Returns what it released, for the registration log.
+ */
+export async function releaseForeignAddressClaims(address: string, ownerMerchantId: string): Promise<{ subWallets: number; storeAddresses: number }> {
+  const normalized = normalizeClaimAddress(address);
+  if (!normalized) return { subWallets: 0, storeAddresses: 0 };
+  const claims = await listAddressClaims(normalized);
+  const foreign = claims.filter((claim) => claim.merchantId !== ownerMerchantId);
+  let releasedSubWallets = 0;
+  let releasedStoreAddresses = 0;
+  for (const claim of foreign) {
+    if (claim.kind === "sub_wallet" && claim.subWalletId) {
+      await updateSubWallet(claim.subWalletId, { status: "archived" });
+      releasedSubWallets += 1;
+    } else if (claim.kind === "merchant_store") {
+      await updateMerchant(claim.merchantId, { storeAddress: null });
+      releasedStoreAddresses += 1;
+    }
+  }
+  return { subWallets: releasedSubWallets, storeAddresses: releasedStoreAddresses };
 }
 
 export async function listPaymentIntents(merchantId: string, limit = 50): Promise<PaymentIntent[]> {
