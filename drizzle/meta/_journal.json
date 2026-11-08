@@ -71,6 +71,13 @@
       "when": 1794067026365,
       "tag": "0009_converge_pushed_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794148846429,
+      "tag": "0010_unique_receiving_address_claims",
+      "breakpoints": true
     }
   ]
 }

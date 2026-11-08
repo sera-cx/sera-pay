@@ -79,7 +79,16 @@ export const merchants = pgTable(
     createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("idx_merchants_wallet").on(t.walletAddress)]
+  (t) => [
+    index("idx_merchants_wallet").on(t.walletAddress),
+    // A settlement override is a claim on an address too: PUT
+    // /merchant/settings and PUT /merchant/profile both accept any well-formed
+    // address, and getMerchantByStoreAddress() resolves it back to a single
+    // merchant. Same race as the sub-wallet claim above, so the same rule.
+    uniqueIndex("uq_merchants_store_address")
+      .on(t.storeAddress)
+      .where(sql`${t.storeAddress} IS NOT NULL`),
+  ]
 );
 
 export const transactions = pgTable(
@@ -343,6 +352,20 @@ export const subWallets = pgTable(
   (t) => [
     index("idx_sub_wallets_merchant").on(t.merchantId),
     index("idx_sub_wallets_address").on(t.address),
+    // One active claim per receiving address, across every merchant.
+    //
+    // POST /sub-wallets accepted any well-formed address and marked it active
+    // without checking that the caller controlled it or that another merchant
+    // had already registered it, and getSubWalletByAddress() resolves an
+    // address back to one merchant with LIMIT 1. Two merchants holding the
+    // same active address therefore made attribution a race the earlier row
+    // won: transfers to one merchant's address could be recorded against the
+    // other, and the loser's own checkout links failed ownership binding with
+    // 403. Receiving addresses are printed in every QR code, so claiming one
+    // needed nothing but a merchant API key.
+    uniqueIndex("uq_sub_wallets_active_address")
+      .on(t.address)
+      .where(sql`${t.status} = 'active'`),
   ]
 );
 
