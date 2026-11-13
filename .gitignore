@@ -147,3 +147,7 @@ vite.config.ts.timestamp-*
 /tmp/
 /output/
 .codex-logs/
+
+# Claude Code local session files (worktrees, launch config)
+.claude/worktrees/
+.claude/launch.json

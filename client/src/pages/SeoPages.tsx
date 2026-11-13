@@ -181,6 +181,8 @@ export const SEO_PAGES: { href: string; label: string; category: string }[] = [
   { href: "/serapay-vs-coinbase-commerce", label: "SeraPay vs Coinbase Commerce", category: "Comparisons" },
   { href: "/serapay-vs-bitpay", label: "SeraPay vs BitPay", category: "Comparisons" },
   { href: "/serapay-vs-nowpayments", label: "SeraPay vs NOWPayments", category: "Comparisons" },
+  // Developer guides
+  { href: "/swap/guide", label: "Integrate Sera Swaps (Step by Step)", category: "Developers" },
 ];
 
 // ── Shared layout ─────────────────────────────────────────────────────────────
