@@ -18,6 +18,7 @@ sending the attack at a running server, not inferred from reading code.
 | 2 | Checkout link expiry not enforced server-side | Medium | **Fixed** |
 | 3 | `singleUse` links not enforced anywhere | Low–Medium | Documented — needs a store |
 | 4 | Vulnerable pre-merge duplicate files staged | Housekeeping | Flagged |
+| 5 | Any merchant could claim any receiving address | **High** | **Fixed** (round 2) |
 
 Things tested and found **sound** — no change needed — are listed at the end.
 This matters as much as the findings: the payment core held up under attack.
@@ -229,3 +230,162 @@ only.
    request time; a very determined rebinding attacker with sub-second TTLs is
    still theoretically possible on the delivery path. Pinning the resolved IP
    into the fetch would fully close it. Low priority.
+
+---
+
+# Round 2 — receiving addresses (2026-11-08)
+
+A second pass asked for specifically: can anyone alter where a payment goes?
+Address handling only — the recipient fields, the routes that write them, and
+the reads that turn an address back into a merchant.
+
+**Baseline:** `7497eab` on `fix/menu-orders-migration`
+**Verification:** `tsc` clean · 586/587 tests (1 pre-existing skip) · every
+conflict below reproduced against a local PostgreSQL database, before the fix
+and again after it. No live endpoint testing this round: the route reasoning is
+from code, the storage behaviour is from the database.
+
+---
+
+## 5. Any merchant could claim any receiving address — HIGH (fixed)
+
+### What it was
+
+Three fields decide who is paid and who a payment is credited to:
+`merchants.walletAddress`, `merchants.storeAddress` and `sub_wallets.address`.
+Only the first was ever proven — registration checks Privy wallet linkage, with
+an EIP-712 signature as the fallback. The other two were merely asserted:
+
+- `POST /sub-wallets` (`server/gateway-routes.ts`) took any well-formed address,
+  screened it for compliance and marked it `active`.
+- `PUT /merchant/settings` and `PUT /merchant/profile`
+  (`server/payment-routes.ts`) did the same for the settlement override.
+
+None of the three checked whether another merchant already held the address,
+and there was no unique constraint behind them — `sub_wallets.address` had only
+a plain `idx_sub_wallets_address`, and `merchants.storeAddress` had no index at
+all. The zod schema (`shared/gateway.ts`) validated the hex format and nothing
+more.
+
+Receiving addresses are not secret. They are printed in every QR code and every
+checkout link, so staking a claim on someone else's took nothing but a merchant
+API key.
+
+### Proven, at the database level
+
+Against a local database at the pre-fix schema, every conflicting write was
+accepted:
+
+```
+active sub_wallets on victim address     |     1   <- another merchant's registered wallet
+active sub_wallets on shared sub address |     2   <- two merchants, one address
+merchants with shared storeAddress       |     2   <- two merchants, one override
+```
+
+The reads that consume these resolve an address to exactly one merchant:
+`getSubWalletByAddress()` and `getMerchantByStoreAddress()` were both `LIMIT 1`
+with no `ORDER BY`, so among duplicates the answer was whatever the index scan
+reached first — in practice the earlier row, stable only because an in-place
+update does not move it.
+
+### What it did, and what it did not
+
+It did not move money. The stored recipient is re-derived server-side from the
+resolved merchant in every path (`resolvePaymentMerchant`), so `toAddress`
+stayed the address the payer was shown. What a claim took over was the
+bookkeeping:
+
+- **Cross-tenant disclosure.** Transfers to the victim's address were credited
+  to the claimer, whose dashboard then showed the payer address, amount and
+  time of payments they had nothing to do with.
+- **Checkout denial of service.** The victim could no longer be paid through
+  their own links: `assertPaymentIntentBindable` rejects an intent whose
+  receiver resolves to a different merchant, so their payers got a 403.
+- **Claim-jumping ahead of registration.** A claim staked on an address before
+  its owner signed up kept resolving their payments afterwards, because
+  registration never looked.
+
+Authenticated but unprivileged: it needs a merchant API key, and registration
+needs a Privy identity. A low bar, not an open one.
+
+### The fix
+
+Rule: a receiving address belongs to one merchant, and proof beats claim.
+
+| File | Change |
+|---|---|
+| `server/address-claims.ts` | **New.** The claim rule as pure functions — foreign-claim detection, what each purpose may claim, and the unique-violation mapping. Carries the reasoning. |
+| `drizzle/schema.ts` | `uq_sub_wallets_active_address` (unique on `address` where `status = 'active'`) and `uq_merchants_store_address` (unique on `storeAddress` where not null). |
+| `drizzle/0010_unique_receiving_address_claims.sql` | The indexes, plus the one-time repair they cannot be created without. |
+| `server/db.ts` | `listAddressClaims()` reads all three fields at once, since no index spans two tables; `releaseForeignAddressClaims()`; `getSubWalletByAddress()` now orders explicitly; the same indexes and repair added to `ensurePostgresSchema()`. |
+| `server/gateway-routes.ts` | `POST /sub-wallets` rejects a claimed address with 409; a lost index race returns the same 409 rather than a 500. |
+| `server/payment-routes.ts` | Both `storeAddress` writers check before screening; registration releases claims on the address it just proved; `resolveMerchantForReceiver` now resolves proven ownership before claimed. |
+| `server/address-claims.test.ts` | **New.** 14 cases over the claim rule, including that the 409 never names the merchant holding the address. |
+
+Resolution rules, where a conflict is already stored:
+
+- **Proof beats claim.** A sub-wallet or override colliding with a
+  `walletAddress` someone proved at registration is released, not the other way
+  round. This is also the repair for any claim-jumping that already happened.
+- **Equal standing, earlier wins.** Two claims of the same kind: keep the
+  earlier, release the later. That is the row the `LIMIT 1` reads already
+  resolved to, so attribution does not move.
+- **A released override falls back** to the merchant's own `walletAddress`, so
+  no payment is left without a recipient.
+- **Archived rows do not block.** Deleting a sub-wallet and re-adding it still
+  works, and so does another merchant claiming an address that was released.
+
+The repair is in both the migration and `ensurePostgresSchema()`, because the
+bootstrap — not the migration — is what every database is guaranteed to have
+run. It precedes the index creation in both: a stored conflict would otherwise
+fail `CREATE UNIQUE INDEX` and, in the bootstrap, take startup with it. Both
+were tested by dropping the indexes, seeding conflicts (including a mixed-case
+duplicate) and running each path over them.
+
+### Deliberately not done
+
+**Proof of control for sub-wallets.** A signature from the sub-wallet address
+would make the claim as strong as registration's, and `/merchant/register`
+already demands exactly that proof. It is not required here because the main
+use of a sub-wallet is a destination the merchant cannot sign with from the
+dashboard — a cold wallet or an exchange deposit address. Requiring a signature
+closes a gap the uniqueness rule already closes, at the cost of the feature's
+primary case. A product decision, not a bug fix.
+
+---
+
+## Tested and sound — round 2
+
+Attacked and held, on the address paths:
+
+- **The recipient is never taken from the request.** `/payment/create` uses the
+  payload address only to look up the merchant; the stored `toAddress` comes
+  from `resolvePaymentMerchant`.
+- **Signed links are ownership-checked at mint.** `/payment/checkout/sign`
+  refuses a receiver that is not the merchant's wallet, store address, or an
+  *active* sub-wallet.
+- **Order and intent references cannot be smuggled in unsigned.**
+  `/payment/create` refuses `orderId` / `paymentIntentId` without a signed
+  payload — which is what makes `assertMenuOrderBindable`'s missing receiver
+  check unreachable rather than exploitable.
+- **Menu-order links are signed server-side** from the stored order, receiver
+  derived from the merchant record.
+- **Intents cannot carry an arbitrary receiver** — derived from an
+  ownership-checked `subWalletId`, else the merchant's own addresses.
+- **Revocation holds.** `getSubWalletByAddress` filters `status = 'active'` on
+  all three code paths, and deleting a sub-wallet also clears `storeAddress` if
+  it pointed there.
+- **No case-sensitivity bypass.** Every address comparison lowercases both
+  sides, and registration normalises before insert, so the `walletAddress`
+  unique constraint cannot be split with mixed case.
+
+Minor, left alone: `/payment/direct/scan` is unauthenticated and will scan the
+chain for transfers to any address named. It is public chain data and crediting
+still requires merchant ownership, so the only leak is whether an address
+belongs to a SeraPay merchant. Worth a rate limit.
+
+Not covered this round: EIP-712 / Privy signature verification internals, swap
+quote economics (slippage, gas caps), and webhook signing.
+`server/sera-settlement.ts` states in its own header that it does not verify
+the merchant recipient and relies on the caller's on-chain check — that
+boundary deserves its own pass.

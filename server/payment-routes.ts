@@ -55,6 +55,8 @@ import {
   getTransactionsByFromAddress,
   listSubWallets,
   getSubWalletByAddress,
+  listAddressClaims,
+  releaseForeignAddressClaims,
   getApiKeyConfigRecord,
   getPaymentIntentById,
   getMenuOrderById,
@@ -63,6 +65,11 @@ import {
   updateDirectLinkedPaymentStatus,
 } from "./db";
 import { screenWalletAddress } from "./compliance";
+import {
+  ADDRESS_ALREADY_CLAIMED_MESSAGE,
+  findForeignAddressClaim,
+  isAddressClaimConflict,
+} from "./address-claims";
 import { ENV } from "./_core/env";
 import { PrivyAuthError, assertPrivyWalletOwnership, getPrivyWalletSummary, sendPrivyAuthError, verifyPrivyRequest, type PrivyIdentity, type PrivyWalletOwnership } from "./_core/privy";
 import { isR2StorageConfigured, storagePut, storageRead } from "./storage";
@@ -469,6 +476,16 @@ paymentRouter.post("/merchant/register", async (req, res) => {
     const id = uuidv4();
     const apiKey = "sk_" + crypto.randomBytes(32).toString("hex");
     await createMerchant({ id, walletAddress: addr, name: name.trim(), apiKey, receiveCoin: "USDC" });
+    // Rejecting new claims cannot undo one staked first: another merchant
+    // could have registered a sub-wallet or settlement override pointing at
+    // this address before its owner ever signed up, and it would go on
+    // resolving their payments to that merchant. Ownership of this address has
+    // just been proven, which is the one thing a claim never was, so the claim
+    // is released. See server/address-claims.ts.
+    const released = await releaseForeignAddressClaims(addr, id);
+    if (released.subWallets || released.storeAddresses) {
+      console.warn(`[Merchant] Registration released ${released.subWallets} sub-wallet and ${released.storeAddresses} settlement claim(s) held by other merchants on this wallet address`);
+    }
     res.json({ id, userId: identity.userId, walletAddress: addr, name: name.trim(), apiKey, isNew: true });
   } catch (e) {
     if (e instanceof PrivyAuthError) { sendPrivyAuthError(res, e); return; }
@@ -582,6 +599,12 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
     if (storeAddress !== undefined) {
       if (storeAddress !== null && !/^0x[0-9a-fA-F]{40}$/.test(storeAddress)) { res.status(400).json({ error: "Invalid storeAddress" }); return; }
       if (storeAddress) {
+        // The settlement override is a claim on an address, and an address
+        // belongs to one merchant: see server/address-claims.ts. Checked ahead
+        // of compliance screening so a claim that cannot be granted is not
+        // screened and logged against the caller first.
+        const conflict = findForeignAddressClaim(await listAddressClaims(storeAddress), merchant.id);
+        if (conflict) { res.status(409).json({ error: ADDRESS_ALREADY_CLAIMED_MESSAGE }); return; }
         const compliance = await screenWalletAddress(storeAddress, "recipient_wallet", merchant.id);
         if (compliance.blocked) {
           res.status(403).json({ error: "Store address failed compliance screening", compliance });
@@ -601,7 +624,12 @@ paymentRouter.put("/merchant/settings", requireApiKey as any, async (req: any, r
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
     res.json(updated || { success: true });
-  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) {
+    // Two requests can clear the check above on the same free address; the
+    // unique index rejects the second, and that is a conflict, not a fault.
+    if (isAddressClaimConflict(e)) { res.status(409).json({ error: ADDRESS_ALREADY_CLAIMED_MESSAGE }); return; }
+    logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 /** GET /api/merchant/me — get merchant profile */
@@ -652,6 +680,12 @@ paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, re
         res.status(400).json({ error: "Invalid storeAddress" }); return;
       }
       if (storeAddress) {
+        // The settlement override is a claim on an address, and an address
+        // belongs to one merchant: see server/address-claims.ts. Checked ahead
+        // of compliance screening so a claim that cannot be granted is not
+        // screened and logged against the caller first.
+        const conflict = findForeignAddressClaim(await listAddressClaims(storeAddress), merchant.id);
+        if (conflict) { res.status(409).json({ error: ADDRESS_ALREADY_CLAIMED_MESSAGE }); return; }
         const compliance = await screenWalletAddress(storeAddress, "recipient_wallet", merchant.id);
         if (compliance.blocked) {
           res.status(403).json({ error: "Store address failed compliance screening", compliance });
@@ -671,7 +705,12 @@ paymentRouter.put("/merchant/profile", requireApiKey as any, async (req: any, re
     if (typeof updates.name === "string") await updateUserNameByWallet(merchant.walletAddress, updates.name);
     const updated = await getMerchantById(merchant.id);
     res.json(updated);
-  } catch (e) { logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" }); }
+  } catch (e) {
+    // Two requests can clear the check above on the same free address; the
+    // unique index rejects the second, and that is a conflict, not a fault.
+    if (isAddressClaimConflict(e)) { res.status(409).json({ error: ADDRESS_ALREADY_CLAIMED_MESSAGE }); return; }
+    logSeraOperationFailure("payment-route", e); res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 /** POST /api/merchant/webhook — update webhook URL (used by dashboard Developer page) */
@@ -4947,16 +4986,33 @@ async function syncMerchantDirectActivity(merchant: Merchant, preferredChainId?:
   ));
 }
 
+/**
+ * Which merchant a transfer recipient belongs to, for crediting direct
+ * transfers found on-chain.
+ *
+ * Proven ownership first, claimed second, and in the same order as
+ * resolvePaymentMerchant(): a walletAddress was proven at registration, while
+ * a settlement override or a sub-wallet was only registered. The order used to
+ * be the reverse, so a sub-wallet claim on another merchant's wallet address
+ * decided this. Those claims are rejected now (server/address-claims.ts) and
+ * released at registration, but a row written before that is still in the
+ * table until the repair in
+ * drizzle/0010_unique_receiving_address_claims.sql runs, and crediting the
+ * merchant who proved the address is right either way.
+ *
+ * The recipient is returned unchanged in every branch; this chooses who is
+ * credited, never where money goes.
+ */
 async function resolveMerchantForReceiver(toAddress: string) {
   const normalizedTo = toAddress.toLowerCase();
+  const merchant = await getMerchantByWallet(normalizedTo) || await getMerchantByStoreAddress(normalizedTo);
+  if (merchant) return { merchant, receiveAddress: normalizedTo };
   const subWallet = await getSubWalletByAddress(normalizedTo);
   if (subWallet) {
-    const merchant = await getMerchantById(subWallet.merchantId);
-    if (merchant) return { merchant, receiveAddress: subWallet.address.toLowerCase() };
+    const subWalletMerchant = await getMerchantById(subWallet.merchantId);
+    if (subWalletMerchant) return { merchant: subWalletMerchant, receiveAddress: subWallet.address.toLowerCase() };
   }
-  const merchant = await getMerchantByWallet(normalizedTo) || await getMerchantByStoreAddress(normalizedTo);
-  if (!merchant) return null;
-  return { merchant, receiveAddress: normalizedTo };
+  return null;
 }
 
 async function recordDirectTransferPayment({
