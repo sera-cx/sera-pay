@@ -2,6 +2,17 @@
 
 SeraPay is a stablecoin payment application for merchants who want to create payment links, generate branded QR codes, and track payment activity from a web dashboard.
 
+## Sera API integration guides
+
+Start on Ethereum Sepolia. Each guide includes a copyable implementation prompt, a manual walkthrough, and checks to run before switching to mainnet.
+
+| Guide | What you can build |
+| --- | --- |
+| [Accept](https://pay.sera.cx/accept/guide) | Issue payment links for a merchant and track customer payments. |
+| [Swap](https://pay.sera.cx/swap/guide) | Quote, sign, submit, and track a stablecoin swap. |
+| [Transfer](https://pay.sera.cx/transfer/guide) | Build a token transfer, review the fee, sign, and broadcast. |
+| [Set Rate](https://pay.sera.cx/set-rate/guide) | Place a limit order, follow its fills, and cancel the remainder. |
+
 ## Features
 
 - Wallet-based merchant sign-in.

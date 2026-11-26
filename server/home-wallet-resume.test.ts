@@ -31,8 +31,8 @@ vi.mock("@/components/QRStyled", () => ({
   QRStyled: (props: any) => React.createElement("div", { "data-qr-value": props.value }),
   QR_STYLES: [{ id: "rounded", label: "Rounded" }],
 }));
-vi.mock("@/components/SeraPayHeader", () => ({ SeraPayHeader: () => null, SeraLogo: () => null }));
-vi.mock("@/components/NetworkSwitcher", () => ({ NetworkModeButton: () => null, NetworkSwitcherModal: () => null }));
+vi.mock("@/components/SeraPayHeader", () => ({ SeraPayHeader: () => React.createElement("header"), SeraLogo: () => null }));
+vi.mock("@/components/NetworkSwitcher", () => ({ NetworkModeButton: () => React.createElement("button", { "aria-label": "Network" }), NetworkSwitcherModal: () => null }));
 vi.mock("@/pages/SeoPages", () => ({ SeoFooter: () => null }));
 
 import Home from "../client/src/pages/Home";
@@ -103,6 +103,29 @@ afterEach(async () => {
 });
 
 describe("Home wallet approval resumes the merchant's QR request", () => {
+  it("keeps the production homepage headerless with guide, network and wallet actions", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("PROD", true);
+    try {
+      await mount();
+      expect(renderer!.root.findAllByType("header")).toHaveLength(0);
+      expect(renderer!.root.findByProps({ "aria-label": "Network" })).toBeDefined();
+      expect(renderer!.root.findByProps({ href: "/accept/guide" })).toBeDefined();
+      await clickButton("Log in");
+      expect(state.privy.login).toHaveBeenCalledTimes(1);
+      state.privy.authenticated = true;
+      Object.assign(state.auth, { walletAddress, apiKey: "merchant-key" });
+      await rerender();
+      expect(renderer!.root.findAllByType("header")).toHaveLength(0);
+      await clickButton("Dashboard");
+      expect(state.navigate).toHaveBeenCalledWith("/dashboard");
+      await clickButton("Disconnect");
+      expect(state.auth.logout).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("keeps the saved request while the initial currency registry is loading", async () => {
     const pending = savedRequest();
     storage.set(pendingKey, JSON.stringify(pending));

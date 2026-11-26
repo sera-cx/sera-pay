@@ -29,7 +29,6 @@ const MenuPublicPage   = lazy(() => import("./pages/MenuPublicPage"));
 const PayerHistoryPage = lazy(() => import("./pages/PayerHistoryPage"));
 const MenuTemplatePicker = lazy(() => import("./pages/MenuTemplatePicker"));
 const MenuCreatePage   = lazy(() => import("./pages/MenuCreatePage"));
-const SeraSwapGuidePage = lazy(() => import("./pages/SeraSwapGuidePage"));
 // SEO pages — all lazy-loaded from a single chunk
 const SeoPages = (name: string) => lazy(() => import("./pages/SeoPages").then(m => ({ default: (m as unknown as Record<string, React.ComponentType>)[name] })));
 const StablecoinPaymentGatewayPage    = SeoPages("StablecoinPaymentGatewayPage");
@@ -111,8 +110,6 @@ function Router() {
         <Route path="/menu-manager/create" component={MenuCreatePage} />
         <Route path="/menu/:slug" component={MenuPublicPage} />
         <Route path="/wallet/history/:address" component={PayerHistoryPage} />
-        {/* Developer guides */}
-        <Route path="/swap/guide" component={SeraSwapGuidePage} />
         {/* SEO landing pages */}
         <Route path="/stablecoin-payment-gateway" component={StablecoinPaymentGatewayPage} />
         <Route path="/multi-currency-crypto-payments" component={MultiCurrencyCryptoPaymentsPage} />
