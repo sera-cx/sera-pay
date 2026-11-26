@@ -1,0 +1,119 @@
+.si-flow-overview {
+  container-type: inline-size;
+  margin: 14px 0 0;
+}
+.si-flow-actors {
+  --handoff: 68px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--handoff);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.si-flow-actor {
+  position: relative;
+  min-width: 0;
+  padding: 16px 12px;
+  border: 1px solid var(--si-line);
+  border-radius: 16px;
+  background: #fff;
+  text-align: center;
+}
+.si-flow-actor-icon {
+  display: inline-flex;
+  margin-bottom: 9px;
+}
+.si-flow-actor strong {
+  display: block;
+  color: var(--si-text);
+  font-size: 14px;
+  line-height: 1.35;
+}
+.si-flow-actor p {
+  margin: 5px 0 0;
+  color: var(--si-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.si-flow-endpoints {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 8px;
+  margin-top: 8px;
+  color: #205e44;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.si-flow-handoff {
+  position: absolute;
+  inset: 35px auto auto calc(100% + 1px);
+  width: var(--handoff);
+  padding: 0 4px;
+  color: #38634f;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+}
+.si-flow-arrow {
+  position: relative;
+  display: block;
+  height: 1px;
+  margin: 0 0 8px;
+  border-top: 2px dashed #87bfa3;
+}
+.si-flow-arrow svg {
+  position: absolute;
+  right: -3px;
+  top: -7px;
+  color: #36805a;
+  stroke-width: 2.5;
+}
+.si-flow-overview figcaption {
+  margin: 12px 2px 0;
+  color: var(--si-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+@container (max-width: 570px) {
+  .si-flow-actors {
+    --handoff: 32px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .si-flow-actor {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 12px;
+    align-items: center;
+    padding: 12px;
+    text-align: start;
+  }
+  .si-flow-actor-icon {
+    margin: 0;
+  }
+  .si-flow-endpoints { justify-content: flex-start; }
+  .si-flow-handoff {
+    inset: calc(100% + 1px) auto auto 31px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: max-content;
+    height: var(--handoff);
+    padding: 0;
+  }
+  .si-flow-arrow {
+    width: 1px;
+    height: calc(100% - 7px);
+    margin: 0;
+    border: 0;
+    border-left: 2px dashed #87bfa3;
+  }
+  .si-flow-arrow svg {
+    top: auto;
+    bottom: -3px;
+    right: -5px;
+    transform: rotate(90deg);
+  }
+}

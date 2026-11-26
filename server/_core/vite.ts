@@ -3,6 +3,7 @@ import fs from "fs";
 import { type Server } from "http";
 import { nanoid } from "nanoid";
 import path from "path";
+import { guideMetadata, renderGuideMetadata } from "../../shared/guide-metadata";
 
 /**
  * Paths that are asking for a file, not for a page.
@@ -80,6 +81,8 @@ export async function setupVite(app: Express, server: Server) {
         `src="/src/main.tsx"`,
         `src="/src/main.tsx?v=${nanoid()}"`
       );
+      const metadata = guideMetadata(url);
+      if (metadata) template = renderGuideMetadata(template, metadata);
       const page = await vite.transformIndexHtml(url, template);
       res.status(200).set({ "Content-Type": "text/html" }).end(page);
     } catch (e) {
@@ -118,8 +121,13 @@ export function serveStatic(app: Express) {
   }));
 
   // fall through to index.html if the file doesn't exist
-  app.use("*", (_req, res) => {
+  app.use("*", (req, res, next) => {
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.sendFile(path.resolve(distPath, "index.html"));
+    const entry = path.resolve(distPath, "index.html");
+    const metadata = guideMetadata(req.originalUrl);
+    if (!metadata) return res.sendFile(entry);
+    fs.promises.readFile(entry, "utf8")
+      .then(html => res.type("html").send(renderGuideMetadata(html, metadata)))
+      .catch(next);
   });
 }
