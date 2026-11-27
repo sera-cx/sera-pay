@@ -169,12 +169,12 @@ function AccountSetupScreen({
 }) {
   return (
     <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
-      {import.meta.env.DEV && <SeraPayHeader
+      <SeraPayHeader
         maxWidth={520}
         walletAddress={walletAddress}
         disconnectAction={{ label: "Disconnect", onClick: onDisconnect }}
-      />}
-      <main style={{ minHeight: import.meta.env.PROD ? "100dvh" : "calc(100dvh - 58px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 16px 40px", boxSizing: "border-box" }}>
+      />
+      <main style={{ minHeight: "calc(100dvh - 58px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 16px 40px", boxSizing: "border-box" }}>
         <div style={{ width: "100%", maxWidth: 420, borderRadius: 24, background: "#fff", border: "1px solid rgba(10,31,26,0.08)", boxShadow: "0 18px 55px rgba(10,31,26,0.08)", padding: "28px 22px", textAlign: "center", overflow: "hidden", boxSizing: "border-box" }}>
           <div style={{ display: "flex", justifyContent: "center" }}>
             <SeraLogo size={34} />
@@ -2839,7 +2839,7 @@ export default function Home() {
         minHeight: "100dvh", background: "#F2FAF6", fontFamily: font,
         display: "flex", flexDirection: "column", overflow: "hidden",
       }}>
-        {import.meta.env.DEV && <SeraPayHeader maxWidth={1240} homeHeader primaryAction={{ label: "Dashboard", onClick: handleConnectWallet }} />}
+        <SeraPayHeader maxWidth={1240} homeHeader primaryAction={{ label: "Dashboard", onClick: handleConnectWallet }} />
         <main style={{
           flex: "1 1 auto",
           minHeight: 0,
@@ -3172,7 +3172,7 @@ export default function Home() {
             onDismiss={() => setDirectQrPayment(null)}
           />
         )}
-        {import.meta.env.DEV && <SeraPayHeader
+        <SeraPayHeader
           maxWidth={1240}
           compact
           afterLogoContent={<HeaderNetworkBadge activeMode={paymentMode} />}
@@ -3180,9 +3180,9 @@ export default function Home() {
           primaryAction={!isConnected ? { label: "Dashboard", onClick: handleConnectWallet } : undefined}
           dashboardAction={isConnected ? { label: "Dashboard", onClick: () => setLocation("/dashboard") } : undefined}
           disconnectAction={isConnected ? { label: "Disconnect", onClick: authLogout } : undefined}
-        />}
+        />
 
-        <div style={{ maxWidth: 520, margin: "0 auto", padding: "18px 16px 40px", minHeight: import.meta.env.PROD ? "100dvh" : "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
+        <div style={{ maxWidth: 520, margin: "0 auto", padding: "18px 16px 40px", minHeight: "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
           <button
             onClick={handleReset}
             className="serapay-back-link"
@@ -3200,7 +3200,6 @@ export default function Home() {
           >
             ← Back
           </button>
-          {import.meta.env.PROD && <div className="mb-3"><HeaderNetworkBadge activeMode={paymentMode} /></div>}
           {/* QR Card */}
           <div style={{
             background: "#fff", borderRadius: 24, padding: "24px 16px",
@@ -3636,16 +3635,16 @@ export default function Home() {
   // ── Authenticated — main form (step 1) ────────────────────────────────
   return (
     <div style={{ minHeight: "100dvh", background: "#F2F2F7", fontFamily: font }}>
-      {import.meta.env.DEV && <SeraPayHeader
+      <SeraPayHeader
         maxWidth={1240}
         walletAddress={isConnected ? walletAddress : ""}
         afterLogoContent={<PaymentModeSwitch activeMode={paymentMode} />}
         primaryAction={!isConnected ? { label: "Dashboard", onClick: handleConnectWallet } : undefined}
         dashboardAction={isConnected ? { label: "Dashboard", onClick: () => setLocation("/dashboard") } : undefined}
         disconnectAction={isConnected ? { label: "Disconnect", onClick: authLogout } : undefined}
-      />}
+      />
 
-      <div style={{ maxWidth: 520, margin: "0 auto", padding: "24px 16px 40px", minHeight: import.meta.env.PROD ? "100dvh" : "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
+      <div style={{ maxWidth: 520, margin: "0 auto", padding: "24px 16px 40px", minHeight: "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
         {/* Business name display with circular logo avatar */}
         {isConnected ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, paddingLeft: 4 }}>
@@ -3924,18 +3923,6 @@ export default function Home() {
             </div>
           )}
         </div>
-
-        {import.meta.env.PROD && (
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <PaymentModeSwitch activeMode={paymentMode} />
-            <div className="flex items-center gap-3 text-sm font-semibold text-[#075b3c]">
-              <button type="button" className="py-2 hover:underline" onClick={handleConnectWallet}>
-                {isConnected ? "Dashboard" : "Log in"}
-              </button>
-              {isConnected && <button type="button" className="py-2 hover:underline" onClick={authLogout}>Disconnect</button>}
-            </div>
-          </div>
-        )}
 
         {/* Generate QR button */}
         <button

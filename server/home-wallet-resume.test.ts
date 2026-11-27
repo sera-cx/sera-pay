@@ -17,7 +17,7 @@ vi.mock("@/hooks/use-auth", () => ({ useAuth: () => state.auth }));
 vi.mock("@/hooks/use-merchant", () => ({ useMerchantProfile: () => state.profile }));
 vi.mock("@/hooks/use-gateway", () => ({ useSeraApiConfig: () => ({ data: { mode: "live" } }) }));
 vi.mock("wagmi", () => ({ useChainId: () => 1 }));
-vi.mock("wouter", () => ({ useLocation: () => ["/", state.navigate] }));
+vi.mock("wouter", () => ({ Link: "a", useLocation: () => ["/", state.navigate] }));
 vi.mock("@tanstack/react-query", () => ({ useQueryClient: () => state.queryClient }));
 vi.mock("@/lib/currencyCalculator", async (importOriginal) => ({
   ...await importOriginal<any>(),
@@ -31,7 +31,6 @@ vi.mock("@/components/QRStyled", () => ({
   QRStyled: (props: any) => React.createElement("div", { "data-qr-value": props.value }),
   QR_STYLES: [{ id: "rounded", label: "Rounded" }],
 }));
-vi.mock("@/components/SeraPayHeader", () => ({ SeraPayHeader: () => React.createElement("header"), SeraLogo: () => null }));
 vi.mock("@/components/NetworkSwitcher", () => ({ NetworkModeButton: () => React.createElement("button", { "aria-label": "Network" }), NetworkSwitcherModal: () => null }));
 vi.mock("@/pages/SeoPages", () => ({ SeoFooter: () => null }));
 
@@ -103,22 +102,26 @@ afterEach(async () => {
 });
 
 describe("Home wallet approval resumes the merchant's QR request", () => {
-  it("keeps the production homepage headerless with guide, network and wallet actions", async () => {
+  it("keeps the network switch and wallet menu in the production homepage header", async () => {
     vi.stubEnv("DEV", false);
     vi.stubEnv("PROD", true);
     try {
       await mount();
-      expect(renderer!.root.findAllByType("header")).toHaveLength(0);
-      expect(renderer!.root.findByProps({ "aria-label": "Network" })).toBeDefined();
+      const header = renderer!.root.findByType("header");
+      expect(header.props.style).toMatchObject({ position: "sticky", top: 0 });
+      expect(header.findByProps({ "aria-label": "Network" })).toBeDefined();
+      expect(renderer!.root.findAllByProps({ "aria-label": "Network" })).toHaveLength(1);
       expect(renderer!.root.findByProps({ href: "/accept/guide" })).toBeDefined();
-      await clickButton("Log in");
+      await clickButton("Dashboard");
       expect(state.privy.login).toHaveBeenCalledTimes(1);
       state.privy.authenticated = true;
       Object.assign(state.auth, { walletAddress, apiKey: "merchant-key" });
       await rerender();
-      expect(renderer!.root.findAllByType("header")).toHaveLength(0);
+      const walletMenu = () => renderer!.root.findByType("header").findByProps({ "aria-expanded": false });
+      await act(async () => { walletMenu().props.onClick(); });
       await clickButton("Dashboard");
       expect(state.navigate).toHaveBeenCalledWith("/dashboard");
+      await act(async () => { walletMenu().props.onClick(); });
       await clickButton("Disconnect");
       expect(state.auth.logout).toHaveBeenCalledTimes(1);
     } finally {
