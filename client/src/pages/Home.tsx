@@ -1,4 +1,4 @@
-import { usePrivy } from "@privy-io/react-auth";
+import { useLogin, usePrivy } from "@privy-io/react-auth";
 import { useState, useRef, useCallback, useEffect } from "react";
 import jsQR from "jsqr";
 import { useLocation } from "wouter";
@@ -8,7 +8,7 @@ import { buildPaymentQrValue, requestSignedPaymentUrl, LIVE_PAYMENT_CHAIN_ID, re
 import { applyConversionMinimum, conversionMinimumMessage, getConversionMinimum, isBelowConversionMinimum, loadSeraCurrencies, type SeraCurrency } from "@/lib/currencyCalculator";
 import { buildClientAppUrl, getClientAppPath } from "@/lib/app-url";
 import { QRStyled, QR_STYLES, type QrMode, type QrStyle } from "@/components/QRStyled";
-import { useMerchantProfile } from "@/hooks/use-merchant";
+import { type MerchantProfile, useMerchantProfile } from "@/hooks/use-merchant";
 import { useAuth } from "@/hooks/use-auth";
 import { useSeraApiConfig } from "@/hooks/use-gateway";
 import { useQueryClient } from "@tanstack/react-query";
@@ -494,11 +494,13 @@ function LogoAvatar({
   merchantName,
   apiKey,
   onLogoSaved,
+  onActivate,
 }: {
   logoData: string;
   merchantName: string;
   apiKey: string;
   onLogoSaved: (newLogo: string) => void;
+  onActivate?: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -576,8 +578,9 @@ function LogoAvatar({
     <div style={{ position: "relative", flexShrink: 0 }}>
       <button
         className="logo-avatar-btn"
-        onClick={() => fileInputRef.current?.click()}
-        title="Tap to upload logo"
+        onClick={onActivate ?? (() => fileInputRef.current?.click())}
+        aria-label="Edit store logo"
+        title="Edit store logo"
         style={{
           width: 48, height: 48, borderRadius: "50%",
           border: "2px solid rgba(78,206,154,0.5)",
@@ -609,13 +612,15 @@ function LogoAvatar({
           </div>
         )}
       </button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/png,image/jpeg,image/webp"
-        style={{ display: "none" }}
-        onChange={handleFileChange}
-      />
+      {!onActivate && (
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          style={{ display: "none" }}
+          onChange={handleFileChange}
+        />
+      )}
       {/* Inline error/success tooltip */}
       {(avatarError || avatarSuccess) && (
         <span style={{
@@ -1985,13 +1990,12 @@ export default function Home() {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [copied, setCopied] = useState(false);
   const [qrDownloading, setQrDownloading] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [merchantApiKey, setMerchantApiKey] = useState("");
   const [merchantName, setMerchantName] = useState("");
   // Pass merchantApiKey so the query only fires once the key is loaded from localStorage.
   // This prevents the race condition where the query fires on mount before the key is available,
   // gets a 401, and never retries — causing logo and profile data to disappear on reload.
-  const { data: merchantProfile, isLoading: merchantProfileLoading } = useMerchantProfile(merchantApiKey || undefined);
+  const { data: merchantProfile, isLoading: merchantProfileLoading, isError: profileError, refetch: reloadProfile } = useMerchantProfile(merchantApiKey || undefined);
   const [localLogoData, setLocalLogoData] = useState(""); // optimistic local logo after upload
   // Local QR prefs — wallet-scoped keys, restored lazily after walletAddress is known
   const [localQrFgColor, setLocalQrFgColor] = useState("");
@@ -2027,6 +2031,37 @@ export default function Home() {
     user?.wallet?.address ||
     (user?.linkedAccounts as any[])?.find((a: any) => a.type === "wallet")?.address ||
     "";
+  const owner = authenticated ? authWalletAddress?.toLowerCase() : undefined;
+  const storeProfile = owner && merchantApiKey === dashboardApiKey && merchantProfile?.walletAddress?.toLowerCase() === owner
+    ? merchantProfile : undefined;
+  const displayName = storeProfile?.name?.trim() || "My Store";
+  const [settingsRequest, setSettingsRequest] = useState<{ userId: string; wallet?: string } | null>(null);
+  const editAfterLogin = useRef(false);
+  const { login: signInToEdit } = useLogin({
+    onComplete: ({ user: signedInUser }) => {
+      if (editAfterLogin.current) setSettingsRequest({ userId: signedInUser.id });
+      editAfterLogin.current = false;
+    },
+    onError: () => { editAfterLogin.current = false; },
+  });
+  function editStore() {
+    if (!authenticated) {
+      editAfterLogin.current = true;
+      signInToEdit();
+    } else if (user && owner) {
+      setSettingsRequest({ userId: user.id, wallet: owner });
+      if (profileError) void reloadProfile();
+    }
+  }
+  useEffect(() => {
+    if (!settingsRequest) return;
+    if (settingsRequest.wallet && (settingsRequest.wallet !== owner || settingsRequest.userId !== user?.id)) {
+      setSettingsRequest(null);
+    } else if (!settingsRequest.wallet && settingsRequest.userId === user?.id && owner) {
+      setSettingsRequest({ userId: settingsRequest.userId, wallet: owner });
+    }
+  }, [settingsRequest, owner, user?.id]);
+  const editing = Boolean(owner && settingsRequest?.wallet === owner && settingsRequest.userId === user?.id);
   const receiverAddress = merchantProfile?.storeAddress || merchantProfile?.walletAddress || walletAddress || guestReceiverAddress;
   const qrDisplayCoin = customerCoin ?? selectedCoin;
   const qrDisplayToken = currencies.find((coin) => coin.symbol === qrDisplayCoin?.symbol) ?? null;
@@ -2803,6 +2838,11 @@ export default function Home() {
     setMerchantName(newName);
     if (walletAddress) localStorage.setItem(`serapay_name_${walletAddress}`, newName);
   }, [walletAddress]);
+
+  function updateProfileCache(change: Partial<MerchantProfile>) {
+    queryClient.setQueryData<MerchantProfile>(["/merchant/profile", merchantApiKey], profile =>
+      profile && profile.walletAddress.toLowerCase() === owner ? { ...profile, ...change } : profile);
+  }
 
   // ── Loading splash ─────────────────────────────────────────────────────
   if (!ready && !privyTimedOut) {
@@ -3646,24 +3686,24 @@ export default function Home() {
 
       <div style={{ maxWidth: 520, margin: "0 auto", padding: "24px 16px 40px", minHeight: "calc(100dvh - 58px)", display: "grid", alignContent: "center", boxSizing: "border-box" }}>
         {/* Business name display with circular logo avatar */}
-        {isConnected ? (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, paddingLeft: 4 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {/* Circular logo avatar — tap to upload */}
             <LogoAvatar
-              logoData={localLogoData || merchantProfile?.logoData || ""}
-              merchantName={merchantName}
+              key={owner || "guest"}
+              logoData={isSupportedLogoValue(storeProfile?.logoData) ? storeProfile.logoData : ""}
+              merchantName={displayName}
+              onActivate={storeProfile ? undefined : editStore}
               apiKey={merchantApiKey}
               onLogoSaved={(newLogo) => {
                 setLocalLogoData(newLogo);
+                updateProfileCache({ logoData: newLogo });
                 queryClient.invalidateQueries({ queryKey: ["/merchant/profile"] });
               }}
             />
-            {merchantName && (
-              <p style={{ fontSize: 16, fontWeight: 700, color: "#0A1F1A", margin: 0 }}>{merchantName}</p>
-            )}
+            <p style={{ fontSize: 16, fontWeight: 700, color: "#0A1F1A", margin: 0 }}>{displayName}</p>
           </div>
-          <button onClick={() => setShowSettings(true)} style={{
+          <button onClick={editStore} style={{
             background: "none", border: "none", cursor: "pointer", padding: "2px 6px",
             fontSize: 11, color: "rgba(60,60,67,0.4)", fontWeight: 500,
             display: "flex", alignItems: "center", gap: 4,
@@ -3674,7 +3714,9 @@ export default function Home() {
             Edit
           </button>
         </div>
-        ) : null}
+        {editing && profileError && (
+          <p role="alert">Couldn’t load your store profile. <button type="button" onClick={() => void reloadProfile()}>Retry</button></p>
+        )}
 
         {/* Section label */}
         <p style={{ fontSize: 10, fontWeight: 600, color: "rgba(60,60,67,0.35)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6, paddingLeft: 4 }}>
@@ -4043,15 +4085,16 @@ export default function Home() {
       )}
 
       {/* Settings modal */}
-      {showSettings && (
+      {editing && storeProfile && (
         <SettingsModal
-          onClose={() => setShowSettings(false)}
+          key={owner}
+          onClose={() => setSettingsRequest(null)}
           walletAddress={walletAddress}
           apiKey={merchantApiKey}
-          initialName={merchantName}
-          onNameSaved={handleNameSaved}
-          initialLogo={localLogoData || merchantProfile?.logoData || ""}
-          onLogoSaved={(logo) => { setLocalLogoData(logo); queryClient.invalidateQueries({ queryKey: ["/merchant/profile"] }); }}
+          initialName={displayName}
+          onNameSaved={name => { handleNameSaved(name); updateProfileCache({ name }); }}
+          initialLogo={storeProfile.logoData || ""}
+          onLogoSaved={(logo) => { setLocalLogoData(logo); updateProfileCache({ logoData: logo }); queryClient.invalidateQueries({ queryKey: ["/merchant/profile"] }); }}
           qrFgColor={localQrFgColor || merchantProfile?.qrFgColor || "#000000"}
           qrBgColor={localQrBgColor || merchantProfile?.qrBgColor || "#ffffff"}
           qrStyle={localQrStyle || merchantProfile?.qrStyle || "rounded"}
