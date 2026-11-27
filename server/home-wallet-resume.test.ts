@@ -3,6 +3,8 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
+  editLogin: vi.fn(),
+  editCallbacks: {} as { onComplete?: (event: { user: { id: string } }) => void; onError?: (error: string) => void },
   privy: { authenticated: false, ready: true, user: null as any, login: vi.fn() },
   auth: { apiKey: null as string | null, walletAddress: null as string | null, isLoading: false, error: null, logout: vi.fn(), retry: vi.fn() },
   profile: { data: undefined as any, isLoading: false },
@@ -12,12 +14,18 @@ const state = vi.hoisted(() => ({
   queryClient: { invalidateQueries: vi.fn() },
 }));
 
-vi.mock("@privy-io/react-auth", () => ({ usePrivy: () => state.privy }));
+vi.mock("@privy-io/react-auth", () => ({
+  usePrivy: () => state.privy,
+  useLogin: (callbacks: typeof state.editCallbacks) => {
+    state.editCallbacks = callbacks;
+    return { login: state.editLogin };
+  },
+}));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => state.auth }));
 vi.mock("@/hooks/use-merchant", () => ({ useMerchantProfile: () => state.profile }));
 vi.mock("@/hooks/use-gateway", () => ({ useSeraApiConfig: () => ({ data: { mode: "live" } }) }));
 vi.mock("wagmi", () => ({ useChainId: () => 1 }));
-vi.mock("wouter", () => ({ useLocation: () => ["/", state.navigate] }));
+vi.mock("wouter", () => ({ Link: "a", useLocation: () => ["/", state.navigate] }));
 vi.mock("@tanstack/react-query", () => ({ useQueryClient: () => state.queryClient }));
 vi.mock("@/lib/currencyCalculator", async (importOriginal) => ({
   ...await importOriginal<any>(),
@@ -31,7 +39,6 @@ vi.mock("@/components/QRStyled", () => ({
   QRStyled: (props: any) => React.createElement("div", { "data-qr-value": props.value }),
   QR_STYLES: [{ id: "rounded", label: "Rounded" }],
 }));
-vi.mock("@/components/SeraPayHeader", () => ({ SeraPayHeader: () => React.createElement("header"), SeraLogo: () => null }));
 vi.mock("@/components/NetworkSwitcher", () => ({ NetworkModeButton: () => React.createElement("button", { "aria-label": "Network" }), NetworkSwitcherModal: () => null }));
 vi.mock("@/pages/SeoPages", () => ({ SeoFooter: () => null }));
 
@@ -103,27 +110,80 @@ afterEach(async () => {
 });
 
 describe("Home wallet approval resumes the merchant's QR request", () => {
-  it("keeps the production homepage headerless with guide, network and wallet actions", async () => {
+  it("keeps the network switch and wallet menu in the production homepage header", async () => {
     vi.stubEnv("DEV", false);
     vi.stubEnv("PROD", true);
     try {
       await mount();
-      expect(renderer!.root.findAllByType("header")).toHaveLength(0);
-      expect(renderer!.root.findByProps({ "aria-label": "Network" })).toBeDefined();
+      const header = renderer!.root.findByType("header");
+      expect(header.props.style).toMatchObject({ position: "sticky", top: 0 });
+      expect(header.findByProps({ "aria-label": "Network" })).toBeDefined();
+      expect(renderer!.root.findAllByProps({ "aria-label": "Network" })).toHaveLength(1);
       expect(renderer!.root.findByProps({ href: "/accept/guide" })).toBeDefined();
-      await clickButton("Log in");
+      await clickButton("Dashboard");
       expect(state.privy.login).toHaveBeenCalledTimes(1);
       state.privy.authenticated = true;
       Object.assign(state.auth, { walletAddress, apiKey: "merchant-key" });
       await rerender();
-      expect(renderer!.root.findAllByType("header")).toHaveLength(0);
+      const walletMenu = () => renderer!.root.findByType("header").findByProps({ "aria-expanded": false });
+      await act(async () => { walletMenu().props.onClick(); });
       await clickButton("Dashboard");
       expect(state.navigate).toHaveBeenCalledWith("/dashboard");
+      await act(async () => { walletMenu().props.onClick(); });
       await clickButton("Disconnect");
       expect(state.auth.logout).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it.each(["Edit", "avatar"])("shows the guest profile and resumes %s only for the authenticated store", async (entry) => {
+    const user = { id: "merchant-user", wallet: { address: walletAddress } };
+    const savedLogo = "data:image/png;base64,aGVsbG8=";
+    const store = { walletAddress, name: "Merchant One", logoData: savedLogo };
+    state.profile.data = store;
+    await mount();
+    const avatar = () => renderer!.root.findByProps({ "aria-label": "Edit store logo" });
+    expect(textOf(avatar())).toBe("MS");
+    expect(renderer!.root.findAllByProps({ src: savedLogo })).toHaveLength(0);
+    expect(renderer!.root.findAllByType("p").some(node => textOf(node) === "My Store")).toBe(true);
+    if (entry === "Edit") await clickButton("Edit");
+    else await act(async () => { avatar().props.onClick(); });
+    expect(state.editLogin).toHaveBeenCalledOnce();
+    expect(renderer!.root.findAllByProps({ className: "serapay-settings-name-input" })).toHaveLength(0);
+    state.privy.authenticated = true;
+    state.privy.user = user;
+    Object.assign(state.auth, { walletAddress, apiKey: "merchant-key" });
+    state.profile.data = undefined;
+    state.profile.isLoading = true;
+    await act(async () => { state.editCallbacks.onComplete!({ user }); });
+    await rerender();
+    expect(renderer!.root.findAllByProps({ className: "serapay-settings-name-input" })).toHaveLength(0);
+    Object.assign(state.profile, { data: store, isLoading: false });
+    await rerender();
+    expect(avatar().findByType("img").props.src).toBe(savedLogo);
+    expect(renderer!.root.findByProps({ className: "serapay-settings-name-input" }).props.value).toBe("Merchant One");
+    state.auth.walletAddress = settlementAddress;
+    state.auth.apiKey = "second-merchant-key";
+    await rerender();
+    expect(renderer!.root.findAllByProps({ className: "serapay-settings-name-input" })).toHaveLength(0);
+    expect(textOf(avatar())).toBe("MS");
+    expect(renderer!.root.findAllByProps({ src: savedLogo })).toHaveLength(0);
+  });
+
+  it("discards a canceled guest profile login", async () => {
+    const user = { id: "merchant-user", wallet: { address: walletAddress } };
+    await mount();
+    await clickButton("Edit");
+    await act(async () => { state.editCallbacks.onError!("exited_auth_flow"); });
+    Object.assign(state.privy, { user, authenticated: true });
+    Object.assign(state.auth, { walletAddress, apiKey: "merchant-key" });
+    state.profile.data = { walletAddress, name: "Current merchant" };
+    await act(async () => { state.editCallbacks.onComplete!({ user }); });
+    await rerender();
+    expect(renderer!.root.findAllByProps({ className: "serapay-settings-name-input" })).toHaveLength(0);
+    await clickButton("Edit");
+    expect(renderer!.root.findByProps({ className: "serapay-settings-name-input" }).props.value).toBe("Current merchant");
   });
 
   it("keeps the saved request while the initial currency registry is loading", async () => {
